@@ -34,6 +34,7 @@ export default function LoginPage() {
 
   const handleManual = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (loading) return; // ignore repeated clicks while a sign-in is in flight
     setError("");
     if (!email.trim() || !password) {
       setError(t("auth.invalidCredentials"));
@@ -45,9 +46,9 @@ export default function LoginPage() {
       email: email.trim(),
       password,
     });
-    setLoading(false);
 
     if (signInError || !data.user) {
+      setLoading(false);
       setError(t("auth.invalidCredentials"));
       return;
     }
@@ -59,6 +60,7 @@ export default function LoginPage() {
       .single();
 
     if (!profile) {
+      setLoading(false);
       setError(t("auth.invalidCredentials"));
       return;
     }
@@ -71,7 +73,10 @@ export default function LoginPage() {
       role: profile.role,
       entityId: data.user.id,
     });
-    router.push(roleHome(profile.role));
+    // Keep `loading` true: the button stays disabled until the redirect below
+    // unmounts this page, instead of re-enabling mid-flight and inviting a
+    // second click.
+    router.replace(roleHome(profile.role));
   };
 
   return (
@@ -169,6 +174,7 @@ function CreateAdminModal({ open, onClose }: { open: boolean; onClose: () => voi
   const [loading, setLoading] = useState(false);
 
   const handleCreate = async () => {
+    if (loading) return;
     if (!name.trim() || !email.trim() || password.length < 6) {
       setError("Nom, email et mot de passe (6 caractères min.) requis.");
       return;
@@ -196,9 +202,9 @@ function CreateAdminModal({ open, onClose }: { open: boolean; onClose: () => voi
       email: email.trim(),
       password,
     });
-    setLoading(false);
 
     if (signInError || !data.user) {
+      setLoading(false);
       setError("Compte créé, mais la connexion automatique a échoué. Connectez-vous manuellement.");
       return;
     }
@@ -212,7 +218,8 @@ function CreateAdminModal({ open, onClose }: { open: boolean; onClose: () => voi
       entityId: data.user.id,
     });
     onClose();
-    router.push(roleHome("admin"));
+    // Keep `loading` true until the redirect unmounts the modal.
+    router.replace(roleHome("admin"));
   };
 
   return (

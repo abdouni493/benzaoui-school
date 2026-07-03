@@ -506,19 +506,34 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, studentId: student.id, messageKey: "scan.noSession" };
     }
 
-    // Sort candidate sessions by absolute distance in minutes to current time
+    const getMinutes = (timeStr: string) => {
+      const [h, m] = timeStr.split(":").map(Number);
+      return h * 60 + m;
+    };
     const scanMinutes = when.getHours() * 60 + when.getMinutes();
-    candidateSessions.sort((a, b) => {
-      const getMinutes = (timeStr: string) => {
-        const [h, m] = timeStr.split(":").map(Number);
-        return h * 60 + m;
-      };
+
+    // The scan must also fall inside one of those sessions' time slots
+    // (small early margin for arrivals). A scan on the right day but hours
+    // away from the séance is rejected: no presence, no deduction.
+    const EARLY_MARGIN_MINUTES = 30;
+    const inWindowSessions = candidateSessions.filter((se) => {
+      const start = getMinutes(se.startTime);
+      const end = getMinutes(se.endTime);
+      return scanMinutes >= start - EARLY_MARGIN_MINUTES && scanMinutes <= end;
+    });
+
+    if (inWindowSessions.length === 0) {
+      return { ok: false, studentId: student.id, messageKey: "scan.noSession" };
+    }
+
+    // Closest session start wins if two windows overlap
+    inWindowSessions.sort((a, b) => {
       const diffA = Math.abs(getMinutes(a.startTime) - scanMinutes);
       const diffB = Math.abs(getMinutes(b.startTime) - scanMinutes);
       return diffA - diffB;
     });
 
-    const matchedSession = candidateSessions[0];
+    const matchedSession = inWindowSessions[0];
 
     // Check if there is already an attendance record for this student and session today (local calendar day)
     const todayStr = when.toLocaleDateString("fr-CA"); // YYYY-MM-DD

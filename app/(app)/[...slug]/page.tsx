@@ -1,89 +1,27 @@
-"use client";
+import { ModuleDispatcher } from "@/components/ModuleDispatcher";
+import { NAV_BY_ROLE } from "@/lib/nav";
 
-import React from "react";
-import { useSession } from "@/lib/store/session";
-import { ClassesPage } from "@/components/pages/ClassesPage";
-import { PlannerPage } from "@/components/pages/PlannerPage";
-import { SubscriptionsPage } from "@/components/pages/SubscriptionsPage";
-import { StudentsPage } from "@/components/pages/StudentsPage";
-import { AttendancePage } from "@/components/pages/AttendancePage";
-import { TeachersPage } from "@/components/pages/TeachersPage";
-import { SubjectsPage } from "@/components/pages/SubjectsPage";
-import { AdministrationPage } from "@/components/pages/AdministrationPage";
-import { IndependentPage } from "@/components/pages/IndependentPage";
-import { ParentsPage } from "@/components/pages/ParentsPage";
-import { AnnouncementsPage } from "@/components/pages/AnnouncementsPage";
-import { ExpensesPage } from "@/components/pages/ExpensesPage";
-import { AnalyticsPage } from "@/components/pages/AnalyticsPage";
-import { CashPage } from "@/components/pages/CashPage";
-import { ReportsPage } from "@/components/pages/ReportsPage";
-import { SettingsPage } from "@/components/pages/SettingsPage";
-import { StudentPages } from "@/components/pages/StudentPages";
-import { TeacherPages } from "@/components/pages/TeacherPages";
-import { ParentPages } from "@/components/pages/ParentPages";
-import { ModulePlaceholder } from "@/components/ModulePlaceholder";
+/** Prerender every known module route at build time so sidebar clicks are
+ *  served (and prefetched) from the static cache instead of waiting on a
+ *  server round-trip — this is what made navigation feel like it needed two
+ *  clicks. Unknown slugs still render on demand (ModulePlaceholder). */
+export function generateStaticParams() {
+  const slugs = new Set<string>();
+  for (const items of Object.values(NAV_BY_ROLE)) {
+    for (const item of items) {
+      if (item.action === "logout") continue;
+      const slug = item.href.replace(/^\//, "");
+      if (slug && slug !== "dashboard") slugs.add(slug);
+    }
+  }
+  return [...slugs].map((s) => ({ slug: [s] }));
+}
 
-export default function ModuleCatchAll({
+export default async function ModuleCatchAll({
   params,
 }: {
-  params: any;
+  params: Promise<{ slug: string[] }>;
 }) {
-  const { user } = useSession();
-  const unwrappedParams = React.use(params) as { slug: string[] };
-  const pageSlug = unwrappedParams.slug[0];
-
-  const role = user?.role || "admin";
-
-  // 1. Student Portal Routing
-  if (role === "student") {
-    return <StudentPages slug={pageSlug} />;
-  }
-
-  // 2. Teacher Portal Routing
-  if (role === "teacher") {
-    return <TeacherPages slug={pageSlug} />;
-  }
-
-  // 3. Parent Portal Routing
-  if (role === "parent") {
-    return <ParentPages slug={pageSlug} />;
-  }
-
-  // 4. Admin / Reception Portal Routing
-  switch (pageSlug) {
-    case "classes":
-      return <ClassesPage />;
-    case "planner":
-      return <PlannerPage />;
-    case "subscriptions":
-      return <SubscriptionsPage />;
-    case "students":
-      return <StudentsPage />;
-    case "attendance":
-      return <AttendancePage />;
-    case "teachers":
-      return <TeachersPage />;
-    case "subjects":
-      return <SubjectsPage />;
-    case "administration":
-      return <AdministrationPage />;
-    case "independent":
-      return <IndependentPage />;
-    case "parents":
-      return <ParentsPage />;
-    case "announcements":
-      return <AnnouncementsPage />;
-    case "expenses":
-      return <ExpensesPage />;
-    case "analytics":
-      return <AnalyticsPage />;
-    case "cash":
-      return <CashPage />;
-    case "reports":
-      return <ReportsPage />;
-    case "settings":
-      return <SettingsPage />;
-    default:
-      return <ModulePlaceholder href={`/${unwrappedParams.slug.join("/")}`} />;
-  }
+  const { slug } = await params;
+  return <ModuleDispatcher slug={slug} />;
 }

@@ -48,7 +48,7 @@ async function loadSessionUser(userId: string, email: string | null): Promise<Se
   };
 }
 
-export const useSession = create<SessionState>((set) => ({
+export const useSession = create<SessionState>((set, get) => ({
   user: null,
   hydrated: false,
 
@@ -77,13 +77,22 @@ export const useSession = create<SessionState>((set) => ({
 
     if (!listenerAttached) {
       listenerAttached = true;
-      supabase.auth.onAuthStateChange(async (event, changedSession) => {
+      // Keep this callback synchronous: awaiting Supabase queries inside
+      // onAuthStateChange can deadlock the auth token lock (documented
+      // supabase-js pitfall), which showed up as sign-ins hanging until a
+      // second click. Defer any fetch to the next tick instead.
+      supabase.auth.onAuthStateChange((event, changedSession) => {
         if (event === "SIGNED_OUT" || !changedSession) {
           set({ user: null });
           return;
         }
-        const user = await loadSessionUser(changedSession.user.id, changedSession.user.email ?? null);
-        set({ user });
+        // Same user already loaded (e.g. TOKEN_REFRESHED, or login() already
+        // populated it) — skip the redundant profile fetch and state churn.
+        if (get().user?.id === changedSession.user.id) return;
+        setTimeout(async () => {
+          const user = await loadSessionUser(changedSession.user.id, changedSession.user.email ?? null);
+          set({ user });
+        }, 0);
       });
     }
   },
