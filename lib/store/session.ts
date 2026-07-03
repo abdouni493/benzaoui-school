@@ -52,7 +52,11 @@ export const useSession = create<SessionState>((set, get) => ({
   user: null,
   hydrated: false,
 
-  login: (user) => set({ user }),
+  // An explicit sign-in means the session is known — mark it hydrated too so
+  // the AppShell guard (which renders `null` until `hydrated && user`) never
+  // blanks the freshly-navigated dashboard while `initSession` is still in
+  // flight. This is what made login sometimes need a second click/refresh.
+  login: (user) => set({ user, hydrated: true }),
 
   logout: async () => {
     const supabase = createClient();

@@ -168,6 +168,8 @@ export const fr = {
     success: "Présence enregistrée",
     successLate: "Présence enregistrée (en retard)",
     noSession: "Aucune séance correspondante à cette heure",
+    noSessionToday: "Aucune séance prévue pour cet élève aujourd'hui",
+    noSessionNow: "Ce n'est pas l'heure de la séance de cet élève",
     notFound: "Carte introuvable",
     deducted: "Déduit",
     newBalance: "Nouveau solde",

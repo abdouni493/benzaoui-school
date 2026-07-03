@@ -68,13 +68,20 @@ export function GlobalRFIDListener() {
           autoSentAlert,
         });
       } else {
-        // Show failure toast
+        // Show failure toast — surface the exact reason so reception sees why
+        // the card was rejected (wrong day vs wrong time vs unknown card).
+        const failureMessages: Record<string, string> = {
+          "scan.notFound": "Carte RFID introuvable ou non associée.",
+          "scan.noSessionToday": "Aucune séance prévue pour cet élève aujourd'hui.",
+          "scan.noSessionNow": "Ce n'est pas l'heure de la séance de cet élève.",
+          "scan.noSession": "Aucune séance active trouvée pour cet élève en ce moment.",
+        };
         addToast({
           type: "danger",
           title: "Échec du Scan",
-          message: result.messageKey === "scan.notFound"
-            ? "Carte RFID introuvable ou non associée."
-            : "Aucune séance active trouvée pour cet élève en ce moment.",
+          message:
+            failureMessages[result.messageKey] ??
+            "Aucune séance active trouvée pour cet élève en ce moment.",
           studentName: student ? studentName(student) : undefined,
         });
       }

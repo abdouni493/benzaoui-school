@@ -502,8 +502,11 @@ export const useData = create<DataStore>((set, get) => ({
       return !!sub;
     });
 
+    // No séance is scheduled for this student on this weekday at all: the card
+    // was scanned on a day the student has no course. Reject with a clear
+    // "no séance for this student today" message — nothing is recorded.
     if (candidateSessions.length === 0) {
-      return { ok: false, studentId: student.id, messageKey: "scan.noSession" };
+      return { ok: false, studentId: student.id, messageKey: "scan.noSessionToday" };
     }
 
     const getMinutes = (timeStr: string) => {
@@ -522,8 +525,11 @@ export const useData = create<DataStore>((set, get) => ({
       return scanMinutes >= start - EARLY_MARGIN_MINUTES && scanMinutes <= end;
     });
 
+    // The student does have a séance today, but the scan happened outside its
+    // time slot (too early beyond the margin, or after it ended): it is not
+    // the student's séance time. Reject — no presence, no deduction.
     if (inWindowSessions.length === 0) {
-      return { ok: false, studentId: student.id, messageKey: "scan.noSession" };
+      return { ok: false, studentId: student.id, messageKey: "scan.noSessionNow" };
     }
 
     // Closest session start wins if two windows overlap

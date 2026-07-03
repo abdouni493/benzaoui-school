@@ -170,6 +170,8 @@ export const ar: Dictionary = {
     success: "تم تسجيل الحضور",
     successLate: "تم تسجيل الحضور (متأخر)",
     noSession: "لا توجد حصة مطابقة في هذا الوقت",
+    noSessionToday: "لا توجد حصة مقررة لهذا الطالب اليوم",
+    noSessionNow: "ليس هذا وقت حصة هذا الطالب",
     notFound: "البطاقة غير موجودة",
     deducted: "المخصوم",
     newBalance: "الرصيد الحالي",
