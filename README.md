@@ -1,36 +1,38 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# BENZAOUI SCHOOL — Gestion d'école privée
 
-## Getting Started
+Application de gestion d'école privée (Next.js App Router + TypeScript + Tailwind + Supabase) :
+abonnements (cours & formations), présence par carte RFID, soldes et paiements des étudiants,
+paie des enseignants, caisse, dépenses, rapports financiers, annonces, 5 rôles
+(admin / réception / enseignant / étudiant / parent), thèmes clair/sombre et FR/AR (RTL).
 
-First, run the development server:
+## Stack
+
+- **Next.js 16** (App Router, Turbopack) — pages dans `app/`, contenu des modules dans `components/pages/`
+- **Supabase** — Postgres + Auth + Storage + RLS (`supabase/schema.sql`)
+- **Zustand** — store client (`lib/store/`), mappé sur les tables Postgres (`lib/store/data.ts`)
+
+## Développement local
 
 ```bash
+npm install
+cp .env.example .env.local   # puis remplir les 3 variables
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Base de données
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. Créer un projet Supabase, puis exécuter `supabase/schema.sql` dans **Dashboard → SQL Editor**.
+2. Exécuter ensuite chaque fichier de `supabase/migrations/` (dans l'ordre des dates).
+3. Créer le premier compte admin depuis la page de connexion (« Créer un compte admin »).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Déploiement sur Vercel
 
-## Learn More
+1. Importer ce dépôt sur [vercel.com/new](https://vercel.com/new) (framework détecté : Next.js, aucun réglage build à changer).
+2. Dans **Project Settings → Environment Variables**, ajouter :
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - `SUPABASE_SERVICE_ROLE_KEY` (secret — requis par `/api/admin/users` pour créer les comptes)
+3. Déployer. Dans Supabase, ajouter l'URL Vercel aux **Auth → URL Configuration → Site URL / Redirect URLs**.
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Le favicon et le logo affichés dans l'application suivent le logo téléversé dans **Paramètres** ;
+les fichiers statiques `app/icon.png` / `app/favicon.ico` servent de secours avant le chargement.

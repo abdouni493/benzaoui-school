@@ -1,26 +1,335 @@
 @import "tailwindcss";
 
+/* Override Tailwind CSS v4's dark mode variant to align with our data-theme state */
+@custom-variant dark (&:where([data-theme="dark-red"], [data-theme="dark-red"] *, .dark, .dark *));
+
+/* ============================================================
+   École Privée — Design tokens
+   Two runtime-switchable themes: Purple (default) & Dark Red.
+   Source of truth = CSS custom properties below.
+   These are exposed to Tailwind via @theme inline so utilities
+   like `bg-primary`, `text-ink`, `border-line` resolve to the
+   live var() and therefore react to theme switching.
+   ============================================================ */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* ---- Purple theme (default, light mode) ---- */
+  --primary: #7c3aed;       /* vibrant violet/purple */
+  --primary-600: #6d28d9;   /* slightly deeper */
+  --primary-700: #5b21b6;   /* rich indigo-purple */
+  --primary-750: #4c1d95;   /* deep purple */
+  --primary-50: #f5f3ff;    /* soft violet background tint */
+
+  --success: #10b981;       /* emerald green */
+  --warning: #f59e0b;       /* amber gold */
+  --danger: #ef4444;        /* red */
+
+  --text-strong: #1e1b4b;   /* very deep indigo-slate, high contrast */
+  --text-muted: #5c567a;    /* purple-tinted slate for secondary text */
+  --border: #e8e6f4;        /* soft lavender-gray borders */
+  --bg-app: #f9f8ff;        /* clean, bright lavender-white app background */
+  --surface: #ffffff;       /* clean white surface cards */
+
+  /* Nice purple degradation gradients for buttons and highlights */
+  --gradient-primary: linear-gradient(135deg, #a855f7 0%, #7c3aed 50%, #5b21b6 100%);
+  --gradient-success: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+  --gradient-warning: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+  --gradient-danger: linear-gradient(135deg, #f87171 0%, #ef4444 100%);
+  --gradient-card: linear-gradient(160deg, #ffffff 0%, #f5f3ff 100%);
+  
+  /* Sidebar styles: lighting (light) background in light mode */
+  --bg-sidebar: #ffffff;
+  --text-sidebar: #1e1b4b;
+  --text-sidebar-muted: #6b7280;
+  --border-sidebar: #e8e6f4;
+  --hover-sidebar-bg: #f5f3ff;
+  --sidebar-logo-bg: #f5f3ff;
+  --sidebar-logo-color: #7c3aed;
+
+  --ring: rgba(124, 58, 237, 0.2);
+  --shadow-color: 124 58 237;
 }
 
+[data-theme="dark-red"] {
+  /* ---- Dark Red theme (Premium Maroon/Burgundy) ---- */
+  --primary: #9f1239;       /* Dark Crimson/Burgundy */
+  --primary-600: #881237;   /* Deeper Crimson */
+  --primary-700: #5c051a;   /* Rich Burgundy */
+  --primary-750: #4c0519;   /* Deep Wine/Maroon */
+  --primary-50: #27030c;    /* Soft Burgundy shadow tint for hover */
+
+  --success: #166534;       /* Deep Forest Green (toned down) */
+  --warning: #854d0e;       /* Deep Amber/Bronze */
+  --danger: #9f1239;        /* Rich Dark Red */
+
+  --text-strong: #ffe4e6;   /* Rose-white (highly readable, high contrast) */
+  --text-muted: #cca3a8;    /* Soft Lavender-Rose-Grey */
+  --border: #2e050d;        /* Deep Crimson Border */
+  --bg-app: #090002;        /* Near-black Crimson Dark background */
+  --surface: #140206;       /* Deep warm Burgundy surface card background */
+
+  /* Degradation of colors (Gradients) */
+  --gradient-primary: linear-gradient(135deg, #be123c 0%, #881237 50%, #4c0519 100%);
+  --gradient-success: linear-gradient(135deg, #14532d 0%, #064e3b 100%);
+  --gradient-warning: linear-gradient(135deg, #7c2d12 0%, #431407 100%);
+  --gradient-danger: linear-gradient(135deg, #9f1239 0%, #5c051a 100%);
+  --gradient-card: linear-gradient(165deg, #1d0309 0%, #0a0002 100%);
+
+  /* Sidebar styles: dark crimson background in dark mode */
+  --bg-sidebar: #140206;
+  --text-sidebar: #ffe4e6;
+  --text-sidebar-muted: #cca3a8;
+  --border-sidebar: #2e050d;
+  --hover-sidebar-bg: #27030c;
+  --sidebar-logo-bg: rgba(255, 255, 255, 0.1);
+  --sidebar-logo-color: #ffffff;
+
+  --ring: rgba(159, 18, 57, 0.4);
+  --shadow-color: 159 18 57;
+}
+
+/* Map domain tokens to Tailwind's color namespace (inline = live var). */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-600: var(--primary-600);
+  --color-primary-700: var(--primary-700);
+  --color-primary-750: var(--primary-750);
+  --color-primary-50: var(--primary-50);
+
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+
+  --color-ink: var(--text-strong);
+  --color-muted: var(--text-muted);
+  --color-line: var(--border);
+  --color-canvas: var(--bg-app);
+  --color-surface: var(--surface);
+
+  /* Sidebar color mapping */
+  --color-sidebar-bg: var(--bg-sidebar);
+  --color-sidebar-text: var(--text-sidebar);
+  --color-sidebar-muted: var(--text-sidebar-muted);
+  --color-sidebar-border: var(--border-sidebar);
+  --color-sidebar-hover: var(--hover-sidebar-bg);
+  --color-sidebar-logo-bg: var(--sidebar-logo-bg);
+  --color-sidebar-logo-color: var(--sidebar-logo-color);
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-arabic: var(--font-arabic);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ---- Gradient utility classes (referenced across the app) ---- */
+.bg-gradient-primary {
+  background-image: var(--gradient-primary);
+}
+.bg-gradient-success {
+  background-image: var(--gradient-success);
+}
+.bg-gradient-warning {
+  background-image: var(--gradient-warning);
+}
+.bg-gradient-danger {
+  background-image: var(--gradient-danger);
+}
+.bg-gradient-card {
+  background-image: var(--gradient-card);
+}
+.bg-gradient-sidebar {
+  background-image: var(--gradient-sidebar);
+}
+
+/* Text gradient helper for headings / brand. */
+.text-gradient-primary {
+  background-image: var(--gradient-primary);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---- Base ---- */
+html {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100%;
+  background-color: var(--bg-app);
+  color: var(--text-strong);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* Arabic locale uses an Arabic-friendly font stack. */
+html[lang="ar"] body {
+  font-family: var(--font-arabic), "Segoe UI", Tahoma, sans-serif;
+}
+
+/* Smooth color crossfade when toggling themes. Scoped to color-ish
+   properties so we don't animate layout/transform on hover states. */
+body,
+.theme-fade {
+  transition:
+    background-color 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+    color 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ---- Modernized custom scrollbars ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  transition: background-color 0.2s ease;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--primary);
+}
+
+/* ---- Reusable elevation / surface helpers ---- */
+.card-shadow {
+  box-shadow: 0 1px 3px rgba(var(--shadow-color) / 0.08),
+    0 8px 24px -12px rgba(var(--shadow-color) / 0.3);
+  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 0.3s ease;
+}
+.card-shadow-lg {
+  box-shadow: 0 16px 48px -12px rgba(var(--shadow-color) / 0.45),
+              0 0 20px 1px rgba(var(--shadow-color) / 0.1);
+}
+
+/* Card interactive lift and glow effect */
+.card-interactive {
+  transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 0.3s ease,
+              background-color 0.3s ease;
+}
+.card-interactive:hover {
+  transform: translateY(-4px);
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  box-shadow: 0 16px 36px -12px rgba(var(--shadow-color) / 0.55),
+              0 0 20px 2px rgba(var(--shadow-color) / 0.15);
+}
+
+/* Form inputs rich hover & focus animations */
+input, select, textarea {
+  transition: border-color 0.25s cubic-bezier(0.16, 1, 0.3, 1), 
+              box-shadow 0.25s cubic-bezier(0.16, 1, 0.3, 1), 
+              background-color 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+input:hover, select:hover, textarea:hover {
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--border));
+}
+input:focus, select:focus, textarea:focus {
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 3px var(--ring) !important;
+}
+
+/* Subtle accent pulsate glow keyframe */
+@keyframes pulse-accent {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(var(--shadow-color) / 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(var(--shadow-color) / 0);
+  }
+}
+.pulse-glow {
+  animation: pulse-accent 2s infinite ease-in-out;
+}
+
+/* Sidebar active item styling */
+.sidebar-active-pill {
+  background-color: color-mix(in srgb, var(--primary) 30%, transparent);
+  border: 1.5px solid color-mix(in srgb, var(--primary) 25%, transparent);
+  box-shadow: 0 4px 14px rgba(var(--shadow-color) / 0.2);
+}
+
+/* ---- Login screen: animated red frame around the logo + red gradient name ----
+   Brand accent only — intentionally red in both themes, not tied to --primary
+   (which is purple in the light theme). */
+@keyframes login-red-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes login-logo-glow {
+  0%, 100% {
+    box-shadow: 0 0 16px -2px rgba(220, 38, 38, 0.25), 0 4px 20px -2px rgba(0, 0, 0, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 28px 2px rgba(220, 38, 38, 0.55), 0 4px 20px -2px rgba(0, 0, 0, 0.1);
+  }
+}
+
+.login-logo-frame {
+  position: relative;
+  padding: 3px;
+  border-radius: 1.5rem;
+  background: linear-gradient(
+    90deg,
+    #991b1b,
+    #dc2626,
+    #ef4444,
+    #f87171,
+    #ef4444,
+    #dc2626,
+    #991b1b
+  );
+  background-size: 200% auto;
+  animation: 
+    login-red-flow 4s ease-in-out infinite,
+    login-logo-glow 3s ease-in-out infinite;
+}
+
+.login-name-gradient {
+  background-image: linear-gradient(
+    90deg,
+    #991b1b,
+    #dc2626,
+    #ef4444,
+    #f87171,
+    #ef4444,
+    #dc2626,
+    #991b1b
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: login-red-flow 4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-logo-frame,
+  .login-name-gradient {
+    animation: none !important;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
 }
