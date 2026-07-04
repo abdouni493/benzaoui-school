@@ -30,13 +30,10 @@ export function LanguageSwitcher({ className }: { className?: string }) {
             aria-checked={active}
             onClick={() => setLanguage(opt.value)}
             className={cn(
-              "relative z-10 h-7 w-9 rounded-full text-sm font-semibold transition-colors cursor-pointer",
-              active ? "text-white" : "text-muted hover:text-ink",
+              "relative z-10 h-7 w-9 rounded-full text-sm font-semibold transition-all duration-200 cursor-pointer",
+              active ? "bg-gradient-primary text-white" : "text-muted hover:text-ink",
             )}
           >
-            {active && (
-              <span className="absolute inset-0 -z-10 rounded-full bg-gradient-primary" />
-            )}
             {opt.label}
           </button>
         );

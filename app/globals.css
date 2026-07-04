@@ -333,3 +333,19 @@ input:focus, select:focus, textarea:focus {
     display: none !important;
   }
 }
+
+/* Custom page transition animation to replace Framer Motion keying */
+@keyframes page-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-page-fade {
+  animation: page-fade-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}

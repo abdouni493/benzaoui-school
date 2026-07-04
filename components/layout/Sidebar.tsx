@@ -59,13 +59,6 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           const active = item.action !== "logout" && isActive(pathname, item.href);
           const content = (
             <>
-              {active && (
-                // Plain CSS highlight (no framer `layoutId`): shared-layout
-                // projection was detaching this node during route-change
-                // unmounts and crashing React's commit with
-                // "Cannot read properties of null (reading 'removeChild')".
-                <span className="absolute inset-0 -z-10 rounded-xl bg-gradient-primary shadow-md shadow-primary/15" />
-              )}
               <span className="text-lg leading-none">{item.emoji}</span>
               <span className="truncate">{t(`nav.${item.key}`)}</span>
             </>
@@ -73,7 +66,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 
           const classes = cn(
             "relative z-0 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 cursor-pointer select-none",
-            active ? "text-white font-semibold" : "text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-text",
+            active 
+              ? "bg-gradient-primary shadow-md shadow-primary/15 text-white font-semibold" 
+              : "text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-text",
           );
 
           if (item.action === "logout") {

@@ -1,28 +1,22 @@
 "use client";
 
-import { usePathname } from "next/navigation";
-import { motion } from "framer-motion";
-
-/** Animates each route as it mounts. We deliberately do NOT use
- *  `AnimatePresence mode="wait"` here: with the App Router's client-side
- *  transitions, waiting for the outgoing page's exit animation can leave the
- *  swap "stuck" (its `onExitComplete` never fires), which showed up as
- *  navigation that only worked on the second click or after a refresh.
- *  Keying a plain `motion.div` on the pathname makes React unmount the old
- *  page and mount the new one immediately — the content is swapped instantly
- *  and simply fades in, never blocking the navigation. */
+/** Simple wrapper that applies an entry animation to each page.
+ *  
+ *  ⚠️  DO NOT use `key={pathname}` here. Changing the key forces React to
+ *  destroy and re-create the entire subtree on every navigation. During the
+ *  destruction phase, deeply nested components (modals, framer-motion nodes)
+ *  try to call removeChild on DOM nodes that their parent already removed,
+ *  causing the infamous `Cannot read properties of null ('removeChild')` crash.
+ *  That crash corrupts React's reconciler and makes subsequent state updates
+ *  (like opening the sidebar) silently fail.
+ *
+ *  Instead we just apply a CSS animation on the wrapper. Next.js App Router
+ *  already handles swapping the {children} content on navigation — there is
+ *  no need for us to force a remount via key. */
 export function PageTransition({ children }: { children: React.ReactNode }) {
-  const pathname = usePathname();
-
   return (
-    <motion.div
-      key={pathname}
-      initial={{ opacity: 0, y: 12 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-      className="h-full"
-    >
+    <div className="h-full animate-page-fade">
       {children}
-    </motion.div>
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { AnimatePresence, motion } from "framer-motion";
+import { motion } from "framer-motion";
 import { useData, uid } from "@/lib/store/data";
 import { useSettings } from "@/lib/store/settings";
 import { useToast, type Toast } from "@/lib/store/toast";
@@ -143,11 +143,9 @@ export function GlobalRFIDListener() {
 
   return (
     <div className="fixed bottom-5 right-5 z-50 space-y-3 w-96 max-w-[calc(100vw-40px)] no-print pointer-events-none">
-      <AnimatePresence>
-        {toasts.map((t) => (
-          <ToastCard key={t.id} toast={t} onClose={() => removeToast(t.id)} />
-        ))}
-      </AnimatePresence>
+      {toasts.map((t) => (
+        <ToastCard key={t.id} toast={t} onClose={() => removeToast(t.id)} />
+      ))}
     </div>
   );
 }
@@ -182,7 +180,6 @@ function ToastCard({ toast, onClose }: { toast: Toast; onClose: () => void }) {
     <motion.div
       initial={{ opacity: 0, y: 30, scale: 0.9 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.85, transition: { duration: 0.2 } }}
       className={`pointer-events-auto relative overflow-hidden rounded-2xl border p-4 shadow-2xl flex gap-3 theme-fade ${style.bg}`}
     >
       {/* Side highlight border strip */}

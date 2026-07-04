@@ -32,17 +32,15 @@ export function ThemeToggle({ className }: { className?: string }) {
             aria-checked={active}
             title={t(opt.labelKey)}
             onClick={() => setTheme(opt.value)}
-            className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full cursor-pointer"
-          >
-            {active && (
-              <span
-                className="absolute inset-0 -z-10 rounded-full border-2 border-white/70 card-shadow"
-                style={{ backgroundColor: opt.swatch }}
-              />
+            className={cn(
+              "relative z-10 flex h-7 w-7 items-center justify-center rounded-full cursor-pointer transition-all duration-200",
+              active && "border-2 border-white/70 card-shadow"
             )}
+            style={active ? { backgroundColor: opt.swatch } : undefined}
+          >
             <span
               className={cn(
-                "h-3.5 w-3.5 rounded-full ring-1 ring-black/10",
+                "h-3.5 w-3.5 rounded-full ring-1 ring-black/10 transition-all duration-200",
                 active && "ring-white/60",
               )}
               style={{ backgroundColor: active ? "#fff" : opt.swatch }}

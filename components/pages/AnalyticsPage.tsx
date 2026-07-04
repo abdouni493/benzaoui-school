@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useMemo, useState, type ReactNode } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { useData } from "@/lib/store/data";
 import { Button } from "@/components/ui/Button";
 import { Input, Select } from "@/components/ui/SearchInput";
@@ -539,7 +539,6 @@ function AnalyticCard({
     <motion.div
       initial={{ opacity: 0, y: 22, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -10, scale: 0.97 }}
       transition={{ duration: 0.35, delay: index * 0.06, ease: [0.22, 1, 0.36, 1] }}
       className="group relative h-full overflow-hidden rounded-3xl border border-line bg-surface card-shadow card-interactive"
     >
@@ -620,26 +619,23 @@ function AnalyticCard({
           </motion.span>
         </button>
 
-        <AnimatePresence initial={false}>
-          {open && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-              className="overflow-hidden"
-            >
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <DetailRow icon={<UserCheck className="h-3.5 w-3.5 text-success" />} label="Présences validées" value={stat.present + stat.late} />
-                <DetailRow icon={<Clock className="h-3.5 w-3.5 text-warning" />} label="Retards" value={stat.late} />
-                <DetailRow icon={<Users className="h-3.5 w-3.5 text-primary" />} label="Élèves distincts vus" value={stat.studentsSeen} />
-                <DetailRow icon={<CalendarDays className="h-3.5 w-3.5 text-muted" />} label="Pic d'affluence" value={`${peak} (${peakLabel})`} />
-                <DetailRow icon={<TrendingUp className="h-3.5 w-3.5 text-primary" />} label="Moyenne / intervalle" value={avg} />
-                <DetailRow icon={<Activity className="h-3.5 w-3.5" style={{ color: accent }} />} label="Taux de présence" value={`${rate}%`} />
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <DetailRow icon={<UserCheck className="h-3.5 w-3.5 text-success" />} label="Présences validées" value={stat.present + stat.late} />
+              <DetailRow icon={<Clock className="h-3.5 w-3.5 text-warning" />} label="Retards" value={stat.late} />
+              <DetailRow icon={<Users className="h-3.5 w-3.5 text-primary" />} label="Élèves distincts vus" value={stat.studentsSeen} />
+              <DetailRow icon={<CalendarDays className="h-3.5 w-3.5 text-muted" />} label="Pic d'affluence" value={`${peak} (${peakLabel})`} />
+              <DetailRow icon={<TrendingUp className="h-3.5 w-3.5 text-primary" />} label="Moyenne / intervalle" value={avg} />
+              <DetailRow icon={<Activity className="h-3.5 w-3.5" style={{ color: accent }} />} label="Taux de présence" value={`${rate}%`} />
+            </div>
+          </motion.div>
+        )}
       </div>
     </motion.div>
   );
@@ -877,18 +873,16 @@ export function AnalyticsPage() {
             />
           ) : (
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 xl:grid-cols-3">
-              <AnimatePresence>
-                {activeList.map((s, i) => (
-                  <AnalyticCard
-                    key={s.id}
-                    stat={s}
-                    index={i}
-                    accent={PALETTE[i % PALETTE.length]}
-                    kind={tab === "classes" ? "class" : "teacher"}
-                    onPrint={() => printOne(s, PALETTE[i % PALETTE.length], tab === "classes" ? "class" : "teacher")}
-                  />
-                ))}
-              </AnimatePresence>
+              {activeList.map((s, i) => (
+                <AnalyticCard
+                  key={s.id}
+                  stat={s}
+                  index={i}
+                  accent={PALETTE[i % PALETTE.length]}
+                  kind={tab === "classes" ? "class" : "teacher"}
+                  onPrint={() => printOne(s, PALETTE[i % PALETTE.length], tab === "classes" ? "class" : "teacher")}
+                />
+              ))}
             </div>
           )}
 
@@ -955,13 +949,10 @@ function TabButton({
   return (
     <button
       onClick={onClick}
-      className={`relative flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-colors ${
-        active ? "text-white" : "text-muted hover:text-ink"
+      className={`relative flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-all duration-200 ${
+        active ? "bg-gradient-primary text-white shadow-sm" : "text-muted hover:text-ink"
       }`}
     >
-      {active && (
-        <span className="absolute inset-0 rounded-xl bg-gradient-primary" />
-      )}
       <span className="relative flex items-center gap-2">
         {icon}
         {children}

@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { AnimatePresence, motion } from "framer-motion";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { PageTransition } from "./PageTransition";
@@ -37,28 +36,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
 
       {/* Mobile drawer */}
-      <AnimatePresence>
-        {mobileOpen && (
-          <>
-            <motion.div
-              className="fixed inset-0 z-40 bg-black/40 lg:hidden"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setMobileOpen(false)}
-            />
-            <motion.div
-              className="fixed inset-y-0 z-50 lg:hidden ltr:left-0 rtl:right-0"
-              initial={{ x: isRTL ? "100%" : "-100%" }}
-              animate={{ x: 0 }}
-              exit={{ x: isRTL ? "100%" : "-100%" }}
-              transition={{ type: "spring", stiffness: 360, damping: 38 }}
-            >
-              <Sidebar onNavigate={() => setMobileOpen(false)} />
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+      <div
+        className={`fixed inset-0 z-40 bg-black/40 lg:hidden transition-opacity duration-300 ease-in-out ${
+          mobileOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+        }`}
+        onClick={() => setMobileOpen(false)}
+      />
+      <div
+        className={`fixed inset-y-0 z-50 lg:hidden transition-transform duration-300 ease-out shadow-2xl ${
+          isRTL ? "right-0" : "left-0"
+        } ${
+          mobileOpen 
+            ? "translate-x-0" 
+            : (isRTL ? "translate-x-full" : "-translate-x-full")
+        }`}
+      >
+        <Sidebar onNavigate={() => setMobileOpen(false)} />
+      </div>
 
       {/* Main column */}
       <div className="flex min-w-0 flex-1 flex-col">
