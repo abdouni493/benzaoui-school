@@ -5,13 +5,25 @@ import { useData, uid } from "@/lib/store/data";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
+import { Modal } from "@/components/ui/Modal";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Check, Clock, X, AlertTriangle, Calendar, UserCheck, Search, Printer, Trash2 } from "lucide-react";
-import type { ScheduleSession, AttendanceRecord, AttendanceStatus } from "@/lib/types";
-import { studentName } from "@/lib/helpers";
+import type { ScheduleSession, AttendanceStatus, Student, Day } from "@/lib/types";
+import { useToast } from "@/lib/store/toast";
 import { formatDA } from "@/lib/utils";
 import { printHtmlDocument } from "@/lib/print";
+
+// Human-readable reasons when the server refuses/annotates a manual marking.
+const MARK_FAILURE_MESSAGES: Record<string, string> = {
+  "scan.debtBlocked":
+    "Élève en DETTE — présence refusée. Utilisez « Forcer » pour l'enregistrer malgré tout (la séance s'ajoutera à sa dette).",
+  "attendance.notEnrolled": "L'élève n'est pas inscrit à cette séance (ou son abonnement a expiré).",
+  "attendance.notScheduledThatDay": "Cette séance n'est pas programmée ce jour-là.",
+  "attendance.sessionNotFound": "Séance introuvable.",
+  "scan.notFound": "Élève introuvable.",
+  "scan.error": "Erreur serveur — veuillez réessayer.",
+};
 
 export function AttendancePage() {
   const data = useData();
@@ -26,25 +38,35 @@ export function AttendancePage() {
     attendance,
     school,
     push,
-    deleteFrom,
-    updateItem,
+    markAttendance,
+    cancelAttendance,
   } = data;
+  const { addToast } = useToast();
 
-  // Active Tab: "sheet" (Today's Sheet) or "history" (Attendance History)
+  // Active Tab: "sheet" (Roll-call Sheet) or "history" (Attendance History)
   const [activeTab, setActiveTab] = useState<"sheet" | "history">("sheet");
 
-  // Current system date and time
+  // Current system date and time (drives the "en cours / terminée" chips)
   const [time, setTime] = useState(new Date());
   useEffect(() => {
-    const timer = setInterval(() => setTime(new Date()), 1000);
+    const timer = setInterval(() => setTime(new Date()), 30_000);
     return () => clearInterval(timer);
   }, []);
+
+  // The date the roll-call sheet is shown for (defaults to today). Only the
+  // séances scheduled on that weekday exist on the sheet.
+  const todayStr = time.toLocaleDateString("fr-CA"); // YYYY-MM-DD, local
+  const [sheetDate, setSheetDate] = useState<string>(() => new Date().toLocaleDateString("fr-CA"));
 
   // Filtered session selection (for Roll Call sheet)
   const [activeSessionId, setActiveSessionId] = useState<string>("");
 
   // Track teacher absences locally
   const [absentTeachers, setAbsentTeachers] = useState<Record<string, boolean>>({});
+
+  // Pending manual-marking confirmation (deduction / refund / debt alerts)
+  const [confirmMark, setConfirmMark] = useState<{ student: Student; status: AttendanceStatus } | null>(null);
+  const [busy, setBusy] = useState(false);
 
   // History states
   const [histStartDate, setHistStartDate] = useState(
@@ -75,16 +97,39 @@ export function AttendancePage() {
     return labels[dayKey] ?? dayKey;
   };
 
-  // Get sessions scheduled for today
-  const todayDayName = getDayName(time);
-  const todaysSessions = sessions.filter((s) => s.days.includes(todayDayName as any));
+  const toMinutes = (t: string) => {
+    const [h, m] = t.split(":").map(Number);
+    return h * 60 + m;
+  };
 
-  // Initialize selected session if empty
+  // Sessions scheduled on the sheet date's weekday — nothing else is shown.
+  const sheetDay = getDayName(new Date(`${sheetDate}T12:00:00`));
+  const sheetSessions = sessions
+    .filter((s) => s.days.includes(sheetDay as Day))
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+  // Live state of a séance relative to "now" (only meaningful on today's sheet)
+  const sessionLiveState = (s: ScheduleSession): "upcoming" | "open" | "running" | "finished" | null => {
+    if (sheetDate !== todayStr) return null;
+    const nowMin = time.getHours() * 60 + time.getMinutes();
+    const start = toMinutes(s.startTime);
+    const end = toMinutes(s.endTime);
+    if (nowMin < start - 30) return "upcoming";
+    if (nowMin < start) return "open"; // badge window open (30 min before start)
+    if (nowMin <= end) return "running";
+    return "finished";
+  };
+
+  // Keep a valid session selected whenever the sheet date changes
   useEffect(() => {
-    if (todaysSessions.length > 0 && !activeSessionId) {
-      setActiveSessionId(todaysSessions[0].id);
+    if (sheetSessions.length === 0) {
+      if (activeSessionId) setActiveSessionId("");
+      return;
     }
-  }, [todaysSessions, activeSessionId]);
+    if (!sheetSessions.some((s) => s.id === activeSessionId)) {
+      setActiveSessionId(sheetSessions[0].id);
+    }
+  }, [sheetSessions, activeSessionId]);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
@@ -95,109 +140,95 @@ export function AttendancePage() {
     return students.filter((stu) => stu.subscriptionIds.includes(sub.id));
   };
 
-  // Find attendance record for a student in a session today
-  const getStudentTodayAttendance = (studentId: string, sesId: string) => {
-    const todayStr = time.toISOString().split("T")[0];
+  // Find attendance record for a student in a session on the sheet date
+  // (local calendar day — students are ABSENT by default until a record exists)
+  const getStudentSheetAttendance = (studentId: string, sesId: string) => {
     return attendance.find(
-      (a) => a.studentId === studentId && a.sessionId === sesId && a.timestamp.startsWith(todayStr)
+      (a) =>
+        a.studentId === studentId &&
+        a.sessionId === sesId &&
+        new Date(a.timestamp).toLocaleDateString("fr-CA") === sheetDate
     );
   };
 
-  // Toggle/Mark attendance status
-  const handleMarkAttendance = (studentId: string, status: AttendanceStatus) => {
+  // Step 1 — the click on Présent / En Retard / Absent. Money never moves
+  // directly here: any operation that charges or refunds opens a confirmation
+  // modal first; pure status switches (present <-> late) go straight through.
+  const requestMark = (stu: Student, status: AttendanceStatus) => {
     if (!activeSession) return;
-    const todayStr = time.toISOString().split("T")[0];
-    const sub = subscriptions.find((su) => su.sessionId === activeSession.id);
-    const cost = sub?.pricePerSession ?? 0;
-    const student = students.find((st) => st.id === studentId);
-    if (!student) return;
+    const existing = getStudentSheetAttendance(stu.id, activeSession.id);
 
-    const existingAtt = getStudentTodayAttendance(studentId, activeSession.id);
-
-    // If marked absent, we refund/remove cost deduction, and remove attendance
     if (status === "absent") {
-      if (existingAtt) {
-        // Refund student balance
-        if (!student.isFree && existingAtt.amountDeducted > 0) {
-          updateItem("students", student.id, {
-            balance: student.balance + existingAtt.amountDeducted,
-          });
-          // Push a refund balance transaction
-          push("balanceTx", {
-            id: uid("bt"),
-            studentId,
-            amount: existingAtt.amountDeducted,
-            date: new Date().toISOString(),
-            type: "topup",
-            description: `Remboursement absence: ${modules.find((m) => m.id === activeSession.moduleId)?.name}`,
-          });
-        }
-
-        // Delete any related unpaidTeacher record
-        const unpaid = data.unpaidTeacher?.find(
-          (ut) =>
-            ut.studentId === studentId &&
-            ut.sessionId === activeSession.id &&
-            ut.date.startsWith(todayStr)
-        );
-        if (unpaid) {
-          deleteFrom("unpaidTeacher", unpaid.id);
-        }
-
-        // Delete attendance record
-        deleteFrom("attendance", existingAtt.id);
-      }
-    } else {
-      // Mark present or late
-      const actualCost = student.isFree ? 0 : cost;
-      if (existingAtt) {
-        // Just update status
-        updateItem("attendance", existingAtt.id, { status });
-      } else {
-        // Deduct cost from student balance
-        if (!student.isFree && actualCost > 0) {
-          updateItem("students", student.id, {
-            balance: student.balance - actualCost,
-          });
-          // Push a deduction transaction
-          push("balanceTx", {
-            id: uid("bt"),
-            studentId,
-            amount: -actualCost,
-            date: new Date().toISOString(),
-            type: "deduction",
-            description: `Présence: ${modules.find((m) => m.id === activeSession.moduleId)?.name}`,
-          });
-        }
-
-        // Add attendance record
-        push("attendance", {
-          id: uid("att"),
-          studentId,
-          sessionId: activeSession.id,
-          timestamp: new Date().toISOString(),
-          amountDeducted: actualCost,
-          status,
-        });
-
-        // Add to teacher unpaid session if teacher is NOT absent
-        if (!absentTeachers[activeSession.id]) {
-          const teacher = teachers.find((t) => t.id === activeSession.teacherId);
-          const teacherDue =
-            teacher?.paymentType === "percentage" ? Math.round((actualCost * (teacher.percentage ?? 0)) / 100) : 0;
-
-          push("unpaidTeacher", {
-            id: uid("ut"),
-            teacherId: activeSession.teacherId,
-            sessionId: activeSession.id,
-            studentId,
-            amount: teacherDue,
-            date: new Date().toISOString(),
-            paid: false,
-          });
-        }
-      }
+      if (!existing) return; // already absent (default state)
+      setConfirmMark({ student: stu, status: "absent" });
+      return;
     }
+
+    if (existing) {
+      if (existing.status === status) return;
+      void applyMark(stu, status, false); // status switch only, no deduction
+      return;
+    }
+
+    setConfirmMark({ student: stu, status });
+  };
+
+  // Step 2 — the confirmed (or money-free) marking, executed atomically by the
+  // mark_attendance RPC: deduction/refund + attendance + teacher due together.
+  const applyMark = async (stu: Student, status: AttendanceStatus, allowDebt: boolean) => {
+    if (!activeSession) return;
+    setBusy(true);
+    const res = await markAttendance(stu.id, activeSession.id, status, {
+      date: sheetDate,
+      allowDebt,
+      skipTeacherDue: absentTeachers[activeSession.id] || false,
+    });
+    setBusy(false);
+    setConfirmMark(null);
+
+    const name = `${stu.firstName} ${stu.lastName}`;
+    if (!res.ok) {
+      addToast({
+        type: "danger",
+        title: "Opération refusée",
+        message: MARK_FAILURE_MESSAGES[res.messageKey] ?? "Opération impossible.",
+        studentName: name,
+      });
+      return;
+    }
+
+    if (status === "absent") {
+      addToast({
+        type: "info",
+        title: "Marqué absent",
+        message:
+          (res.refunded ?? 0) > 0
+            ? `Présence annulée — ${formatDA(res.refunded ?? 0)} remboursés sur le solde.`
+            : "Présence annulée (aucun montant à rembourser).",
+        studentName: name,
+        newBalance: res.newBalance,
+      });
+      return;
+    }
+
+    addToast({
+      type: res.debt ? "warning" : status === "late" ? "warning" : "success",
+      title: res.debt
+        ? "Présence enregistrée — SOLDE EN DETTE"
+        : status === "late"
+          ? "Présence enregistrée (En Retard)"
+          : "Présence enregistrée",
+      message: res.debt
+        ? "Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée."
+        : res.lowBalance
+          ? "Attention : le solde ne couvre bientôt plus 2 séances."
+          : res.messageKey === "attendance.statusUpdated"
+            ? "Statut mis à jour (aucune nouvelle déduction)."
+            : "Présence validée et solde déduit.",
+      studentName: name,
+      cost: res.cost,
+      newBalance: res.newBalance,
+    });
   };
 
   const handleToggleTeacherAbsent = () => {
@@ -223,43 +254,31 @@ export function AttendancePage() {
     }
   };
 
-  // Delete attendance record from history list (with refund + unpaidPayout removal)
-  const handleDeleteHistoryAttendance = (attId: string) => {
+  // Cancel an attendance from the history list — the cancel_attendance RPC
+  // refunds the deduction, removes the teacher due and deletes the row, atomically.
+  const handleDeleteHistoryAttendance = async (attId: string) => {
     const att = attendance.find((a) => a.id === attId);
     if (!att) return;
     const student = students.find((s) => s.id === att.studentId);
-    const session = sessions.find((s) => s.id === att.sessionId);
-
-    // Refund student if they were charged
-    if (student && !student.isFree && att.amountDeducted > 0) {
-      updateItem("students", student.id, {
-        balance: student.balance + att.amountDeducted,
+    const res = await cancelAttendance(attId);
+    if (res.ok) {
+      addToast({
+        type: "info",
+        title: "Présence annulée",
+        message:
+          (res.refunded ?? 0) > 0
+            ? `${formatDA(res.refunded ?? 0)} remboursés sur le solde de l'élève.`
+            : "Présence annulée (aucun montant à rembourser).",
+        studentName: student ? `${student.firstName} ${student.lastName}` : undefined,
+        newBalance: res.newBalance,
       });
-      push("balanceTx", {
-        id: uid("bt"),
-        studentId: student.id,
-        amount: att.amountDeducted,
-        date: new Date().toISOString(),
-        type: "topup",
-        description: `Remboursement (Annulation Présence): ${
-          session ? (modules.find((m) => m.id === session.moduleId)?.name ?? "Séance") : "Séance"
-        }`,
+    } else {
+      addToast({
+        type: "danger",
+        title: "Annulation impossible",
+        message: "La présence n'a pas pu être annulée — réessayez.",
       });
     }
-
-    // Remove any teacher unpaid session record generated on this date
-    const dayStr = att.timestamp.substring(0, 10);
-    const unpaid = data.unpaidTeacher?.find(
-      (ut) =>
-        ut.studentId === att.studentId &&
-        ut.sessionId === att.sessionId &&
-        ut.date.startsWith(dayStr)
-    );
-    if (unpaid) {
-      deleteFrom("unpaidTeacher", unpaid.id);
-    }
-
-    deleteFrom("attendance", att.id);
   };
 
   const getClassName = (cid: string) => classes.find((c) => c.id === cid)?.name ?? "-";
@@ -518,24 +537,51 @@ export function AttendancePage() {
       </div>
 
       {activeTab === "sheet" ? (
-        // Today's roll call list
-        todaysSessions.length === 0 ? (
+        <div className="space-y-4">
+          {/* Sheet date — only the séances scheduled on that weekday exist here */}
+          <div className="bg-surface border border-line p-4 rounded-2xl flex flex-col sm:flex-row sm:items-end gap-3">
+            <div>
+              <label className="text-[10px] uppercase font-bold text-muted block mb-1">Date de la feuille</label>
+              <Input
+                type="date"
+                value={sheetDate}
+                onChange={(e) => e.target.value && setSheetDate(e.target.value)}
+                className="w-44"
+              />
+            </div>
+            <div className="flex items-center gap-2 pb-1">
+              <Badge tone="primary">{getDayLabel(sheetDay)}</Badge>
+              {sheetDate !== todayStr && (
+                <Button size="sm" variant="outline" onClick={() => setSheetDate(todayStr)}>
+                  Revenir à aujourd'hui
+                </Button>
+              )}
+            </div>
+            <p className="text-[11px] text-muted sm:ml-auto pb-1 sm:text-right">
+              Seules les séances programmées le <strong>{getDayLabel(sheetDay).toLowerCase()}</strong> sont affichées.
+              Tous les élèves sont <strong>absents par défaut</strong> tant qu'ils n'ont pas scanné leur carte ou été
+              marqués présents.
+            </p>
+          </div>
+
+        {sheetSessions.length === 0 ? (
           <Card className="p-8 text-center bg-canvas/30 border border-line">
             <AlertTriangle className="h-10 w-10 text-warning mx-auto mb-2" />
-            <h3 className="font-bold text-ink">Aucun cours aujourd'hui</h3>
+            <h3 className="font-bold text-ink">Aucun cours ce jour-là</h3>
             <p className="text-xs text-muted mt-1">
-              Aucun emploi du temps n'est configuré pour le {getDayLabel(todayDayName).toLowerCase()}.
+              Aucun emploi du temps n'est configuré pour le {getDayLabel(sheetDay).toLowerCase()}.
             </p>
           </Card>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left panel: List of sessions for today */}
+            {/* Left panel: séances scheduled on the sheet date */}
             <div className="space-y-3">
-              <h3 className="text-sm font-bold text-ink mb-2">Séances du jour</h3>
-              {todaysSessions.map((s) => {
+              <h3 className="text-sm font-bold text-ink mb-2">Séances du {getDayLabel(sheetDay).toLowerCase()}</h3>
+              {sheetSessions.map((s) => {
                 const isActive = activeSessionId === s.id;
                 const cl = classes.find((c) => c.id === s.classId);
                 const isTeacherAbs = absentTeachers[s.id] || false;
+                const live = sessionLiveState(s);
 
                 return (
                   <button
@@ -554,7 +600,13 @@ export function AttendancePage() {
                           {cl?.name} ({cl?.type === "cours" ? cl.coursLevel : cl?.formationLevel})
                         </span>
                       </div>
-                      {isTeacherAbs && <Badge tone="danger">Ens. Absent</Badge>}
+                      <div className="flex flex-col items-end gap-1">
+                        {live === "running" && <Badge tone="success">En cours</Badge>}
+                        {live === "open" && <Badge tone="primary">Scan ouvert</Badge>}
+                        {live === "upcoming" && <Badge tone="warning">À venir</Badge>}
+                        {live === "finished" && <Badge tone="danger">Terminée</Badge>}
+                        {isTeacherAbs && <Badge tone="danger">Ens. Absent</Badge>}
+                      </div>
                     </div>
 
                     <div className="flex justify-between items-center text-[10px] pt-1.5 border-t border-white/10">
@@ -615,8 +667,9 @@ export function AttendancePage() {
                       ) : (
                         <div className="space-y-2">
                           {getSessionStudents(activeSession.id).map((stu) => {
-                            const attToday = getStudentTodayAttendance(stu.id, activeSession.id);
+                            const attToday = getStudentSheetAttendance(stu.id, activeSession.id);
                             const isFree = stu.isFree;
+                            const inDebt = stu.balance < 0;
 
                             return (
                               <div
@@ -625,17 +678,39 @@ export function AttendancePage() {
                               >
                                 <div>
                                   <strong className="text-ink block">
-                                    {stu.firstName} {stu.lastName} {isFree && <Badge tone="success" className="text-[8px] py-0">Gratuit</Badge>}
+                                    {stu.firstName} {stu.lastName}{" "}
+                                    {isFree && <Badge tone="success" className="text-[8px] py-0">Gratuit</Badge>}{" "}
+                                    {inDebt && <Badge tone="danger" className="text-[8px] py-0">DETTE</Badge>}
                                   </strong>
                                   <span className="text-[10px] text-muted">
-                                    Solde: {stu.balance} DA | Carte: {stu.rfid}
+                                    Solde:{" "}
+                                    <strong className={inDebt ? "text-danger" : "text-success"}>
+                                      {formatDA(stu.balance)}
+                                    </strong>{" "}
+                                    | Carte: {stu.rfid}
                                   </span>
+                                  {attToday && (
+                                    <span className="text-[10px] text-muted block mt-0.5">
+                                      ✓ Pointé à{" "}
+                                      <strong className="text-ink font-mono">
+                                        {new Date(attToday.timestamp).toLocaleTimeString([], {
+                                          hour: "2-digit",
+                                          minute: "2-digit",
+                                        })}
+                                      </strong>
+                                      {attToday.amountDeducted > 0 && (
+                                        <>
+                                          {" "}— <strong className="text-danger">-{formatDA(attToday.amountDeducted)}</strong> déduits
+                                        </>
+                                      )}
+                                    </span>
+                                  )}
                                 </div>
 
-                                {/* Attendance selectors */}
+                                {/* Attendance selectors — absent is the default state */}
                                 <div className="flex items-center gap-1.5 self-end sm:self-center">
                                   <button
-                                    onClick={() => handleMarkAttendance(stu.id, "present")}
+                                    onClick={() => requestMark(stu, "present")}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all ${
                                       attToday?.status === "present"
                                         ? "bg-success text-white shadow-sm"
@@ -645,7 +720,7 @@ export function AttendancePage() {
                                     <Check className="h-3.5 w-3.5" /> Présent
                                   </button>
                                   <button
-                                    onClick={() => handleMarkAttendance(stu.id, "late")}
+                                    onClick={() => requestMark(stu, "late")}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all ${
                                       attToday?.status === "late"
                                         ? "bg-warning text-white shadow-sm"
@@ -655,7 +730,7 @@ export function AttendancePage() {
                                     <Clock className="h-3.5 w-3.5" /> En Retard
                                   </button>
                                   <button
-                                    onClick={() => handleMarkAttendance(stu.id, "absent")}
+                                    onClick={() => requestMark(stu, "absent")}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all ${
                                       !attToday
                                         ? "bg-danger text-white shadow-sm"
@@ -678,7 +753,8 @@ export function AttendancePage() {
               )}
             </div>
           </div>
-        )
+        )}
+        </div>
       ) : (
         // History tab view
         <div className="space-y-4">
@@ -845,6 +921,165 @@ export function AttendancePage() {
           </Card>
         </div>
       )}
+
+      {/* Confirmation modal for manual marking — every money detail up front */}
+      <Modal
+        open={!!confirmMark}
+        onClose={() => !busy && setConfirmMark(null)}
+        title={confirmMark?.status === "absent" ? "Annuler la présence" : "Confirmer la présence"}
+      >
+        {confirmMark && activeSession && (() => {
+          const stu = confirmMark.student;
+          const existing = getStudentSheetAttendance(stu.id, activeSession.id);
+          const sub =
+            subscriptions.find(
+              (su) => su.sessionId === activeSession.id && stu.subscriptionIds.includes(su.id)
+            ) ?? subscriptions.find((su) => su.sessionId === activeSession.id);
+          const price = sub?.pricePerSession ?? 0;
+          const cost = stu.isFree ? 0 : price;
+          const after = stu.balance - cost;
+          const inDebt = cost > 0 && stu.balance < 0;
+          const goesDebt = cost > 0 && stu.balance >= 0 && after < 0;
+          const low = cost > 0 && after >= 0 && after < price * 2;
+          const sessionLabel = `${getModuleName(activeSession.moduleId)} (${activeSession.startTime} - ${activeSession.endTime})`;
+          const dateLabel = new Date(`${sheetDate}T12:00:00`).toLocaleDateString("fr-FR");
+
+          if (confirmMark.status === "absent" && existing) {
+            return (
+              <div className="space-y-4 text-sm">
+                <p className="text-xs text-muted">
+                  L'élève repassera <strong>absent</strong> pour cette séance : la présence est supprimée, le montant
+                  déduit est remboursé sur son solde et la part enseignant correspondante est retirée des séances non
+                  payées.
+                </p>
+                <div className="bg-canvas/30 border border-line rounded-xl p-3 text-xs space-y-1.5">
+                  <div className="flex justify-between">
+                    <span className="text-muted">Élève</span>
+                    <strong className="text-ink">{stu.firstName} {stu.lastName}</strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted">Séance</span>
+                    <strong className="text-ink">{sessionLabel}</strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted">Date</span>
+                    <strong className="text-ink">{dateLabel}</strong>
+                  </div>
+                  <div className="flex justify-between border-t border-line pt-1.5">
+                    <span className="text-muted">Montant à rembourser</span>
+                    <strong className="text-success">+{formatDA(existing.amountDeducted)}</strong>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button variant="outline" disabled={busy} onClick={() => setConfirmMark(null)}>
+                    Annuler
+                  </Button>
+                  <Button variant="danger" disabled={busy} onClick={() => applyMark(stu, "absent", false)}>
+                    Marquer absent{existing.amountDeducted > 0 ? ` & rembourser ${formatDA(existing.amountDeducted)}` : ""}
+                  </Button>
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <div className="space-y-4 text-sm">
+              <div className="bg-canvas/30 border border-line rounded-xl p-3 text-xs space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-muted">Élève</span>
+                  <strong className="text-ink">{stu.firstName} {stu.lastName}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted">Séance</span>
+                  <strong className="text-ink">{sessionLabel}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted">Date</span>
+                  <strong className="text-ink">{dateLabel}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted">Statut</span>
+                  <Badge tone={confirmMark.status === "late" ? "warning" : "success"}>
+                    {confirmMark.status === "late" ? "En Retard" : "Présent"}
+                  </Badge>
+                </div>
+              </div>
+
+              <div className="bg-canvas/30 border border-line rounded-xl p-3 text-xs space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-muted">Tarif de la séance</span>
+                  <strong className={cost > 0 ? "text-danger" : "text-ink"}>
+                    {cost > 0 ? `-${formatDA(cost)}` : "0 DA"}
+                  </strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted">Solde actuel</span>
+                  <strong className={stu.balance < 0 ? "text-danger" : "text-ink"}>{formatDA(stu.balance)}</strong>
+                </div>
+                <div className="flex justify-between border-t border-line pt-1.5">
+                  <span className="text-muted">Solde après validation</span>
+                  <strong className={after < 0 ? "text-danger" : "text-success"}>{formatDA(after)}</strong>
+                </div>
+              </div>
+
+              {stu.isFree && (
+                <div className="bg-success/10 border border-success/20 rounded-xl p-3 text-xs text-success flex items-center gap-2">
+                  <Check className="h-4 w-4 shrink-0" /> Élève gratuit — aucune déduction ne sera effectuée.
+                </div>
+              )}
+              {inDebt && (
+                <div className="bg-danger/10 border border-danger/20 rounded-xl p-3 text-xs text-danger flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div>
+                    <strong>Élève déjà EN DETTE ({formatDA(stu.balance)}).</strong> L'entrée doit normalement être
+                    refusée tant que la dette n'est pas réglée. Vous pouvez forcer l'enregistrement : le coût de la
+                    séance s'ajoutera à sa dette.
+                  </div>
+                </div>
+              )}
+              {goesDebt && (
+                <div className="bg-warning/10 border border-warning/20 rounded-xl p-3 text-xs text-warning flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div>
+                    <strong>Le solde ne couvre pas cette séance :</strong> après validation, l'élève passera EN DETTE
+                    ({formatDA(after)}). Ce sera sa dernière entrée autorisée — il sera bloqué au prochain pointage
+                    tant que la dette n'est pas réglée.
+                  </div>
+                </div>
+              )}
+              {low && (
+                <div className="bg-warning/10 border border-warning/20 rounded-xl p-3 text-xs text-warning flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div>
+                    <strong>Solde bientôt épuisé :</strong> après cette séance il restera {formatDA(after)} (moins de
+                    2 séances). Pensez à prévenir le parent / recharger le compte.
+                  </div>
+                </div>
+              )}
+              {absentTeachers[activeSession.id] && (
+                <div className="bg-danger/10 border border-danger/20 rounded-xl p-3 text-xs text-danger">
+                  Enseignant marqué absent : cette présence ne créera pas de part enseignant à payer.
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" disabled={busy} onClick={() => setConfirmMark(null)}>
+                  Annuler
+                </Button>
+                {inDebt ? (
+                  <Button variant="danger" disabled={busy} onClick={() => applyMark(stu, confirmMark.status, true)}>
+                    Forcer — enregistrer en dette
+                  </Button>
+                ) : (
+                  <Button disabled={busy} onClick={() => applyMark(stu, confirmMark.status, false)}>
+                    {cost > 0 ? `Confirmer & déduire ${formatDA(cost)}` : "Confirmer la présence"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
     </div>
   );
 }

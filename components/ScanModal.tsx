@@ -61,12 +61,28 @@ export function ScanModal({ open, onClose }: { open: boolean; onClose: () => voi
           <p className={`text-sm font-bold ${result.ok ? "text-success" : "text-danger"}`}>
             {result.ok ? "✅" : "⛔"} {t(result.messageKey)}
           </p>
+          {result.messageKey === "scan.tooEarly" && result.nextStart && (
+            <p className="mt-1 text-xs text-muted">
+              {t("scan.nextSession")} <strong className="font-mono text-ink">{result.nextStart}</strong>
+            </p>
+          )}
           {student && (
             <div className="mt-3 space-y-1.5 text-sm">
               <div className="flex justify-between">
                 <span className="text-muted">{t("scan.student")}</span>
                 <span className="font-semibold text-ink">{studentName(student)}</span>
               </div>
+              {result.moduleName && (
+                <div className="flex justify-between">
+                  <span className="text-muted">{t("scan.session")}</span>
+                  <span className="font-semibold text-ink">
+                    {result.moduleName}
+                    {result.sessionStart && (
+                      <span className="font-mono text-xs text-muted"> ({result.sessionStart} - {result.sessionEnd})</span>
+                    )}
+                  </span>
+                </div>
+              )}
               {result.ok && (
                 <div className="flex justify-between">
                   <span className="text-muted">{t("scan.deducted")}</span>
@@ -81,6 +97,16 @@ export function ScanModal({ open, onClose }: { open: boolean; onClose: () => voi
                   {formatDA(student.balance)}
                 </Badge>
               </div>
+              {(result.debt || student.balance < 0) && (
+                <div className="rounded-xl border border-danger/30 bg-danger/10 p-2 text-xs font-semibold text-danger">
+                  ⚠️ {t("scan.debtWarn")} — {formatDA(result.newBalance ?? student.balance)}
+                </div>
+              )}
+              {result.lowBalance && !result.debt && (
+                <div className="rounded-xl border border-warning/30 bg-warning/10 p-2 text-xs font-semibold text-warning">
+                  ⚠️ {t("scan.lowBalanceWarn")}
+                </div>
+              )}
             </div>
           )}
         </motion.div>

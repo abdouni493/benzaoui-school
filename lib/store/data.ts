@@ -412,7 +412,32 @@ export interface ScanResult {
   sessionId?: string;
   cost?: number;
   newBalance?: number;
+  /** present | late (set on successful writes) */
+  status?: "present" | "late" | "absent";
+  /** balance is negative after (or already was before) this operation */
+  debt?: boolean;
+  /** balance will not cover 2 more séances of this price */
+  lowBalance?: boolean;
+  moduleName?: string;
+  sessionStart?: string;
+  sessionEnd?: string;
+  /** on scan.tooEarly: start time (HH:mm) of the next séance today */
+  nextStart?: string;
+  /** on scan.debtBlocked: the current (negative) balance */
+  balance?: number;
+  /** on absent/cancel: the amount refunded to the student */
+  refunded?: number;
   messageKey: string;
+}
+
+export interface TeacherSettlement {
+  ok: boolean;
+  net?: number;
+  gross?: number;
+  sessions?: number;
+  acomptes?: number;
+  absences?: number;
+  messageKey?: string;
 }
 
 interface DataActions {
@@ -422,6 +447,14 @@ interface DataActions {
   clear: () => void;
 
   scanCard: (rfidOrStudentId: string, when?: Date) => Promise<ScanResult>;
+  markAttendance: (
+    studentId: string,
+    sessionId: string,
+    status: "present" | "late" | "absent",
+    opts?: { date?: string; allowDebt?: boolean; skipTeacherDue?: boolean },
+  ) => Promise<ScanResult>;
+  cancelAttendance: (attendanceId: string) => Promise<ScanResult>;
+  settleTeacherPercentage: (teacherId: string) => Promise<TeacherSettlement>;
   addBalance: (
     studentId: string,
     amount: number,
@@ -480,156 +513,70 @@ export const useData = create<DataStore>((set, get) => ({
 
   clear: () => set({ ...emptyDatabase(), school: get().school, loaded: false }),
 
-  scanCard: async (rfidOrStudentId, when = new Date()) => {
+  // The whole scan (window matching, debt gate, deduction, attendance,
+  // balance_tx, teacher due) runs atomically in the scan_card RPC — the
+  // schedule/money rules live in one place, server-side.
+  scanCard: async (rfidOrStudentId, when) => {
     const supabase = createClient();
-    const code = rfidOrStudentId.trim();
-    const student = get().students.find((s) => s.rfid === code || s.id === code);
-    if (!student) {
-      return { ok: false, messageKey: "scan.notFound" };
+    const args: { p_code: string; p_when?: string } = { p_code: rfidOrStudentId.trim() };
+    if (when) args.p_when = when.toISOString();
+    const { data, error } = await supabase.rpc("scan_card", args);
+    if (error || !data) {
+      console.error("scan_card failed:", error?.message);
+      return { ok: false, messageKey: "scan.error" };
     }
+    const res = data as ScanResult;
+    // Refresh local state whenever the RPC wrote something (a deduction, a
+    // presence, a teacher due).
+    if (res.ok && res.messageKey !== "scan.alreadyPresent") await get().fetchAll();
+    return res;
+  },
 
-    const daysOfWeek = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-    const localDay = daysOfWeek[when.getDay()];
-
-    const studentSubIds = student.subscriptionIds || [];
-
-    // Filter sessions that are on this day and the student is subscribed to
-    const candidateSessions = get().sessions.filter((se) => {
-      if (!se.days.includes(localDay as any)) return false;
-      const sub = get().subscriptions.find(
-        (s) => s.sessionId === se.id && studentSubIds.includes(s.id),
-      );
-      return !!sub;
+  markAttendance: async (studentId, sessionId, status, opts) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("mark_attendance", {
+      p_student_id: studentId,
+      p_session_id: sessionId,
+      p_status: status,
+      p_date: opts?.date ?? null,
+      p_allow_debt: !!opts?.allowDebt,
+      p_skip_teacher_due: !!opts?.skipTeacherDue,
     });
-
-    // No séance is scheduled for this student on this weekday at all: the card
-    // was scanned on a day the student has no course. Reject with a clear
-    // "no séance for this student today" message — nothing is recorded.
-    if (candidateSessions.length === 0) {
-      return { ok: false, studentId: student.id, messageKey: "scan.noSessionToday" };
+    if (error || !data) {
+      console.error("mark_attendance failed:", error?.message);
+      return { ok: false, messageKey: "scan.error" };
     }
+    const res = data as ScanResult;
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
 
-    const getMinutes = (timeStr: string) => {
-      const [h, m] = timeStr.split(":").map(Number);
-      return h * 60 + m;
-    };
-    const scanMinutes = when.getHours() * 60 + when.getMinutes();
-
-    // The scan must also fall inside one of those sessions' time slots
-    // (small early margin for arrivals). A scan on the right day but hours
-    // away from the séance is rejected: no presence, no deduction.
-    const EARLY_MARGIN_MINUTES = 30;
-    const inWindowSessions = candidateSessions.filter((se) => {
-      const start = getMinutes(se.startTime);
-      const end = getMinutes(se.endTime);
-      return scanMinutes >= start - EARLY_MARGIN_MINUTES && scanMinutes <= end;
+  cancelAttendance: async (attendanceId) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("cancel_attendance", {
+      p_attendance_id: attendanceId,
     });
-
-    // The student does have a séance today, but the scan happened outside its
-    // time slot (too early beyond the margin, or after it ended): it is not
-    // the student's séance time. Reject — no presence, no deduction.
-    if (inWindowSessions.length === 0) {
-      return { ok: false, studentId: student.id, messageKey: "scan.noSessionNow" };
+    if (error || !data) {
+      console.error("cancel_attendance failed:", error?.message);
+      return { ok: false, messageKey: "scan.error" };
     }
+    const res = data as ScanResult;
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
 
-    // Closest session start wins if two windows overlap
-    inWindowSessions.sort((a, b) => {
-      const diffA = Math.abs(getMinutes(a.startTime) - scanMinutes);
-      const diffB = Math.abs(getMinutes(b.startTime) - scanMinutes);
-      return diffA - diffB;
+  settleTeacherPercentage: async (teacherId) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("settle_teacher_percentage", {
+      p_teacher_id: teacherId,
     });
-
-    const matchedSession = inWindowSessions[0];
-
-    // Check if there is already an attendance record for this student and session today (local calendar day)
-    const todayStr = when.toLocaleDateString("fr-CA"); // YYYY-MM-DD
-    const alreadyAttended = get().attendance.some((att) => {
-      if (att.studentId !== student.id || att.sessionId !== matchedSession.id) return false;
-      const attDateStr = new Date(att.timestamp).toLocaleDateString("fr-CA");
-      return attDateStr === todayStr;
-    });
-
-    if (alreadyAttended) {
-      return {
-        ok: true,
-        studentId: student.id,
-        sessionId: matchedSession.id,
-        cost: 0,
-        newBalance: student.balance,
-        messageKey: "scan.alreadyPresent",
-      };
+    if (error || !data) {
+      console.error("settle_teacher_percentage failed:", error?.message);
+      return { ok: false, messageKey: "scan.error" };
     }
-
-    // Get session price
-    const sub = get().subscriptions.find(
-      (s) => s.sessionId === matchedSession.id && studentSubIds.includes(s.id),
-    );
-    const price = sub ? sub.pricePerSession : 0;
-    const cost = student.isFree ? 0 : price;
-
-    // Calculate status (present or late)
-    const [startH, startM] = matchedSession.startTime.split(":").map(Number);
-    const startMinutes = startH * 60 + startM;
-    const status = scanMinutes > startMinutes + 30 ? "late" : "present";
-
-    // Calculate teacher due
-    const teacher = get().teachers.find((t) => t.id === matchedSession.teacherId);
-    let teacherDue = 0;
-    if (teacher && teacher.paymentType === "percentage") {
-      teacherDue = Math.round((cost * (teacher.percentage || 0)) / 100);
-    }
-
-    const newBalance = student.balance - cost;
-
-    // Update student balance
-    const { error: stuErr } = await supabase
-      .from("students")
-      .update({ balance: newBalance })
-      .eq("id", student.id);
-    if (stuErr) return { ok: false, messageKey: "scan.notFound" };
-
-    // Insert attendance log
-    await supabase.from("attendance").insert({
-      student_id: student.id,
-      session_id: matchedSession.id,
-      occurred_at: when.toISOString(),
-      amount_deducted: cost,
-      status: status,
-    });
-
-    // If there is a cost, log balance transaction
-    if (cost > 0) {
-      const mod = get().modules.find((m) => m.id === matchedSession.moduleId);
-      const modName = mod ? mod.name : "";
-      await supabase.from("balance_tx").insert({
-        student_id: student.id,
-        amount: -cost,
-        date: when.toISOString(),
-        type: "deduction",
-        description: `Séance ${modName}`,
-      });
-    }
-
-    // Record unpaid teacher session
-    await supabase.from("unpaid_teacher_sessions").insert({
-      teacher_id: matchedSession.teacherId || "",
-      session_id: matchedSession.id,
-      student_id: student.id,
-      amount: teacherDue,
-      date: when.toISOString(),
-      paid: false,
-    });
-
-    await get().fetchAll();
-
-    return {
-      ok: true,
-      studentId: student.id,
-      sessionId: matchedSession.id,
-      cost,
-      newBalance,
-      messageKey: status === "late" ? "scan.successLate" : "scan.success",
-    };
+    const res = data as TeacherSettlement;
+    if (res.ok) await get().fetchAll();
+    return res;
   },
 
   addBalance: async (studentId, amount, description, settleRegistration) => {

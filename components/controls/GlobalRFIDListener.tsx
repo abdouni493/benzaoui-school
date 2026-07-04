@@ -26,17 +26,21 @@ export function GlobalRFIDListener() {
         : undefined;
 
       if (result.ok && student) {
-        // Calculate if balance is low
+        // Low-balance signal comes from the RPC (based on the séance's own
+        // price); fall back to a local estimate for older responses.
         const studentSubs = subscriptions.filter((sub) =>
           student.subscriptionIds.includes(sub.id)
         );
         const minCost = studentSubs.length > 0 ? Math.max(...studentSubs.map((s) => s.pricePerSession)) : 500;
-        const isLow = !student.isFree && result.newBalance !== undefined && result.newBalance < minCost * 2;
+        const isLow =
+          result.lowBalance ??
+          (!student.isFree && result.newBalance !== undefined && result.newBalance < minCost * 2);
+        const isDebt = result.debt ?? (result.newBalance !== undefined && result.newBalance < 0);
 
         let autoSentAlert = false;
 
-        // Send automatic alert if low and toggles are active
-        if (isLow && (autoSendWhatsapp || autoSendEmail)) {
+        // Send automatic alert if low/debt and toggles are active
+        if ((isLow || isDebt) && (autoSendWhatsapp || autoSendEmail)) {
           autoSentAlert = true;
 
           // Push parent notification
@@ -45,7 +49,9 @@ export function GlobalRFIDListener() {
             const newNtf = {
               id: uid("ntf"),
               parentId,
-              title: "Alerte de solde faible (Automatique)",
+              title: isDebt
+                ? "Alerte: solde en dette (Automatique)"
+                : "Alerte de solde faible (Automatique)",
               description: `Le solde de votre enfant ${student.firstName} ${student.lastName} est de ${formatDA(result.newBalance ?? 0)}. Veuillez recharger son compte rapidement. L'accès aux cours en dépend.`,
               date: new Date().toISOString(),
               read: false,
@@ -55,13 +61,27 @@ export function GlobalRFIDListener() {
           }
         }
 
-        // Show success toast
+        const sessionInfo = result.moduleName
+          ? `${result.moduleName}${result.sessionStart ? ` (${result.sessionStart} - ${result.sessionEnd})` : ""}`
+          : undefined;
+        const isLate = result.messageKey === "scan.successLate";
+        const isAlready = result.messageKey === "scan.alreadyPresent";
+
+        // Show success toast — with the exact séance the scan was matched to
         addToast({
-          type: result.messageKey.includes("Late") ? "warning" : "success",
-          title: result.messageKey.includes("Late") ? "Présence en Retard" : "Présence Enregistrée",
-          message: result.messageKey.includes("Late")
-            ? "Présence validée avec RETARD."
-            : "Présence enregistrée avec succès.",
+          type: isDebt ? "warning" : isLate ? "warning" : isAlready ? "info" : "success",
+          title: isAlready
+            ? "Déjà pointé — aucun débit"
+            : isDebt
+              ? "Présence enregistrée — SOLDE EN DETTE"
+              : isLate
+                ? "Présence en Retard"
+                : "Présence Enregistrée",
+          message: isAlready
+            ? `L'élève a déjà pointé pour ${sessionInfo ?? "cette séance"} aujourd'hui.`
+            : isDebt
+              ? `${sessionInfo ? `Séance ${sessionInfo}. ` : ""}Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée.`
+              : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.`,
           studentName: studentName(student),
           cost: result.cost,
           newBalance: result.newBalance,
@@ -69,16 +89,22 @@ export function GlobalRFIDListener() {
         });
       } else {
         // Show failure toast — surface the exact reason so reception sees why
-        // the card was rejected (wrong day vs wrong time vs unknown card).
+        // the card was rejected (wrong day / too early / séance finished /
+        // debt / expired subscription / unknown card).
         const failureMessages: Record<string, string> = {
           "scan.notFound": "Carte RFID introuvable ou non associée.",
-          "scan.noSessionToday": "Aucune séance prévue pour cet élève aujourd'hui.",
+          "scan.noSessionToday": "Aucune séance prévue pour cet élève aujourd'hui — carte refusée.",
           "scan.noSessionNow": "Ce n'est pas l'heure de la séance de cet élève.",
+          "scan.tooEarly": `Trop tôt — la séance n'a pas encore commencé.${result.nextStart ? ` Prochaine séance à ${result.nextStart}.` : ""}`,
+          "scan.sessionEnded": "Séance déjà terminée — scan refusé, l'élève est compté ABSENT.",
+          "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui — carte refusée.",
+          "scan.debtBlocked": `Élève EN DETTE${result.balance !== undefined ? ` (${formatDA(result.balance)})` : ""} — entrée refusée. Veuillez régler la dette à la caisse.`,
           "scan.noSession": "Aucune séance active trouvée pour cet élève en ce moment.",
+          "scan.error": "Erreur lors du scan — veuillez réessayer.",
         };
         addToast({
           type: "danger",
-          title: "Échec du Scan",
+          title: result.messageKey === "scan.debtBlocked" ? "Entrée Refusée — DETTE" : "Échec du Scan",
           message:
             failureMessages[result.messageKey] ??
             "Aucune séance active trouvée pour cet élève en ce moment.",

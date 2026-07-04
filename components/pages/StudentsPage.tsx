@@ -381,6 +381,9 @@ export function StudentsPage() {
     const matchedStu = students.find((s) => s.rfid === scanRfidInput || s.id === scanRfidInput);
 
     if (res.ok && matchedStu) {
+      const seance = res.moduleName
+        ? ` — ${res.moduleName}${res.sessionStart ? ` (${res.sessionStart} - ${res.sessionEnd})` : ""}`
+        : "";
       setScanResult({
         ok: true,
         studentName: `${matchedStu.firstName} ${matchedStu.lastName}`,
@@ -388,15 +391,28 @@ export function StudentsPage() {
         newBalance: res.newBalance,
         msg: res.messageKey === "scan.alreadyPresent"
           ? "Élève déjà marqué présent pour cette séance aujourd'hui (aucun débit)."
+          : res.messageKey === "scan.successDebt"
+          ? `Présence enregistrée${seance} — ATTENTION: le solde est passé en DETTE.`
           : res.messageKey === "scan.successLate"
-          ? "Présence enregistrée (en retard)."
-          : "Présence validée et solde débité !",
+          ? `Présence enregistrée (en retard)${seance}.`
+          : `Présence validée et solde débité${seance} !`,
       });
     } else {
+      const failureMsgs: Record<string, string> = {
+        "scan.noSession": "Aucune séance programmée à cette heure.",
+        "scan.noSessionToday": "Aucune séance prévue pour cet élève aujourd'hui.",
+        "scan.noSessionNow": "Ce n'est pas l'heure de la séance de cet élève.",
+        "scan.tooEarly": `Trop tôt — la séance n'a pas encore commencé.${res.nextStart ? ` Prochaine séance à ${res.nextStart}.` : ""}`,
+        "scan.sessionEnded": "Séance déjà terminée — scan refusé, l'élève reste absent.",
+        "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui.",
+        "scan.debtBlocked": "Élève EN DETTE — entrée refusée. Veuillez régler la dette.",
+        "scan.notFound": "Carte introuvable.",
+        "scan.error": "Erreur lors du scan — réessayez.",
+      };
       setScanResult({
         ok: false,
         studentName: matchedStu ? `${matchedStu.firstName} ${matchedStu.lastName}` : "Étudiant inconnu",
-        msg: res.messageKey === "scan.noSession" ? "Aucune séance programmée à cette heure." : "Carte introuvable.",
+        msg: failureMsgs[res.messageKey] ?? "Carte introuvable.",
       });
     }
     setScanRfidInput("");

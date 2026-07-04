@@ -44,6 +44,7 @@ export function TeachersPage() {
     push,
     deleteFrom,
     updateItem,
+    settleTeacherPercentage,
   } = useData();
 
   // Modals
@@ -53,6 +54,7 @@ export function TeachersPage() {
   const [isAcompteOpen, setIsAcompteOpen] = useState(false);
   const [isAbsenceOpen, setIsAbsenceOpen] = useState(false);
   const [isPayOpen, setIsPayOpen] = useState(false);
+  const [isUnpaidDetailOpen, setIsUnpaidDetailOpen] = useState(false);
   const [isPrintOpen, setIsPrintOpen] = useState(false);
   const [selectedTeacher, setSelectedTeacher] = useState<Teacher | null>(null);
 
@@ -91,6 +93,68 @@ export function TeachersPage() {
 
   const getTeacherAbsences = (tid: string) => {
     return absences.filter((a) => a.teacherId === tid);
+  };
+
+  // Group a teacher's UNPAID séances by day + timing, with each student's
+  // exact scan time, fee and teacher share — the "calculation detail" view
+  // shown before validating a percentage payment.
+  const buildUnpaidDetail = (tid: string) => {
+    const rows = unpaidTeacher.filter((u) => u.teacherId === tid && !u.paid);
+    const map: Record<string, {
+      dateKey: string;
+      sessionId: string;
+      moduleName: string;
+      className: string;
+      groupName: string;
+      startTime: string;
+      endTime: string;
+      students: { name: string; time: string; status: string; fee: number; share: number }[];
+      totalFees: number;
+      totalPayout: number;
+    }> = {};
+
+    rows.forEach((u) => {
+      const dateKey = new Date(u.date).toLocaleDateString("fr-CA");
+      const key = `${dateKey}_${u.sessionId}`;
+      const sess = sessions.find((s) => s.id === u.sessionId);
+      if (!map[key]) {
+        map[key] = {
+          dateKey,
+          sessionId: u.sessionId,
+          moduleName: sess ? modules.find((m) => m.id === sess.moduleId)?.name ?? "Séance" : "Séance",
+          className: sess ? classes.find((c) => c.id === sess.classId)?.name ?? "-" : "-",
+          groupName: sess ? groups.find((g) => g.id === sess.groupId)?.name ?? "-" : "-",
+          startTime: sess?.startTime ?? "",
+          endTime: sess?.endTime ?? "",
+          students: [],
+          totalFees: 0,
+          totalPayout: 0,
+        };
+      }
+      const stu = students.find((st) => st.id === u.studentId);
+      const att = attendance.find(
+        (a) =>
+          a.studentId === u.studentId &&
+          a.sessionId === u.sessionId &&
+          new Date(a.timestamp).toLocaleDateString("fr-CA") === dateKey
+      );
+      map[key].students.push({
+        name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
+        time: new Date(att?.timestamp ?? u.date).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        status: att?.status === "late" ? "En Retard" : "Présent",
+        fee: att?.amountDeducted ?? 0,
+        share: u.amount,
+      });
+      map[key].totalFees += att?.amountDeducted ?? 0;
+      map[key].totalPayout += u.amount;
+    });
+
+    return Object.values(map).sort(
+      (a, b) => b.dateKey.localeCompare(a.dateKey) || a.startTime.localeCompare(b.startTime)
+    );
   };
 
   // Get months between startDate and now
@@ -239,43 +303,25 @@ export function TeachersPage() {
     setDescription("");
   };
 
-  const handlePaymentSubmit = (monthKey?: string) => {
+  const handlePaymentSubmit = async (monthKey?: string) => {
     if (!selectedTeacher) return;
 
     if (selectedTeacher.paymentType === "percentage") {
-      const unpaid = getTeacherUnpaidSessions(selectedTeacher.id);
-      const totalSessionsAmount = unpaid.reduce((sum, s) => sum + s.amount, 0);
-
-      // Check teacher's pending acomptes and absences
-      const teacherAcomptes = getTeacherAcomptes(selectedTeacher.id);
-      const teacherAbsences = getTeacherAbsences(selectedTeacher.id);
-      const totalAcomptes = teacherAcomptes.reduce((sum, a) => sum + a.amount, 0);
-      const totalAbsences = teacherAbsences.reduce((sum, ab) => sum + ab.cost, 0);
-
-      const netAmount = totalSessionsAmount - totalAcomptes - totalAbsences;
-
-      if (netAmount <= 0) {
-        alert("Le solde net à payer est inférieur ou égal à 0 DA.");
+      // Atomic settlement server-side (settle_teacher_percentage RPC): marks
+      // every unpaid séance as paid, consumes acomptes/absences and writes
+      // the cash movement in a single transaction.
+      const res = await settleTeacherPercentage(selectedTeacher.id);
+      if (!res.ok) {
+        alert(
+          res.messageKey === "pay.nothingDue"
+            ? `Le solde net à payer est inférieur ou égal à 0 DA (net: ${res.net ?? 0} DA).`
+            : "Le paiement a échoué — veuillez réessayer."
+        );
         return;
       }
-
-      // Mark all sessions as paid
-      unpaid.forEach((u) => {
-        updateItem("unpaidTeacher", u.id, { paid: true });
-      });
-
-      // Clear/delete acomptes & absences since they are now deducted
-      teacherAcomptes.forEach((a) => deleteFrom("acomptes", a.id));
-      teacherAbsences.forEach((ab) => deleteFrom("absences", ab.id));
-
-      // Record in cash register
-      push("cash", {
-        id: uid("csh"),
-        type: "teacher_payment",
-        amount: -netAmount,
-        date: new Date().toISOString(),
-        description: `Règlement salaire au pourcentage - ${selectedTeacher.firstName} ${selectedTeacher.lastName}`,
-      });
+      alert(
+        `Paiement validé : ${res.net} DA versés (${res.sessions} présence(s), brut ${res.gross} DA, acomptes -${res.acomptes} DA, absences -${res.absences} DA).`
+      );
     } else {
       // Monthly payment
       if (!monthKey) return;
@@ -292,6 +338,7 @@ export function TeachersPage() {
     }
 
     setIsPayOpen(false);
+    setIsUnpaidDetailOpen(false);
   };
 
   const handlePrintTeacherReport = () => {
@@ -1476,7 +1523,10 @@ export function TeachersPage() {
                       </span>
                     </div>
 
-                    <div className="pt-4 flex justify-end">
+                    <div className="pt-4 flex flex-col sm:flex-row justify-end gap-2">
+                      <Button variant="outline" onClick={() => setIsUnpaidDetailOpen(true)}>
+                        📋 Calculer & voir le détail des séances
+                      </Button>
                       <Button onClick={() => handlePaymentSubmit()}>Valider le paiement de séance</Button>
                     </div>
                   </>
@@ -1512,6 +1562,124 @@ export function TeachersPage() {
             </>
           )}
         </div>
+      </Modal>
+
+      {/* Unpaid séances calculation detail — every timing, student, hour and amount */}
+      <Modal
+        open={isUnpaidDetailOpen}
+        onClose={() => setIsUnpaidDetailOpen(false)}
+        title="Calcul des séances non payées"
+        wide
+      >
+        {selectedTeacher && (() => {
+          const detail = buildUnpaidDetail(selectedTeacher.id);
+          const totalShare = detail.reduce((s, d) => s + d.totalPayout, 0);
+          const totalFees = detail.reduce((s, d) => s + d.totalFees, 0);
+          const totalPresences = detail.reduce((s, d) => s + d.students.length, 0);
+          const totAcomptes = getTeacherAcomptes(selectedTeacher.id).reduce((s, a) => s + a.amount, 0);
+          const totAbsences = getTeacherAbsences(selectedTeacher.id).reduce((s, a) => s + a.cost, 0);
+          const net = totalShare - totAcomptes - totAbsences;
+
+          return (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="bg-canvas border border-line p-3 rounded-xl text-center">
+                  <span className="text-muted text-[10px] uppercase block font-semibold">Séances dues</span>
+                  <strong className="text-ink text-base font-mono">{detail.length}</strong>
+                </div>
+                <div className="bg-canvas border border-line p-3 rounded-xl text-center">
+                  <span className="text-muted text-[10px] uppercase block font-semibold">Présences</span>
+                  <strong className="text-ink text-base font-mono">{totalPresences}</strong>
+                </div>
+                <div className="bg-canvas border border-line p-3 rounded-xl text-center">
+                  <span className="text-muted text-[10px] uppercase block font-semibold">Revenu élèves</span>
+                  <strong className="text-success text-base font-mono">{totalFees} DA</strong>
+                </div>
+                <div className="bg-canvas border border-line p-3 rounded-xl text-center">
+                  <span className="text-muted text-[10px] uppercase block font-semibold">Part enseignant</span>
+                  <strong className="text-primary text-base font-mono">{totalShare} DA</strong>
+                </div>
+              </div>
+
+              {detail.length === 0 ? (
+                <p className="text-xs text-muted italic text-center py-6">
+                  Aucune séance non payée pour cet enseignant.
+                </p>
+              ) : (
+                <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1">
+                  {detail.map((d) => (
+                    <div key={`${d.dateKey}_${d.sessionId}`} className="border border-line rounded-2xl bg-canvas/20 p-3">
+                      <div className="flex flex-wrap justify-between items-center gap-2 border-b border-line pb-2 mb-2 text-xs">
+                        <div>
+                          <strong className="text-ink block text-sm">
+                            📅 {new Date(`${d.dateKey}T12:00:00`).toLocaleDateString("fr-FR")} — {d.moduleName}
+                          </strong>
+                          <span className="text-muted">
+                            {d.className} | Groupe: {d.groupName} |{" "}
+                            <span className="font-mono">{d.startTime} - {d.endTime}</span>
+                          </span>
+                        </div>
+                        <Badge tone="primary" className="font-mono font-bold">+{d.totalPayout} DA</Badge>
+                      </div>
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-[10px] uppercase text-muted font-bold text-left">
+                            <th className="py-1">Élève</th>
+                            <th className="py-1">Heure</th>
+                            <th className="py-1">Statut</th>
+                            <th className="py-1 text-right">Tarif élève</th>
+                            <th className="py-1 text-right">Part prof ({selectedTeacher.percentage ?? 0}%)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {d.students.map((st, i) => (
+                            <tr key={i} className="border-t border-line/50">
+                              <td className="py-1.5 font-semibold text-ink">{st.name}</td>
+                              <td className="py-1.5 font-mono">{st.time}</td>
+                              <td className="py-1.5">
+                                <Badge tone={st.status === "En Retard" ? "warning" : "success"} className="text-[9px]">
+                                  {st.status}
+                                </Badge>
+                              </td>
+                              <td className="py-1.5 text-right font-mono">{st.fee} DA</td>
+                              <td className="py-1.5 text-right font-mono font-bold text-primary">{st.share} DA</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="bg-canvas border border-line rounded-2xl p-3 text-xs space-y-1.5">
+                <div className="flex justify-between">
+                  <span>Part enseignant brute ({detail.length} séance(s), {totalPresences} présence(s)) :</span>
+                  <strong className="text-primary">{totalShare} DA</strong>
+                </div>
+                <div className="flex justify-between text-danger">
+                  <span>Acomptes à déduire :</span>
+                  <strong>-{totAcomptes} DA</strong>
+                </div>
+                <div className="flex justify-between text-danger">
+                  <span>Retenues d'absences :</span>
+                  <strong>-{totAbsences} DA</strong>
+                </div>
+                <div className="flex justify-between border-t border-line pt-1.5 font-bold text-sm text-success">
+                  <span>NET À PAYER :</span>
+                  <span>{net} DA</span>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setIsUnpaidDetailOpen(false)}>Fermer</Button>
+                <Button onClick={() => handlePaymentSubmit()} disabled={net <= 0}>
+                  Payer {net} DA maintenant
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
 
       {/* Print Salary Modal */}
