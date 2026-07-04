@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { motion } from "framer-motion";
 import { NAV_BY_ROLE, type NavItem } from "@/lib/nav";
 import { useSession } from "@/lib/store/session";
 import { useData } from "@/lib/store/data";
@@ -61,11 +60,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           const content = (
             <>
               {active && (
-                <motion.span
-                  layoutId="sidebar-active"
-                  className="absolute inset-0 -z-10 rounded-xl bg-gradient-primary shadow-md shadow-primary/15"
-                  transition={{ type: "spring", stiffness: 450, damping: 35 }}
-                />
+                // Plain CSS highlight (no framer `layoutId`): shared-layout
+                // projection was detaching this node during route-change
+                // unmounts and crashing React's commit with
+                // "Cannot read properties of null (reading 'removeChild')".
+                <span className="absolute inset-0 -z-10 rounded-xl bg-gradient-primary shadow-md shadow-primary/15" />
               )}
               <span className="text-lg leading-none">{item.emoji}</span>
               <span className="truncate">{t(`nav.${item.key}`)}</span>

@@ -537,7 +537,6 @@ function AnalyticCard({
 
   return (
     <motion.div
-      layout
       initial={{ opacity: 0, y: 22, scale: 0.97 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{ opacity: 0, y: -10, scale: 0.97 }}
@@ -878,7 +877,7 @@ export function AnalyticsPage() {
             />
           ) : (
             <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 xl:grid-cols-3">
-              <AnimatePresence mode="popLayout">
+              <AnimatePresence>
                 {activeList.map((s, i) => (
                   <AnalyticCard
                     key={s.id}
@@ -961,11 +960,7 @@ function TabButton({
       }`}
     >
       {active && (
-        <motion.span
-          layoutId="analytics-tab"
-          className="absolute inset-0 rounded-xl bg-gradient-primary"
-          transition={{ type: "spring", stiffness: 400, damping: 32 }}
-        />
+        <span className="absolute inset-0 rounded-xl bg-gradient-primary" />
       )}
       <span className="relative flex items-center gap-2">
         {icon}

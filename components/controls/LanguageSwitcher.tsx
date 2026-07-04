@@ -1,6 +1,5 @@
 "use client";
 
-import { motion } from "framer-motion";
 import { useSettings, type Language } from "@/lib/store/settings";
 import { cn } from "@/lib/utils";
 
@@ -36,11 +35,7 @@ export function LanguageSwitcher({ className }: { className?: string }) {
             )}
           >
             {active && (
-              <motion.span
-                layoutId="lang-pill"
-                className="absolute inset-0 -z-10 rounded-full bg-gradient-primary"
-                transition={{ type: "spring", stiffness: 400, damping: 30 }}
-              />
+              <span className="absolute inset-0 -z-10 rounded-full bg-gradient-primary" />
             )}
             {opt.label}
           </button>

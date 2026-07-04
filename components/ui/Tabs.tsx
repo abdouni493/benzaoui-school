@@ -1,6 +1,5 @@
 "use client";
 
-import { motion } from "framer-motion";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 
@@ -25,11 +24,7 @@ export function Tabs({
             )}
           >
             {active === tab.id && (
-              <motion.span
-                layoutId="tab-pill"
-                className="absolute inset-0 -z-10 rounded-lg bg-gradient-primary"
-                transition={{ type: "spring", stiffness: 380, damping: 30 }}
-              />
+              <span className="absolute inset-0 -z-10 rounded-lg bg-gradient-primary" />
             )}
             {tab.label}
           </button>

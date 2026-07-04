@@ -1,6 +1,5 @@
 "use client";
 
-import { motion } from "framer-motion";
 import { useSettings, type Theme } from "@/lib/store/settings";
 import { useTranslation } from "@/lib/i18n/useTranslation";
 import { cn } from "@/lib/utils";
@@ -36,11 +35,9 @@ export function ThemeToggle({ className }: { className?: string }) {
             className="relative z-10 flex h-7 w-7 items-center justify-center rounded-full cursor-pointer"
           >
             {active && (
-              <motion.span
-                layoutId="theme-pill"
+              <span
                 className="absolute inset-0 -z-10 rounded-full border-2 border-white/70 card-shadow"
                 style={{ backgroundColor: opt.swatch }}
-                transition={{ type: "spring", stiffness: 400, damping: 30 }}
               />
             )}
             <span
