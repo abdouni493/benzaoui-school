@@ -32,6 +32,8 @@ import type { Student, Subscription, SubscriptionDates, Coursework, BalanceTrans
 import { addMonths, daysUntil, formatDateFr, todayIso, EXPIRY_WARNING_DAYS } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 import { printHtmlDocument } from "@/lib/print";
+import { buildStudentPaymentsReport } from "@/lib/reports/studentPayments";
+import { speakMessage, speechCaseForScan } from "@/lib/speech";
 import { useToast } from "@/lib/store/toast";
 
 export function StudentsPage() {
@@ -58,7 +60,7 @@ export function StudentsPage() {
     scanCard,
   } = useData();
 
-  const { autoSendWhatsapp, autoSendEmail, setAutoSendWhatsapp, setAutoSendEmail } = useSettings();
+  const { language, autoSendWhatsapp, autoSendEmail, setAutoSendWhatsapp, setAutoSendEmail } = useSettings();
   const { addToast } = useToast();
 
   // Search & Filtering
@@ -106,6 +108,11 @@ export function StudentsPage() {
     settledReg: boolean;
   } | null>(null);
 
+  // Print payments over a period (same flow as the teacher report)
+  const [isPrintPayOpen, setIsPrintPayOpen] = useState(false);
+  const [printPayStart, setPrintPayStart] = useState("");
+  const [printPayEnd, setPrintPayEnd] = useState("");
+
   // Form: Assign subscription/coursework
   const [assignSearch, setAssignSearch] = useState("");
   const [selectedAssignIds, setSelectedAssignIds] = useState<string[]>([]); // subscription or coursework ids
@@ -126,6 +133,37 @@ export function StudentsPage() {
 
   // Tab state in Details modal
   const [detailsTab, setDetailsTab] = useState<"personal" | "subs" | "payments" | "attendance">("personal");
+
+  // Details modal filters — transactions per module; presences per module and
+  // per date (by month or custom period)
+  const [txModuleFilter, setTxModuleFilter] = useState<string>("all");
+  const [attModuleFilter, setAttModuleFilter] = useState<string>("all");
+  const [attDateMode, setAttDateMode] = useState<"all" | "month" | "range">("all");
+  const [attMonth, setAttMonth] = useState("");
+  const [attStart, setAttStart] = useState("");
+  const [attEnd, setAttEnd] = useState("");
+
+  // The selected student is a snapshot: re-sync it after every store refresh
+  // (scan, topup, fetchAll) so the detail view never shows stale data.
+  useEffect(() => {
+    if (!selectedStudent) return;
+    const fresh = students.find((s) => s.id === selectedStudent.id);
+    if (fresh && fresh !== selectedStudent) setSelectedStudent(fresh);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [students]);
+
+  /** Modules assigned to a student (via his subscriptions), for the filters. */
+  const getStudentModuleOptions = (stu: Student) => {
+    const map = new Map<string, string>();
+    stu.subscriptionIds.forEach((subId) => {
+      const sub = subscriptions.find((s) => s.id === subId);
+      const sess = sub ? sessions.find((se) => se.id === sub.sessionId) : undefined;
+      if (!sess) return;
+      const mod = modules.find((m) => m.id === sess.moduleId);
+      if (mod) map.set(mod.id, mod.name);
+    });
+    return [...map.entries()].map(([id, name]) => ({ id, name }));
+  };
 
   // Helpers
   const getModuleLabel = (subId: string) => {
@@ -380,6 +418,12 @@ export function StudentsPage() {
     const res = await scanCard(scanRfidInput);
     const matchedStu = students.find((s) => s.rfid === scanRfidInput || s.id === scanRfidInput);
 
+    // Voice verdict (good / low / expired) once the check-in RPC answered.
+    const speechCase = speechCaseForScan(res);
+    if (speechCase) {
+      speakMessage(speechCase, matchedStu ? `${matchedStu.firstName} ${matchedStu.lastName}` : "", language);
+    }
+
     if (res.ok && matchedStu) {
       const seance = res.moduleName
         ? ` — ${res.moduleName}${res.sessionStart ? ` (${res.sessionStart} - ${res.sessionEnd})` : ""}`
@@ -400,11 +444,14 @@ export function StudentsPage() {
     } else {
       const failureMsgs: Record<string, string> = {
         "scan.noSession": "Aucune séance programmée à cette heure.",
-        "scan.noSessionToday": "Aucune séance prévue pour cet élève aujourd'hui.",
+        "scan.noSessionToday": "Aucune séance de son niveau/module aujourd'hui.",
         "scan.noSessionNow": "Ce n'est pas l'heure de la séance de cet élève.",
         "scan.tooEarly": `Trop tôt — la séance n'a pas encore commencé.${res.nextStart ? ` Prochaine séance à ${res.nextStart}.` : ""}`,
         "scan.sessionEnded": "Séance déjà terminée — scan refusé, l'élève reste absent.",
         "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui.",
+        "scan.notEligible": "La séance en cours est d'un autre niveau ou d'un module non affecté à cet élève.",
+        "scan.expired": "Solde épuisé — entrée refusée (aucune présence, aucune dette créée).",
+        "scan.cooldown": "Déjà enregistré — passage ignoré (moins de 30 min depuis le dernier scan).",
         "scan.debtBlocked": "Élève EN DETTE — entrée refusée. Veuillez régler la dette.",
         "scan.notFound": "Carte introuvable.",
         "scan.error": "Erreur lors du scan — réessayez.",
@@ -456,6 +503,12 @@ export function StudentsPage() {
   const openDetails = (stu: Student) => {
     setSelectedStudent(stu);
     setDetailsTab("personal");
+    setTxModuleFilter("all");
+    setAttModuleFilter("all");
+    setAttDateMode("all");
+    setAttMonth("");
+    setAttStart("");
+    setAttEnd("");
     setIsDetailsOpen(true);
     setOverlayStudentId(null);
   };
@@ -480,6 +533,35 @@ export function StudentsPage() {
     setSettleReg(false);
     setIsTopupOpen(true);
     setOverlayStudentId(null);
+  };
+
+  const openPrintPayments = (stu: Student) => {
+    setSelectedStudent(stu);
+    setPrintPayStart("");
+    setPrintPayEnd("");
+    setIsPrintPayOpen(true);
+    setOverlayStudentId(null);
+  };
+
+  const handlePrintPayments = () => {
+    if (!selectedStudent) return;
+    printHtmlDocument(
+      buildStudentPaymentsReport({
+        student: selectedStudent,
+        school,
+        lang: language,
+        startDate: printPayStart,
+        endDate: printPayEnd,
+        balanceTx,
+        subscriptions,
+        sessions,
+        classes,
+        modules,
+        groups,
+        parents,
+      }),
+    );
+    setIsPrintPayOpen(false);
   };
 
   const openPayDebt = (stu: Student) => {
@@ -1285,6 +1367,12 @@ export function StudentsPage() {
                       >
                         <Edit className="h-3.5 w-3.5" /> Modifier
                       </button>
+                      <button
+                        onClick={() => openPrintPayments(stu)}
+                        className="flex items-center gap-1.5 justify-center bg-white/10 hover:bg-white/20 py-2 rounded-xl col-span-2"
+                      >
+                        <Printer className="h-3.5 w-3.5" /> Imprimer Paiements (Période)
+                      </button>
                     </div>
                     <button
                       onClick={() => handleDelete(stu.id)}
@@ -1297,19 +1385,24 @@ export function StudentsPage() {
 
                 <div>
                   <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openDetails(stu)}
+                      title="Voir la fiche de l'élève"
+                      className="flex items-center gap-2 text-start rounded-xl hover:bg-primary-50/60 transition-colors p-0.5 -m-0.5"
+                    >
                       <div className="h-10 w-10 bg-primary/10 rounded-xl flex items-center justify-center font-bold text-primary text-sm">
                         {stu.firstName.substring(0, 1)}{stu.lastName.substring(0, 1)}
                       </div>
                       <div>
-                        <h4 className="text-sm font-bold text-ink">
+                        <h4 className="text-sm font-bold text-ink hover:text-primary transition-colors">
                           {stu.firstName} {stu.lastName}
                         </h4>
                         <span className="text-[10px] text-muted block flex items-center gap-1">
                           <CreditCard className="h-3 w-3 inline" /> {stu.rfid}
                         </span>
                       </div>
-                    </div>
+                    </button>
 
                     <button
                       onClick={() => setOverlayStudentId(stu.id)}
@@ -1654,58 +1747,149 @@ export function StudentsPage() {
                 </div>
               )}
 
-              {detailsTab === "payments" && (
-                <div className="space-y-2 max-h-60 overflow-y-auto">
-                  {balanceTx.filter((t) => t.studentId === selectedStudent.id).length === 0 ? (
-                    <p className="text-xs text-muted italic">Aucun historique de paiement disponible.</p>
-                  ) : (
-                    balanceTx
-                      .filter((t) => t.studentId === selectedStudent.id)
-                      .reverse()
-                      .map((tx) => (
-                        <div key={tx.id} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
-                          <div>
-                            <strong className="text-ink block">{tx.description}</strong>
-                            <span className="text-[10px] text-muted">{tx.date.substring(0, 16).replace("T", " ")}</span>
-                          </div>
-                          <strong className={tx.amount > 0 ? "text-success font-bold" : "text-danger font-bold"}>
-                            {tx.amount > 0 ? `+${tx.amount}` : tx.amount} DA
-                          </strong>
-                        </div>
-                      ))
-                  )}
-                </div>
-              )}
-
-              {detailsTab === "attendance" && (
-                <div className="space-y-2 max-h-60 overflow-y-auto">
-                  {attendance.filter((t) => t.studentId === selectedStudent.id).length === 0 ? (
-                    <p className="text-xs text-muted italic">Aucun historique de présence disponible.</p>
-                  ) : (
-                    attendance
-                      .filter((t) => t.studentId === selectedStudent.id)
-                      .reverse()
-                      .map((att) => {
-                        const s = sessions.find((se) => se.id === att.sessionId);
-                        const modName = s ? modules.find((m) => m.id === s.moduleId)?.name : "Module";
-                        return (
-                          <div key={att.id} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
+              {detailsTab === "payments" && (() => {
+                const moduleOptions = getStudentModuleOptions(selectedStudent);
+                const filterModuleName =
+                  txModuleFilter === "all" ? "" : modules.find((m) => m.id === txModuleFilter)?.name ?? "";
+                const txList = balanceTx.filter((t) => {
+                  if (t.studentId !== selectedStudent.id) return false;
+                  if (txModuleFilter === "all") return true;
+                  // Rows older than balance_tx.module_id are matched by the
+                  // module name embedded in their description.
+                  if (t.moduleId) return t.moduleId === txModuleFilter;
+                  return !!filterModuleName && t.description.toLowerCase().includes(filterModuleName.toLowerCase());
+                });
+                return (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2 bg-canvas/40 border border-line rounded-xl p-2">
+                      <label className="text-[10px] font-bold text-muted uppercase shrink-0">Module :</label>
+                      <Select value={txModuleFilter} onChange={(e) => setTxModuleFilter(e.target.value)} className="w-52">
+                        <option value="all">Tous les modules</option>
+                        {moduleOptions.map((m) => (
+                          <option key={m.id} value={m.id}>{m.name}</option>
+                        ))}
+                      </Select>
+                      <span className="text-[10px] text-muted ms-auto font-mono">{txList.length} transaction(s)</span>
+                    </div>
+                    <div className="space-y-2 max-h-60 overflow-y-auto">
+                      {txList.length === 0 ? (
+                        <p className="text-xs text-muted italic">Aucune transaction pour ce filtre.</p>
+                      ) : (
+                        [...txList].reverse().map((tx) => (
+                          <div key={tx.id} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
                             <div>
-                              <strong className="text-ink block">Présence: {modName}</strong>
-                              <span className="text-[10px] text-muted">{att.timestamp.substring(0, 16).replace("T", " ")}</span>
+                              <strong className="text-ink block">{tx.description}</strong>
+                              <span className="text-[10px] text-muted">{tx.date.substring(0, 16).replace("T", " ")}</span>
                             </div>
-                            <div className="flex items-center gap-2">
-                              <Badge tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}>
-                                {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
-                              </Badge>
-                              <span className="font-bold text-danger text-[10px]">-{att.amountDeducted} DA</span>
-                            </div>
+                            <strong className={tx.amount > 0 ? "text-success font-bold" : "text-danger font-bold"}>
+                              {tx.amount > 0 ? `+${tx.amount}` : tx.amount} DA
+                            </strong>
                           </div>
-                        );
-                      })
-                  )}
-                </div>
-              )}
+                        ))
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {detailsTab === "attendance" && (() => {
+                const moduleOptions = getStudentModuleOptions(selectedStudent);
+                const attList = attendance.filter((att) => {
+                  if (att.studentId !== selectedStudent.id) return false;
+                  if (attModuleFilter !== "all") {
+                    const sess = sessions.find((se) => se.id === att.sessionId);
+                    if (!sess || sess.moduleId !== attModuleFilter) return false;
+                  }
+                  const when = new Date(att.timestamp);
+                  if (attDateMode === "month" && attMonth) {
+                    const key = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}`;
+                    if (key !== attMonth) return false;
+                  }
+                  if (attDateMode === "range") {
+                    if (attStart && when < new Date(`${attStart}T00:00:00`)) return false;
+                    if (attEnd && when > new Date(`${attEnd}T23:59:59.999`)) return false;
+                  }
+                  return true;
+                });
+                return (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2 bg-canvas/40 border border-line rounded-xl p-2">
+                      <label className="text-[10px] font-bold text-muted uppercase shrink-0">Module :</label>
+                      <Select value={attModuleFilter} onChange={(e) => setAttModuleFilter(e.target.value)} className="w-44">
+                        <option value="all">Tous les modules</option>
+                        {moduleOptions.map((m) => (
+                          <option key={m.id} value={m.id}>{m.name}</option>
+                        ))}
+                      </Select>
+
+                      <label className="text-[10px] font-bold text-muted uppercase shrink-0 ms-2">Date :</label>
+                      <div className="flex gap-1">
+                        {([
+                          ["all", "Tout"],
+                          ["month", "Par mois"],
+                          ["range", "Période"],
+                        ] as const).map(([mode, label]) => (
+                          <Button
+                            key={mode}
+                            size="sm"
+                            variant={attDateMode === mode ? "primary" : "outline"}
+                            onClick={() => setAttDateMode(mode)}
+                          >
+                            {label}
+                          </Button>
+                        ))}
+                      </div>
+
+                      {attDateMode === "month" && (
+                        <Input
+                          type="month"
+                          value={attMonth}
+                          onChange={(e) => setAttMonth(e.target.value)}
+                          className="w-40"
+                        />
+                      )}
+                      {attDateMode === "range" && (
+                        <div className="flex items-center gap-1.5">
+                          <Input type="date" value={attStart} onChange={(e) => setAttStart(e.target.value)} className="w-36" />
+                          <span className="text-[10px] text-muted">→</span>
+                          <Input type="date" value={attEnd} onChange={(e) => setAttEnd(e.target.value)} className="w-36" />
+                        </div>
+                      )}
+
+                      <span className="text-[10px] text-muted ms-auto font-mono">{attList.length} présence(s)</span>
+                    </div>
+
+                    <div className="space-y-2 max-h-60 overflow-y-auto">
+                      {attList.length === 0 ? (
+                        <p className="text-xs text-muted italic">Aucune présence pour ces filtres.</p>
+                      ) : (
+                        [...attList].reverse().map((att) => {
+                          const s = sessions.find((se) => se.id === att.sessionId);
+                          const modName = s ? modules.find((m) => m.id === s.moduleId)?.name : "Module";
+                          const grpName = s ? groups.find((g) => g.id === s.groupId)?.name : undefined;
+                          return (
+                            <div key={att.id} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
+                              <div>
+                                <strong className="text-ink block">
+                                  Présence: {modName}
+                                  {grpName ? <span className="text-muted font-semibold"> — {grpName}</span> : null}
+                                </strong>
+                                <span className="text-[10px] text-muted">{att.timestamp.substring(0, 16).replace("T", " ")}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <Badge tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}>
+                                  {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
+                                </Badge>
+                                <span className="font-bold text-danger text-[10px]">-{att.amountDeducted} DA</span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="flex justify-end pt-2 border-t border-line">
@@ -2094,6 +2278,45 @@ export function StudentsPage() {
               className="flex items-center gap-2"
             >
               <Send className="h-4 w-4" /> Envoyer les alertes ({selectedAlertStudentIds.length})
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Print payments over a period — pick range, generate, print */}
+      <Modal
+        open={isPrintPayOpen}
+        onClose={() => setIsPrintPayOpen(false)}
+        title="Imprimer les paiements — sélectionner la période"
+      >
+        <div className="space-y-4">
+          {selectedStudent && (
+            <div className="bg-canvas border border-line rounded-xl p-3 text-xs">
+              <span className="text-[10px] text-muted block uppercase">Élève</span>
+              <strong className="text-ink block mt-0.5">
+                {selectedStudent.firstName} {selectedStudent.lastName}
+              </strong>
+              <span className="text-muted">Solde actuel: {selectedStudent.balance} DA</span>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs font-semibold text-muted mb-1">Date de début</label>
+              <Input type="date" value={printPayStart} onChange={(e) => setPrintPayStart(e.target.value)} />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-muted mb-1">Date de fin</label>
+              <Input type="date" value={printPayEnd} onChange={(e) => setPrintPayEnd(e.target.value)} />
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2 pt-4">
+            <Button variant="outline" onClick={() => setIsPrintPayOpen(false)}>
+              Annuler
+            </Button>
+            <Button onClick={handlePrintPayments} className="flex items-center gap-2">
+              <Printer className="h-4 w-4" /> Générer & Imprimer
             </Button>
           </div>
         </div>

@@ -21,6 +21,8 @@ export interface CreateUserPayload {
   startDate?: string;
   percentage?: number;
   salary?: number;
+  /** worker (reception_staff) job: reception | security | menage */
+  workerRole?: string;
 }
 
 /** Creates a Supabase Auth login + the matching role-specific row via the

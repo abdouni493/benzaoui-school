@@ -23,7 +23,26 @@ import {
   History,
   X,
 } from "lucide-react";
-import type { ReceptionStaff, TeacherAcompte, TeacherAbsence } from "@/lib/types";
+import type { ReceptionPaymentType, ReceptionStaff, TeacherAcompte, TeacherAbsence, WorkerRole } from "@/lib/types";
+import { createClient } from "@/lib/supabase/client";
+
+const ROLE_LABELS: Record<WorkerRole, string> = {
+  reception: "Réception",
+  security: "Agent de sécurité",
+  menage: "Ménage",
+};
+
+const PAYMENT_LABELS: Record<ReceptionPaymentType, string> = {
+  monthly: "Mensuel",
+  daily: "Journalier",
+  half_day: "Demi-journée",
+};
+
+const PAYMENT_UNITS: Record<ReceptionPaymentType, string> = {
+  monthly: "m",
+  daily: "j",
+  half_day: "½j",
+};
 
 export function AdministrationPage() {
   const {
@@ -45,13 +64,14 @@ export function AdministrationPage() {
   const [isPayOpen, setIsPayOpen] = useState(false);
   const [selectedStaff, setSelectedStaff] = useState<ReceptionStaff | null>(null);
 
-  // Form: Create/Edit Receptionist
+  // Form: Create/Edit Worker
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [paymentType, setPaymentType] = useState<"daily" | "monthly">("monthly");
+  const [role, setRole] = useState<WorkerRole>("reception");
+  const [paymentType, setPaymentType] = useState<ReceptionPaymentType>("monthly");
   const [salary, setSalary] = useState<number>(0);
   const [startDate, setStartDate] = useState(new Date().toISOString().split("T")[0]);
 
@@ -144,55 +164,102 @@ export function AdministrationPage() {
   };
 
   const handleCreateStaff = async () => {
-    if (!firstName || !lastName || !phone || !email) {
+    if (!firstName || !lastName || !phone) {
       alert("Champs obligatoires manquants.");
       return;
     }
-    if (password.length < 6) {
-      alert("Le mot de passe doit contenir au moins 6 caractères.");
-      return;
-    }
 
-    try {
-      const { id: staffId } = await createRoleUser({
-        role: "reception",
-        email,
-        password,
-        firstName,
-        lastName,
+    // Ménage never gets a login; Réception / Agent de sécurité only get one
+    // when the (optional) credential fields are actually filled in.
+    const wantsAccount = role !== "menage" && (email.trim() !== "" || password !== "");
+
+    if (wantsAccount) {
+      if (!email.trim()) {
+        alert("Veuillez saisir un email de connexion (ou laisser les deux champs vides pour créer sans compte).");
+        return;
+      }
+      if (password.length < 6) {
+        alert("Le mot de passe doit contenir au moins 6 caractères.");
+        return;
+      }
+
+      try {
+        const { id: staffId } = await createRoleUser({
+          role: "reception",
+          email,
+          password,
+          firstName,
+          lastName,
+          phone,
+          paymentType,
+          startDate,
+          salary,
+          workerRole: role,
+        });
+        push("reception", {
+          id: staffId,
+          firstName,
+          lastName,
+          phone,
+          email,
+          paymentType,
+          startDate,
+          salary,
+          role,
+        });
+      } catch (err) {
+        alert(err instanceof Error ? err.message : "Erreur lors de la création du compte.");
+        return;
+      }
+    } else {
+      // Worker without login: plain table row, no auth user is created.
+      const workerId = uid("wrk");
+      const supabase = createClient();
+      const { error } = await supabase.from("reception_staff").insert({
+        id: workerId,
+        first_name: firstName,
+        last_name: lastName,
         phone,
-        paymentType,
-        startDate,
+        email: email.trim() || null,
+        payment_type: paymentType,
+        start_date: startDate,
         salary,
+        role,
       });
-
-      const newStaff: ReceptionStaff = {
-        id: staffId,
+      if (error) {
+        alert(`Erreur lors de la création du travailleur: ${error.message}`);
+        return;
+      }
+      push("reception", {
+        id: workerId,
         firstName,
         lastName,
         phone,
-        email,
+        email: email.trim(),
         paymentType,
         startDate,
         salary,
-      };
-      push("reception", newStaff);
-
-      setIsCreateOpen(false);
-      resetForm();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Erreur lors de la création du compte.");
+        role,
+      });
     }
+
+    setIsCreateOpen(false);
+    resetForm();
   };
 
   const handleEditStaff = async () => {
     if (!selectedStaff) return;
 
-    if (password) {
+    if (password && role !== "menage") {
       try {
         await resetUserPassword(selectedStaff.id, password);
       } catch (err) {
-        alert(err instanceof Error ? err.message : "Erreur lors du changement de mot de passe.");
+        // Workers created without credentials have no auth account to update.
+        alert(
+          err instanceof Error
+            ? `${err.message} — ce travailleur n'a probablement pas de compte de connexion.`
+            : "Erreur lors du changement de mot de passe.",
+        );
         return;
       }
     }
@@ -202,6 +269,7 @@ export function AdministrationPage() {
       lastName,
       phone,
       email,
+      role,
       paymentType,
       startDate,
       salary,
@@ -211,7 +279,7 @@ export function AdministrationPage() {
   };
 
   const handleDelete = (id: string) => {
-    if (confirm("Êtes-vous sûr de vouloir supprimer cet agent de réception ?")) {
+    if (confirm("Êtes-vous sûr de vouloir supprimer ce travailleur ?")) {
       deleteFrom("reception", id);
       setActiveMenuId(null);
     }
@@ -289,6 +357,7 @@ export function AdministrationPage() {
     setPhone("");
     setEmail("");
     setPassword("");
+    setRole("reception");
     setPaymentType("monthly");
     setSalary(0);
     setSelectedStaff(null);
@@ -301,6 +370,7 @@ export function AdministrationPage() {
     setPhone(staff.phone);
     setEmail(staff.email);
     setPassword("");
+    setRole(staff.role ?? "reception");
     setPaymentType(staff.paymentType);
     setStartDate(staff.startDate);
     setSalary(staff.salary);
@@ -340,9 +410,9 @@ export function AdministrationPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <PageHeader emoji="👥" title="Réception" subtitle="Gérer le personnel d'accueil et de secrétariat" />
+        <PageHeader emoji="👥" title="Travailleurs" subtitle="Gérer le personnel : réception, sécurité et ménage" />
         <Button onClick={() => { resetForm(); setIsCreateOpen(true); }} className="flex items-center gap-2">
-          <Plus className="h-4 w-4" /> Nouveau Personnel
+          <Plus className="h-4 w-4" /> Nouveau Travailleur
         </Button>
       </div>
 
@@ -434,6 +504,9 @@ export function AdministrationPage() {
                           {staff.firstName} {staff.lastName}
                         </h4>
                         <span className="text-[10px] text-muted block font-mono truncate">{staff.phone}</span>
+                        <Badge tone={staff.role === "menage" ? "neutral" : staff.role === "security" ? "warning" : "primary"} className="text-[9px] px-1.5 py-0 mt-0.5">
+                          {ROLE_LABELS[staff.role ?? "reception"]}
+                        </Badge>
                       </div>
                     </div>
 
@@ -450,13 +523,13 @@ export function AdministrationPage() {
                       <div>
                         <span className="text-[10px] text-muted block uppercase font-semibold">Contrat</span>
                         <span className="font-semibold text-ink">
-                          {staff.paymentType === "monthly" ? "Fixe Mensuel" : "Fixe Journalier"}
+                          {PAYMENT_LABELS[staff.paymentType]}
                         </span>
                       </div>
                       <div className="text-right">
                         <span className="text-[10px] text-muted block uppercase font-semibold">Rémunération</span>
                         <span className="font-bold text-primary">
-                          {staff.salary} DA / {staff.paymentType === "monthly" ? "m" : "j"}
+                          {staff.salary} DA / {PAYMENT_UNITS[staff.paymentType]}
                         </span>
                       </div>
                     </div>
@@ -493,7 +566,7 @@ export function AdministrationPage() {
       </div>
 
       {/* Creation Modal */}
-      <Modal open={isCreateOpen} onClose={() => setIsCreateOpen(false)} title="Créer un agent de réception" wide>
+      <Modal open={isCreateOpen} onClose={() => setIsCreateOpen(false)} title="Créer un travailleur" wide>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-xs font-semibold text-muted mb-1 font-sans">Prénom *</label>
@@ -511,20 +584,42 @@ export function AdministrationPage() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-muted mb-1 font-sans">Email (Login) *</label>
-            <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@ecole.com" />
+            <label className="block text-xs font-semibold text-muted mb-1">Rôle *</label>
+            <Select value={role} onChange={(e) => setRole(e.target.value as WorkerRole)} className="w-full">
+              <option value="reception">Réception</option>
+              <option value="security">Agent de sécurité</option>
+              <option value="menage">Ménage</option>
+            </Select>
           </div>
 
-          <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Mot de passe *</label>
-            <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="6 caractères min." />
-          </div>
+          {role !== "menage" ? (
+            <>
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1 font-sans">Email (Login) — optionnel</label>
+                <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@ecole.com" />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1">Mot de passe — optionnel</label>
+                <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="6 caractères min." />
+              </div>
+
+              <div className="md:col-span-2 bg-primary-50/50 border border-line rounded-xl p-2.5 text-[10px] text-muted">
+                Laissez l&apos;email et le mot de passe vides pour créer ce travailleur <strong>sans compte de connexion</strong>.
+              </div>
+            </>
+          ) : (
+            <div className="md:col-span-1 bg-canvas border border-line rounded-xl p-2.5 text-[10px] text-muted flex items-center">
+              Le rôle <strong className="mx-1">Ménage</strong> n&apos;a jamais de compte de connexion.
+            </div>
+          )}
 
           <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Fréquence de paiement</label>
-            <Select value={paymentType} onChange={(e) => setPaymentType(e.target.value as any)} className="w-full">
+            <label className="block text-xs font-semibold text-muted mb-1">Type de paiement</label>
+            <Select value={paymentType} onChange={(e) => setPaymentType(e.target.value as ReceptionPaymentType)} className="w-full">
               <option value="monthly">Mensuel</option>
               <option value="daily">Journalier</option>
+              <option value="half_day">Demi-journée</option>
             </Select>
           </div>
 
@@ -548,7 +643,7 @@ export function AdministrationPage() {
       </Modal>
 
       {/* Edit Modal */}
-      <Modal open={isEditOpen} onClose={() => setIsEditOpen(false)} title="Modifier l'agent de réception" wide>
+      <Modal open={isEditOpen} onClose={() => setIsEditOpen(false)} title="Modifier le travailleur" wide>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-xs font-semibold text-muted mb-1">Prénom</label>
@@ -563,18 +658,31 @@ export function AdministrationPage() {
             <Input value={phone} onChange={(e) => setPhone(e.target.value)} />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Email</label>
-            <Input value={email} onChange={(e) => setEmail(e.target.value)} />
+            <label className="block text-xs font-semibold text-muted mb-1">Rôle</label>
+            <Select value={role} onChange={(e) => setRole(e.target.value as WorkerRole)} className="w-full">
+              <option value="reception">Réception</option>
+              <option value="security">Agent de sécurité</option>
+              <option value="menage">Ménage</option>
+            </Select>
           </div>
-          <div>
-            <label className="block text-xs font-semibold text-muted mb-1 font-sans">Nouveau mot de passe</label>
-            <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Laisser vide pour ne pas changer" />
-          </div>
+          {role !== "menage" && (
+            <>
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1">Email</label>
+                <Input value={email} onChange={(e) => setEmail(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1 font-sans">Nouveau mot de passe</label>
+                <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Laisser vide pour ne pas changer" />
+              </div>
+            </>
+          )}
           <div>
             <label className="block text-xs font-semibold text-muted mb-1">Type Rémunération</label>
-            <Select value={paymentType} onChange={(e) => setPaymentType(e.target.value as any)} className="w-full">
+            <Select value={paymentType} onChange={(e) => setPaymentType(e.target.value as ReceptionPaymentType)} className="w-full">
               <option value="monthly">Mensuel</option>
               <option value="daily">Journalier</option>
+              <option value="half_day">Demi-journée</option>
             </Select>
           </div>
           <div>
@@ -596,7 +704,7 @@ export function AdministrationPage() {
       </Modal>
 
       {/* Details Modal */}
-      <Modal open={isDetailsOpen} onClose={() => setIsDetailsOpen(false)} title="Fiche de l'Agent de Réception" wide>
+      <Modal open={isDetailsOpen} onClose={() => setIsDetailsOpen(false)} title="Fiche du Travailleur" wide>
         {selectedStaff && (
           <div className="space-y-5 text-xs">
             {/* Header info */}
@@ -610,9 +718,14 @@ export function AdministrationPage() {
                   <span className="text-xs text-muted block">Téléphone: {selectedStaff.phone} | Email: {selectedStaff.email}</span>
                 </div>
               </div>
-              <Badge tone="primary" className="text-xs px-3 py-1 font-bold">
-                {selectedStaff.salary} DA / {selectedStaff.paymentType === "monthly" ? "Mois" : "Jour"}
-              </Badge>
+              <div className="flex items-center gap-2">
+                <Badge tone={selectedStaff.role === "menage" ? "neutral" : selectedStaff.role === "security" ? "warning" : "primary"} className="text-xs px-3 py-1 font-bold">
+                  {ROLE_LABELS[selectedStaff.role ?? "reception"]}
+                </Badge>
+                <Badge tone="primary" className="text-xs px-3 py-1 font-bold">
+                  {selectedStaff.salary} DA / {PAYMENT_LABELS[selectedStaff.paymentType]}
+                </Badge>
+              </div>
             </div>
 
             {/* Modal Tabs navigation */}
@@ -659,7 +772,7 @@ export function AdministrationPage() {
                   </div>
                   <div>
                     <span className="text-muted block text-[10px] uppercase font-semibold">Mode de paiement</span>
-                    <strong className="text-primary text-sm block mt-1 capitalize">{selectedStaff.paymentType}</strong>
+                    <strong className="text-primary text-sm block mt-1">{PAYMENT_LABELS[selectedStaff.paymentType]}</strong>
                   </div>
                   <div>
                     <span className="text-muted block text-[10px] uppercase font-semibold">Contact Téléphonique</span>

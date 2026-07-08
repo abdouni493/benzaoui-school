@@ -941,6 +941,10 @@ export function AttendancePage() {
           const inDebt = cost > 0 && stu.balance < 0;
           const goesDebt = cost > 0 && stu.balance >= 0 && after < 0;
           const low = cost > 0 && after >= 0 && after < price * 2;
+          // The mark_attendance RPC refuses any marking the balance can't
+          // cover unless reception explicitly forces it — the only flow
+          // allowed to create a debt (the RFID scan always refuses these).
+          const needsDebtForce = cost > 0 && stu.balance < cost;
           const sessionLabel = `${getModuleName(activeSession.moduleId)} (${activeSession.startTime} - ${activeSession.endTime})`;
           const dateLabel = new Date(`${sheetDate}T12:00:00`).toLocaleDateString("fr-FR");
 
@@ -1042,8 +1046,9 @@ export function AttendancePage() {
                   <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                   <div>
                     <strong>Le solde ne couvre pas cette séance :</strong> après validation, l'élève passera EN DETTE
-                    ({formatDA(after)}). Ce sera sa dernière entrée autorisée — il sera bloqué au prochain pointage
-                    tant que la dette n'est pas réglée.
+                    ({formatDA(after)}). La dette ne peut être créée que par cette action manuelle — sa carte sera
+                    refusée au scan tant que le solde ne couvre pas une séance. À la prochaine recharge, la dette sera
+                    déduite automatiquement.
                   </div>
                 </div>
               )}
@@ -1066,7 +1071,7 @@ export function AttendancePage() {
                 <Button variant="outline" disabled={busy} onClick={() => setConfirmMark(null)}>
                   Annuler
                 </Button>
-                {inDebt ? (
+                {needsDebtForce ? (
                   <Button variant="danger" disabled={busy} onClick={() => applyMark(stu, confirmMark.status, true)}>
                     Forcer — enregistrer en dette
                   </Button>

@@ -8,21 +8,74 @@ import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { 
-  Trash2, 
-  Edit, 
-  Eye, 
-  Plus, 
-  Calendar as CalendarIcon, 
-  User, 
-  MapPin, 
-  Users, 
-  Clock, 
+import {
+  Trash2,
+  Edit,
+  Eye,
+  Plus,
+  Calendar as CalendarIcon,
+  User,
+  MapPin,
+  Users,
+  Clock,
   BookOpen,
   Filter,
+  Printer,
   X
 } from "lucide-react";
 import type { ScheduleSession, Day } from "@/lib/types";
+import { printHtmlDocument } from "@/lib/print";
+import {
+  bannerHtml,
+  letterheadHtml,
+  metaFooterHtml,
+  printDocument,
+  signaturesHtml,
+} from "@/lib/printTemplates";
+import { useSettings } from "@/lib/store/settings";
+
+const PRINT_LABELS = {
+  fr: {
+    docTitle: "Emploi du Temps — Fiche de Séance",
+    printedOn: (d: string) => `Imprimé le ${d}`,
+    infoTitle: "Informations de la Séance",
+    tableTitle: "Horaires Détaillés",
+    day: "Jour",
+    time: "Horaire (début – fin)",
+    module: "Module / Matière",
+    group: "Groupe",
+    classLevel: "Classe / Niveau",
+    teacher: "Enseignant",
+    salle: "Salle",
+    enrolled: "Élèves inscrits",
+    signDirection: "La Direction",
+    signTeacher: "L'Enseignant",
+    days: {
+      saturday: "Samedi", sunday: "Dimanche", monday: "Lundi", tuesday: "Mardi",
+      wednesday: "Mercredi", thursday: "Jeudi", friday: "Vendredi",
+    } as Record<Day, string>,
+  },
+  ar: {
+    docTitle: "جدول التوقيت — بطاقة الحصة",
+    printedOn: (d: string) => `طُبع بتاريخ ${d}`,
+    infoTitle: "معلومات الحصة",
+    tableTitle: "التوقيت المفصّل",
+    day: "اليوم",
+    time: "التوقيت (البداية – النهاية)",
+    module: "المادة",
+    group: "الفوج",
+    classLevel: "القسم / المستوى",
+    teacher: "الأستاذ",
+    salle: "القاعة",
+    enrolled: "التلاميذ المسجلون",
+    signDirection: "الإدارة",
+    signTeacher: "الأستاذ",
+    days: {
+      saturday: "السبت", sunday: "الأحد", monday: "الإثنين", tuesday: "الثلاثاء",
+      wednesday: "الأربعاء", thursday: "الخميس", friday: "الجمعة",
+    } as Record<Day, string>,
+  },
+} as const;
 
 const WEEKDAYS: { key: Day; label: string }[] = [
   { key: "saturday", label: "Samedi" },
@@ -36,6 +89,7 @@ const WEEKDAYS: { key: Day; label: string }[] = [
 
 export function PlannerPage() {
   const {
+    school,
     sessions,
     classes,
     modules,
@@ -48,6 +102,7 @@ export function PlannerPage() {
     deleteFrom,
     updateItem,
   } = useData();
+  const { language } = useSettings();
 
   // View mode toggle
   const [viewMode, setViewMode] = useState<"calendar" | "cards">("calendar");
@@ -237,6 +292,92 @@ export function PlannerPage() {
   const openDetails = (s: ScheduleSession) => {
     setSelectedSession(s);
     setIsDetailsOpen(true);
+  };
+
+  // Print one timing card: school letterhead + a detailed table (one row per
+  // scheduled weekday) with module, group, class level, teacher and salle.
+  const handlePrintSession = (s: ScheduleSession) => {
+    const L = PRINT_LABELS[language];
+    const enrolledCount = getSessionStudents(s.id).length;
+    const orderedDays = WEEKDAYS.filter((wd) => s.days.includes(wd.key)).map((wd) => wd.key);
+    const printDate = new Date().toLocaleDateString(language === "ar" ? "ar-DZ" : "fr-FR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+
+    const rows = orderedDays
+      .map(
+        (day) => `
+          <tr>
+            <td style="font-weight:bold;">${L.days[day]}</td>
+            <td style="font-family:monospace; font-weight:700;">${s.startTime} – ${s.endTime}</td>
+            <td>${getModuleName(s.moduleId)}</td>
+            <td>${getGroupName(s.groupId)}</td>
+            <td>${getClassName(s.classId)}</td>
+            <td>${getTeacherName(s.teacherId)}</td>
+            <td>${getSalleName(s.salleId)}</td>
+          </tr>`,
+      )
+      .join("");
+
+    const bodyHtml = `
+      ${letterheadHtml(school)}
+      ${bannerHtml(L.docTitle, L.printedOn(printDate))}
+
+      <div class="frame frame-info" style="margin-bottom:20px;">
+        <h3>${L.infoTitle}</h3>
+        <table style="margin-top:0;">
+          <tr>
+            <td style="width:18%; font-weight:bold; color:#5c567a;">${L.module} :</td>
+            <td style="width:32%; font-weight:bold; font-size:1.1em;">${getModuleName(s.moduleId)}</td>
+            <td style="width:18%; font-weight:bold; color:#5c567a;">${L.group} :</td>
+            <td style="width:32%;">${getGroupName(s.groupId)}</td>
+          </tr>
+          <tr>
+            <td style="font-weight:bold; color:#5c567a;">${L.classLevel} :</td>
+            <td>${getClassName(s.classId)}</td>
+            <td style="font-weight:bold; color:#5c567a;">${L.teacher} :</td>
+            <td>${getTeacherName(s.teacherId)}</td>
+          </tr>
+          <tr>
+            <td style="font-weight:bold; color:#5c567a;">${L.salle} :</td>
+            <td>${getSalleName(s.salleId)}</td>
+            <td style="font-weight:bold; color:#5c567a;">${L.enrolled} :</td>
+            <td><span class="badge badge-primary">${enrolledCount}</span></td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="frame">
+        <h3>${L.tableTitle}</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>${L.day}</th>
+              <th>${L.time}</th>
+              <th>${L.module}</th>
+              <th>${L.group}</th>
+              <th>${L.classLevel}</th>
+              <th>${L.teacher}</th>
+              <th>${L.salle}</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+
+      ${signaturesHtml(L.signTeacher, L.signDirection)}
+      ${metaFooterHtml(school.name, language)}
+    `;
+
+    printHtmlDocument(
+      printDocument({
+        title: `${L.docTitle} - ${getModuleName(s.moduleId)} ${getGroupName(s.groupId)}`,
+        lang: language,
+        bodyHtml,
+      }),
+    );
   };
 
   const getSessionStudents = (sessionId: string) => {
@@ -521,6 +662,13 @@ export function PlannerPage() {
                             title="Consulter les détails"
                           >
                             <Eye className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={() => handlePrintSession(s)}
+                            className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-ink/80 transition-colors"
+                            title="Imprimer cet horaire"
+                          >
+                            <Printer className="h-4 w-4" />
                           </button>
                           <button
                             onClick={() => openEdit(s)}
@@ -931,6 +1079,9 @@ export function PlannerPage() {
             {/* Admin actions block */}
             <div className="flex flex-col sm:flex-row justify-between items-center gap-4 pt-4 border-t border-line">
               <div className="flex gap-2">
+                <Button variant="outline" className="flex items-center gap-1 text-xs text-ink" onClick={() => handlePrintSession(selectedSession)}>
+                  <Printer className="h-4 w-4" /> Imprimer
+                </Button>
                 <Button variant="outline" className="flex items-center gap-1 text-xs text-ink" onClick={() => openEdit(selectedSession)}>
                   <Edit className="h-4 w-4" /> Modifier
                 </Button>

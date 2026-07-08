@@ -26,14 +26,18 @@ import {
 } from "lucide-react";
 import type { Teacher, TeacherAcompte, TeacherAbsence, UnpaidTeacherSession } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
+import { buildTeacherPaymentReport } from "@/lib/reports/teacherPayment";
+import { useSettings } from "@/lib/store/settings";
 
 export function TeachersPage() {
   const {
     teachers,
     sessions,
+    subscriptions,
     modules,
     groups,
     classes,
+    salles,
     students,
     unpaidTeacher,
     acomptes,
@@ -46,6 +50,7 @@ export function TeachersPage() {
     updateItem,
     settleTeacherPercentage,
   } = useData();
+  const { language } = useSettings();
 
   // Modals
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -343,407 +348,26 @@ export function TeachersPage() {
 
   const handlePrintTeacherReport = () => {
     if (!selectedTeacher) return;
-
-    const start = printStart ? new Date(printStart) : new Date(0);
-    const end = printEnd ? new Date(printEnd) : new Date();
-
-    // Fetch matching sessions for teacher
-    const teacherSessions = sessions.filter((s) => s.teacherId === selectedTeacher.id);
-
-    // Group sessions by group structure
-    const groupReport: Record<string, { groupName: string; studentRevenues: number; presenceCount: number; paidCount: number; unpaidCount: number }> = {};
-
-    teacherSessions.forEach((s) => {
-      const g = groups.find((gr) => gr.id === s.groupId);
-      const groupName = g?.name ?? "Inconnu";
-
-      if (!groupReport[s.groupId]) {
-        groupReport[s.groupId] = {
-          groupName,
-          studentRevenues: 0,
-          presenceCount: 0,
-          paidCount: 0,
-          unpaidCount: 0,
-        };
-      }
-
-      // Filter attendance records in range
-      const sessionAtt = attendance.filter((a) => {
-        const d = new Date(a.timestamp);
-        return a.sessionId === s.id && d >= start && d <= end;
-      });
-
-      groupReport[s.groupId].studentRevenues += sessionAtt.reduce((sum, a) => sum + a.amountDeducted, 0);
-      groupReport[s.groupId].presenceCount += sessionAtt.length;
-
-      // Filter paid/unpaid teacher sessions in range
-      const teacherSess = unpaidTeacher.filter((u) => {
-        const d = new Date(u.date);
-        return u.sessionId === s.id && d >= start && d <= end;
-      });
-
-      groupReport[s.groupId].paidCount += teacherSess.filter((u) => u.paid).length;
-      groupReport[s.groupId].unpaidCount += teacherSess.filter((u) => !u.paid).length;
-    });
-
-    // Detailed calculations for sessions
-    const teacherPayments = unpaidTeacher.filter((ut) => {
-      const d = new Date(ut.date);
-      return ut.teacherId === selectedTeacher.id && d >= start && d <= end;
-    });
-
-    // Group by day (YYYY-MM-DD) and sessionId
-    const sessionDetailsMap: Record<string, {
-      date: string;
-      sessionId: string;
-      moduleName: string;
-      className: string;
-      groupName: string;
-      students: { name: string; status: string; studentFee: number; teacherShare: number }[];
-      totalPayout: number;
-    }> = {};
-
-    teacherPayments.forEach((ut) => {
-      const dateKey = ut.date.substring(0, 10);
-      const groupKey = `${dateKey}_${ut.sessionId}`;
-      
-      const sess = sessions.find((s) => s.id === ut.sessionId);
-      const cl = sess ? classes.find((c) => c.id === sess.classId)?.name ?? "" : "";
-      const mod = sess ? modules.find((m) => m.id === sess.moduleId)?.name ?? "" : "";
-      const grp = sess ? groups.find((g) => g.id === sess.groupId)?.name ?? "" : "";
-      const student = students.find((st) => st.id === ut.studentId);
-      const studentFullName = student ? `${student.firstName} ${student.lastName}` : "Élève Inconnu";
-      
-      const attRecord = attendance.find((a) => a.studentId === ut.studentId && a.sessionId === ut.sessionId && a.timestamp.startsWith(dateKey));
-      const statusLabel = attRecord?.status === "late" ? "En Retard" : "Présent";
-      const studentFee = attRecord?.amountDeducted ?? 0;
-
-      if (!sessionDetailsMap[groupKey]) {
-        sessionDetailsMap[groupKey] = {
-          date: dateKey,
-          sessionId: ut.sessionId,
-          moduleName: mod,
-          className: cl,
-          groupName: grp,
-          students: [],
-          totalPayout: 0,
-        };
-      }
-
-      sessionDetailsMap[groupKey].students.push({
-        name: studentFullName,
-        status: statusLabel,
-        studentFee,
-        teacherShare: ut.amount,
-      });
-      sessionDetailsMap[groupKey].totalPayout += ut.amount;
-    });
-
-    const detailedSessionsList = Object.values(sessionDetailsMap).sort((a, b) => a.date.localeCompare(b.date));
-
-    // Get Acomptes & Absences
-    const teacherAcomptes = acomptes.filter((a) => {
-      const d = new Date(a.date);
-      return a.teacherId === selectedTeacher.id && d >= start && d <= end;
-    });
-    const teacherAbsences = absences.filter((ab) => {
-      const d = new Date(ab.date);
-      return ab.teacherId === selectedTeacher.id && d >= start && d <= end;
-    });
-
-    const totalSessionPayout = selectedTeacher.paymentType === "percentage" 
-      ? detailedSessionsList.reduce((sum, s) => sum + s.totalPayout, 0)
-      : (selectedTeacher.monthlyAmount ?? 0);
-
-    const totalAcomptesSum = teacherAcomptes.reduce((sum, a) => sum + a.amount, 0);
-    const totalAbsencesSum = teacherAbsences.reduce((sum, ab) => sum + ab.cost, 0);
-    const netPayout = totalSessionPayout - totalAcomptesSum - totalAbsencesSum;
-
-    const formatDate = (dateStr: string) => {
-      if (!dateStr) return "";
-      const d = new Date(dateStr);
-      return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric" });
-    };
-
-    const logoHtml = school.logo
-      ? `<img src="${school.logo}" alt="logo" class="school-logo" />`
-      : `<div class="school-logo-fallback">🏫</div>`;
-
-    const html = `
-      <html>
-        <head>
-          <title>Rapport Financier - ${selectedTeacher.firstName} ${selectedTeacher.lastName}</title>
-          <style>
-            @media print {
-              body { padding: 0; margin: 0; background: #fff; color: #000; font-size: 11px; }
-              .no-print { display: none; }
-              .page-break { page-break-before: always; }
-            }
-            * { box-sizing: border-box; }
-            body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 25px; color: #1e1b4b; background-color: #faf9ff; }
-            
-            /* Letterhead Header */
-            .letterhead { display: flex; justify-content: space-between; align-items: stretch; border: 1px solid #e8e6f4; background: #fff; padding: 15px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
-            .school-identity { display: flex; align-items: center; gap: 15px; }
-            .school-logo, .school-logo-fallback { width: 65px; height: 65px; border-radius: 12px; object-fit: cover; }
-            .school-logo-fallback { background: #f5f3ff; border: 1px solid #ddd; display: flex; align-items: center; justify-content: center; font-size: 2.2em; }
-            .school-details h2 { margin: 0; font-size: 1.4em; color: #7c3aed; font-weight: 800; }
-            .school-details p { margin: 2px 0; font-size: 0.85em; color: #5c567a; }
-            
-            .school-tax-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; border-left: 2px solid #7c3aed; padding-left: 15px; align-items: center; }
-            .tax-item { font-size: 0.78em; color: #5c567a; }
-            .tax-item strong { color: #1e1b4b; font-family: monospace; }
-            
-            /* Document title banner */
-            .doc-title-banner { background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%); color: #fff; padding: 15px; border-radius: 12px; margin-bottom: 20px; text-align: center; }
-            .doc-title-banner h1 { margin: 0; font-size: 1.5em; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
-            .doc-title-banner p { margin: 5px 0 0; font-size: 0.9em; opacity: 0.9; }
-
-            /* Grid Layout of Frames */
-            .frames-grid { display: grid; grid-template-columns: 1fr; gap: 20px; }
-            .frame { border: 1px solid #e8e6f4; border-top: 4px solid #7c3aed; background: #fff; padding: 16px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
-            .frame-success { border-top-color: #22c55e; }
-            .frame-warning { border-top-color: #eab308; }
-            .frame-danger { border-top-color: #ef4444; }
-            .frame h3 { margin: 0 0 12px; font-size: 1.05em; color: #1e1b4b; border-bottom: 1px dashed #e8e6f4; padding-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
-            
-            /* Tables styled inside frames */
-            table { width: 100%; border-collapse: collapse; margin-top: 5px; font-size: 0.9em; }
-            th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #f1f0fb; }
-            th { background-color: #fcfbff; font-weight: 700; color: #5c567a; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.3px; }
-            tr:last-child td { border-bottom: 0; }
-            
-            /* Badges */
-            .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75em; font-weight: bold; text-align: center; }
-            .badge-primary { background-color: #f5f3ff; color: #7c3aed; }
-            .badge-success { background-color: #dcfce7; color: #15803d; }
-            .badge-danger { background-color: #fee2e2; color: #b91c1c; }
-            .badge-warning { background-color: #fef9c3; color: #854d0e; }
-            
-            /* Math calculations lists */
-            .calculation-row { background: #faf9ff; border: 1px solid #f1f0fb; border-radius: 8px; padding: 10px; margin-bottom: 8px; }
-            .calculation-header { display: flex; justify-content: space-between; font-weight: bold; border-bottom: 1px solid #e8e6f4; padding-bottom: 5px; margin-bottom: 5px; font-size: 0.95em; }
-            .calculation-details { font-size: 0.85em; color: #5c567a; padding-left: 5px; }
-            .student-item { display: flex; justify-content: space-between; margin: 3px 0; }
-            .math-formula { display: flex; justify-content: space-between; font-family: monospace; font-weight: 700; margin-top: 6px; padding-top: 6px; border-top: 1px dashed #e8e6f4; color: #7c3aed; }
-            
-            /* Financial Summary Frame */
-            .summary-card { background: #fdfcff; border: 2px solid #7c3aed; border-radius: 12px; padding: 15px; margin-top: 20px; }
-            .summary-line { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f1f0fb; font-size: 0.95em; }
-            .summary-line:last-child { border-bottom: 0; padding-bottom: 0; }
-            .net-pay-box { display: flex; justify-content: space-between; background: #f0fdf4; border: 2px solid #22c55e; border-radius: 10px; padding: 12px; margin-top: 10px; color: #15803d; font-size: 1.15em; font-weight: 800; }
-            
-            /* Signatures block */
-            .signatures { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-top: 40px; }
-            .signature-block { border: 1px dashed #c0b6e9; border-radius: 10px; background: #fff; padding: 15px; height: 100px; display: flex; flex-direction: column; justify-content: space-between; }
-            .signature-label { font-size: 0.8em; font-weight: bold; text-transform: uppercase; color: #5c567a; text-align: center; }
-            
-            .meta-text { text-align: center; font-size: 0.75em; color: #999; margin-top: 30px; font-style: italic; }
-          </style>
-        </head>
-        <body>
-          <div class="letterhead">
-            <div class="school-identity">
-              ${logoHtml}
-              <div class="school-details">
-                <h2>${school.name}</h2>
-                <p>${school.description}</p>
-                <p>📍 ${school.address} | 📞 ${school.phone}</p>
-                <p>✉️ ${school.email}</p>
-              </div>
-            </div>
-            <div class="school-tax-grid">
-              <div class="tax-item">NIF: <strong>${school.nif || "-"}</strong></div>
-              <div class="tax-item">NIS: <strong>${school.nis || "-"}</strong></div>
-              <div class="tax-item">RC: <strong>${school.registreCommerce || "-"}</strong></div>
-              <div class="tax-item">Art. Fiscal: <strong>${school.articleFiscal || "-"}</strong></div>
-            </div>
-          </div>
-
-          <div class="doc-title-banner">
-            <h1>Rapport de Rémunération Enseignant</h1>
-            <p>Période du <strong>${formatDate(printStart)}</strong> au <strong>${formatDate(printEnd)}</strong></p>
-          </div>
-
-          <div class="frame" style="margin-bottom: 20px;">
-            <h3>Fiche d'Information Enseignant</h3>
-            <table style="margin-top:0;">
-              <tr>
-                <td style="width:15%; font-weight:bold; color:#5c567a;">Nom Complet :</td>
-                <td style="width:35%; font-weight:bold; font-size:1.1em;">${selectedTeacher.lastName} ${selectedTeacher.firstName}</td>
-                <td style="width:15%; font-weight:bold; color:#5c567a;">Téléphone :</td>
-                <td style="width:35%; font-family:monospace;">${selectedTeacher.phone}</td>
-              </tr>
-              <tr>
-                <td style="font-weight:bold; color:#5c567a;">Adresse Email :</td>
-                <td>${selectedTeacher.email}</td>
-                <td style="font-weight:bold; color:#5c567a;">Contrat Rémunération :</td>
-                <td>
-                  <span class="badge ${selectedTeacher.paymentType === "monthly" ? "badge-warning" : "badge-success"}">
-                    ${selectedTeacher.paymentType === "monthly" ? `Fixe Mensuel (${selectedTeacher.monthlyAmount} DA/mois)` : `Pourcentage (${selectedTeacher.percentage}% / élève)`}
-                  </span>
-                </td>
-              </tr>
-            </table>
-          </div>
-
-          <div class="frames-grid">
-            <div class="frame">
-              <h3>Synthèse de l'Activité par Groupe</h3>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Groupe</th>
-                    <th style="text-align:center;">Présences Cumulées</th>
-                    <th style="text-align:right;">Revenu Élèves</th>
-                    <th style="text-align:center;">Séances Payées</th>
-                    <th style="text-align:center;">Séances Dues (Non Payées)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${Object.values(groupReport)
-                    .map(
-                      (gr) => `
-                    <tr>
-                      <td style="font-weight:bold;">${gr.groupName}</td>
-                      <td style="text-align:center;">${gr.presenceCount}</td>
-                      <td style="text-align:right; font-weight:bold;">${gr.studentRevenues} DA</td>
-                      <td style="text-align:center;"><span class="badge badge-success">${gr.paidCount}</span></td>
-                      <td style="text-align:center;"><span class="badge ${gr.unpaidCount > 0 ? "badge-danger" : "badge-primary"}">${gr.unpaidCount}</span></td>
-                    </tr>
-                  `
-                    )
-                    .join("")}
-                </tbody>
-              </table>
-            </div>
-
-            <div class="frame">
-              <h3>Détail des Séances & Calculs de Part Enseignant</h3>
-              ${detailedSessionsList.length === 0 
-                ? `<p style="text-align:center; font-style:italic; color:#999; margin:15px 0;">Aucune séance enregistrée sur cette période.</p>`
-                : detailedSessionsList.map((sd) => {
-                    const studentCount = sd.students.length;
-                    const sessionPrice = sd.students[0]?.studentFee ?? 0;
-                    const formulaText = selectedTeacher.paymentType === "percentage"
-                      ? `(${studentCount} élève(s) × ${sessionPrice} DA) × ${selectedTeacher.percentage}%`
-                      : `Activité enregistrée (${studentCount} élève(s))`;
-                    
-                    return `
-                      <div class="calculation-row">
-                        <div class="calculation-header">
-                          <span>📅 ${formatDate(sd.date)} — ${sd.moduleName} (${sd.className})</span>
-                          <span style="color:#7c3aed;">+${sd.totalPayout} DA</span>
-                        </div>
-                        <div class="calculation-details">
-                          <div style="font-weight:bold; margin-bottom:4px; font-size:0.95em;">Élèves Présents :</div>
-                          ${sd.students.map(st => `
-                            <div class="student-item">
-                              <span>• ${st.name} <span style="font-size:0.85em; color:#888;">(${st.status})</span></span>
-                              <span>Tarif séance: ${st.studentFee} DA (Part prof: ${st.teacherShare} DA)</span>
-                            </div>
-                          `).join("")}
-                          
-                          <div class="math-formula">
-                            <span>Formule de calcul : ${formulaText}</span>
-                            <span>Sous-total: ${sd.totalPayout} DA</span>
-                          </div>
-                        </div>
-                      </div>
-                    `;
-                  }).join("")
-              }
-            </div>
-
-            <div class="frame frame-warning">
-              <h3>Détail des Acomptes Reçus (Avances)</h3>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Description</th>
-                    <th style="text-align:right;">Montant Déduit</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${teacherAcomptes.length === 0 
-                    ? `<tr><td colspan="3" style="text-align:center; font-style:italic; color:#999;">Aucun acompte reçu durant cette période.</td></tr>`
-                    : teacherAcomptes.map(a => `
-                        <tr>
-                          <td>${formatDate(a.date)}</td>
-                          <td>${a.description}</td>
-                          <td style="text-align:right; font-weight:bold; color:#b91c1c;">-${a.amount} DA</td>
-                        </tr>
-                      `).join("")
-                  }
-                </tbody>
-              </table>
-            </div>
-
-            <div class="frame frame-danger">
-              <h3>Pénalités pour Absences d'Enseignant</h3>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Description</th>
-                    <th style="text-align:right;">Retenue Salaire</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${teacherAbsences.length === 0 
-                    ? `<tr><td colspan="3" style="text-align:center; font-style:italic; color:#999;">Aucune absence pénalisée durant cette période.</td></tr>`
-                    : teacherAbsences.map(ab => `
-                        <tr>
-                          <td>${formatDate(ab.date)}</td>
-                          <td>${ab.description}</td>
-                          <td style="text-align:right; font-weight:bold; color:#b91c1c;">-${ab.cost} DA</td>
-                        </tr>
-                      `).join("")
-                  }
-                </tbody>
-              </table>
-            </div>
-
-          </div>
-
-          <div class="summary-card">
-            <h3 style="margin-top:0; border-bottom:1px solid #7c3aed; padding-bottom:6px; color:#7c3aed;">Synthèse Financière Finale</h3>
-            <div class="summary-line">
-              <span>Montant brut total des séances ${selectedTeacher.paymentType === "percentage" ? `(${selectedTeacher.percentage}%)` : "(Salaire de Base)"} :</span>
-              <strong>${totalSessionPayout} DA</strong>
-            </div>
-            <div class="summary-line" style="color: #b91c1c;">
-              <span>Total des acomptes à déduire :</span>
-              <strong>-${totalAcomptesSum} DA</strong>
-            </div>
-            <div class="summary-line" style="color: #b91c1c;">
-              <span>Total des retenues d'absence à déduire :</span>
-              <strong>-${totalAbsencesSum} DA</strong>
-            </div>
-            
-            <div class="net-pay-box">
-              <span>SOLDE NET À PAYER :</span>
-              <span>${netPayout} DA</span>
-            </div>
-          </div>
-
-          <div class="signatures">
-            <div class="signature-block">
-              <span class="signature-label">Signature de l'Enseignant</span>
-            </div>
-            <div class="signature-block">
-              <span class="signature-label">Le Secrétariat / Caisse</span>
-            </div>
-          </div>
-
-          <div class="meta-text">
-            Rapport généré électroniquement par le système de gestion de l'école ${school.name} le ${new Date().toLocaleString("fr-DZ")}
-          </div>
-        </body>
-      </html>
-    `;
-    printHtmlDocument(html);
+    printHtmlDocument(
+      buildTeacherPaymentReport({
+        teacher: selectedTeacher,
+        school,
+        lang: language,
+        startDate: printStart,
+        endDate: printEnd,
+        sessions,
+        subscriptions,
+        students,
+        attendance,
+        unpaidTeacher,
+        acomptes,
+        absences,
+        modules,
+        groups,
+        classes,
+        salles,
+      }),
+    );
     setIsPrintOpen(false);
   };
 

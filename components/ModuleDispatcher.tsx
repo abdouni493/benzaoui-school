@@ -62,7 +62,8 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
       return <TeachersPage />;
     case "subjects":
       return <SubjectsPage />;
-    case "administration":
+    case "workers":
+    case "administration": // legacy slug — kept so old bookmarks keep working
       return <AdministrationPage />;
     case "independent":
       return <IndependentPage />;

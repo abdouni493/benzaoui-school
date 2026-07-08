@@ -8,10 +8,11 @@ import { useToast, type Toast } from "@/lib/store/toast";
 import { X, CheckCircle, AlertTriangle, Info, Bell, Send } from "lucide-react";
 import { formatDA } from "@/lib/utils";
 import { studentName } from "@/lib/helpers";
+import { speakMessage, speechCaseForScan } from "@/lib/speech";
 
 export function GlobalRFIDListener() {
   const { scanCard, students, subscriptions, push } = useData();
-  const { autoSendWhatsapp, autoSendEmail } = useSettings();
+  const { language, autoSendWhatsapp, autoSendEmail } = useSettings();
   const { toasts, addToast, removeToast } = useToast();
 
   const bufferRef = useRef<string>("");
@@ -24,6 +25,27 @@ export function GlobalRFIDListener() {
       const student = result.studentId
         ? students.find((s) => s.id === result.studentId)
         : undefined;
+
+      // Voice announcement (Web Speech API) — spoken AFTER the check-in RPC
+      // verdict is known: "good"/"low" on an accepted scan, "expired" (with
+      // the student's name) when the balance can't cover the séance. Other
+      // rejections and the 30-min cooldown stay visual-only.
+      const speechCase = speechCaseForScan(result);
+      if (speechCase) {
+        speakMessage(speechCase, student ? studentName(student) : "", language);
+      }
+
+      if (result.messageKey === "scan.cooldown") {
+        // Accidental double swipe inside the 30-minute window: ignored
+        // completely (no deduction, no presence) — gentle feedback only.
+        addToast({
+          type: "info",
+          title: "Déjà enregistré / تم التسجيل مسبقًا",
+          message: "Passage ignoré : moins de 30 minutes depuis le dernier scan accepté. Aucun débit, aucune présence dupliquée.",
+          studentName: student ? studentName(student) : undefined,
+        });
+        return;
+      }
 
       if (result.ok && student) {
         // Low-balance signal comes from the RPC (based on the séance's own
@@ -93,18 +115,25 @@ export function GlobalRFIDListener() {
         // debt / expired subscription / unknown card).
         const failureMessages: Record<string, string> = {
           "scan.notFound": "Carte RFID introuvable ou non associée.",
-          "scan.noSessionToday": "Aucune séance prévue pour cet élève aujourd'hui — carte refusée.",
+          "scan.noSessionToday": "Aucune séance de son niveau/module aujourd'hui — carte refusée.",
           "scan.noSessionNow": "Ce n'est pas l'heure de la séance de cet élève.",
           "scan.tooEarly": `Trop tôt — la séance n'a pas encore commencé.${result.nextStart ? ` Prochaine séance à ${result.nextStart}.` : ""}`,
           "scan.sessionEnded": "Séance déjà terminée — scan refusé, l'élève est compté ABSENT.",
           "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui — carte refusée.",
+          "scan.notEligible": "La séance en cours est d'un autre niveau ou d'un module non affecté à cet élève — carte refusée.",
+          "scan.expired": `Solde épuisé${result.balance !== undefined ? ` (${formatDA(result.balance)})` : ""} — entrée refusée. Aucune présence ni dette enregistrée : la dette ne peut être créée que manuellement depuis l'écran Présences.`,
           "scan.debtBlocked": `Élève EN DETTE${result.balance !== undefined ? ` (${formatDA(result.balance)})` : ""} — entrée refusée. Veuillez régler la dette à la caisse.`,
           "scan.noSession": "Aucune séance active trouvée pour cet élève en ce moment.",
           "scan.error": "Erreur lors du scan — veuillez réessayer.",
         };
         addToast({
           type: "danger",
-          title: result.messageKey === "scan.debtBlocked" ? "Entrée Refusée — DETTE" : "Échec du Scan",
+          title:
+            result.messageKey === "scan.expired"
+              ? "Entrée Refusée — SOLDE ÉPUISÉ"
+              : result.messageKey === "scan.debtBlocked"
+                ? "Entrée Refusée — DETTE"
+                : "Échec du Scan",
           message:
             failureMessages[result.messageKey] ??
             "Aucune séance active trouvée pour cet élève en ce moment.",
@@ -165,7 +194,7 @@ export function GlobalRFIDListener() {
 
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [scanCard, students, subscriptions, autoSendWhatsapp, autoSendEmail, addToast, push]);
+  }, [scanCard, students, subscriptions, language, autoSendWhatsapp, autoSendEmail, addToast, push]);
 
   return (
     <div className="fixed bottom-5 right-5 z-50 space-y-3 w-96 max-w-[calc(100vw-40px)] no-print pointer-events-none">

@@ -36,7 +36,7 @@ export const NAV_BY_ROLE: Record<Role, NavItem[]> = {
     { key: "attendance", emoji: "✅", href: "/attendance" },
     { key: "teachers", emoji: "👨‍🏫", href: "/teachers" },
     { key: "subjects", emoji: "📄", href: "/subjects" },
-    { key: "administration", emoji: "👥", href: "/administration" },
+    { key: "workers", emoji: "👥", href: "/workers" },
     { key: "independent", emoji: "🧩", href: "/independent" },
     { key: "parents", emoji: "👨‍👩‍👧", href: "/parents" },
     { key: "announcements", emoji: "📢", href: "/announcements" },

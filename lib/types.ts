@@ -84,7 +84,9 @@ export interface Teacher {
   percentage?: number;
 }
 
-export type ReceptionPaymentType = "daily" | "monthly";
+export type ReceptionPaymentType = "daily" | "monthly" | "half_day";
+/** Réception / Agent de sécurité / Ménage — Ménage never gets a login. */
+export type WorkerRole = "reception" | "security" | "menage";
 export interface ReceptionStaff {
   id: string;
   firstName: string;
@@ -94,6 +96,7 @@ export interface ReceptionStaff {
   paymentType: ReceptionPaymentType;
   startDate: string;
   salary: number;
+  role?: WorkerRole;
 }
 
 export interface ScheduleSession {
@@ -155,6 +158,9 @@ export interface BalanceTransaction {
   date: string;
   type: BalanceTxType;
   description: string;
+  /** module of the séance behind a deduction/refund — used by the per-module
+   *  transactions filter in the student file (null for plain topups) */
+  moduleId?: string;
 }
 
 export type AttendanceStatus = "present" | "late" | "absent";

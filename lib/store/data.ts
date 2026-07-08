@@ -181,6 +181,7 @@ const receptionMapper = makeMapper<ReceptionStaff>([
   ["paymentType", "payment_type"],
   ["startDate", "start_date"],
   ["salary", "salary"],
+  ["role", "role"],
 ]);
 
 const parentsBaseMapper = makeMapper<Parent>([
@@ -232,6 +233,7 @@ const balanceTxMapper = makeMapper<BalanceTransaction>([
   ["date", "date"],
   ["type", "type"],
   ["description", "description"],
+  ["moduleId", "module_id"],
 ]);
 
 const attendanceMapper = makeMapper<AttendanceRecord>([

@@ -18,12 +18,81 @@ import {
   Search,
   RefreshCw,
   MoreVertical,
+  Printer,
   X,
   Check,
   Clock,
   DollarSign
 } from "lucide-react";
 import type { Coursework, IndependentSession, CourseworkType, Student } from "@/lib/types";
+import { printHtmlDocument } from "@/lib/print";
+import {
+  bannerHtml,
+  fmtDate,
+  fmtDateTime,
+  letterheadHtml,
+  metaFooterHtml,
+  printDocument,
+  signaturesHtml,
+} from "@/lib/printTemplates";
+import { useSettings } from "@/lib/store/settings";
+
+/** Everything the séance libre receipt needs, captured at creation time. */
+interface CasualReceiptData {
+  personName: string;
+  isRegisteredStudent: boolean;
+  itemLabel: string;
+  teacherName?: string;
+  classLabel?: string;
+  price: number;
+  date: string;
+  createdAt: string;
+}
+
+const RECEIPT_LABELS = {
+  fr: {
+    docTitle: "Reçu — Séance Libre",
+    receiptNo: "Reçu N° :",
+    seanceTitle: "Détail de la Séance",
+    person: "Élève / Passager :",
+    registered: "Élève inscrit",
+    passenger: "Passager occasionnel",
+    item: "Cours / Perfectionnement :",
+    teacher: "Enseignant :",
+    classLevel: "Classe / Niveau :",
+    date: "Date de la séance :",
+    payTitle: "Règlement",
+    amount: "Montant payé :",
+    method: "Mode de paiement :",
+    cash: "Espèces",
+    paidOn: "Encaissé le :",
+    total: "TOTAL ENCAISSÉ :",
+    signClient: "Le Client",
+    signCashier: "La Caisse",
+    da: "DA",
+  },
+  ar: {
+    docTitle: "وصل — حصة حرة",
+    receiptNo: "وصل رقم :",
+    seanceTitle: "تفاصيل الحصة",
+    person: "التلميذ / الزائر :",
+    registered: "تلميذ مسجل",
+    passenger: "زائر عابر",
+    item: "الدرس / الدورة :",
+    teacher: "الأستاذ :",
+    classLevel: "القسم / المستوى :",
+    date: "تاريخ الحصة :",
+    payTitle: "الدفع",
+    amount: "المبلغ المدفوع :",
+    method: "طريقة الدفع :",
+    cash: "نقدًا",
+    paidOn: "تم التحصيل في :",
+    total: "الإجمالي المحصَّل :",
+    signClient: "الزبون",
+    signCashier: "الصندوق",
+    da: "دج",
+  },
+} as const;
 
 const WEEKDAYS = [
   { label: "Sam", value: 6 },
@@ -37,6 +106,7 @@ const WEEKDAYS = [
 
 export function IndependentPage() {
   const {
+    school,
     coursework,
     independent,
     teachers,
@@ -49,6 +119,7 @@ export function IndependentPage() {
     deleteFrom,
     updateItem,
   } = useData();
+  const { language } = useSettings();
 
   // Tabs
   const [activeTab, setActiveTab] = useState<"stages" | "casual">("stages");
@@ -79,8 +150,16 @@ export function IndependentPage() {
   const [studentSearchQuery, setStudentSearchQuery] = useState("");
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [casualSearchQuery, setCasualSearchQuery] = useState("");
-  const [selectedItem, setSelectedItem] = useState<{ label: string; price: number } | null>(null);
+  const [selectedItem, setSelectedItem] = useState<{
+    label: string;
+    price: number;
+    teacherName?: string;
+    classLabel?: string;
+  } | null>(null);
   const [casualDate, setCasualDate] = useState(new Date().toISOString().split("T")[0]);
+
+  // Once a séance libre is created, immediately offer to print its receipt.
+  const [receiptData, setReceiptData] = useState<CasualReceiptData | null>(null);
 
   // Auto generate calendar dates inside creation modal
   useEffect(() => {
@@ -177,33 +256,41 @@ export function IndependentPage() {
     }
   };
 
-  // Casual session item search options
+  // Casual session item search options (teacher + class level carried along
+  // so the printed receipt can describe the séance precisely)
   const getCasualItemOptions = () => {
-    const list: { label: string; price: number }[] = [];
+    const list: { label: string; price: number; teacherName?: string; classLabel?: string }[] = [];
 
     // Search inside subscriptions
     subscriptions.forEach((sub) => {
       const s = sessions.find((se) => se.id === sub.sessionId);
       if (!s) return;
       const mod = modules.find((m) => m.id === s.moduleId)?.name ?? "Cours";
-      const cl = classes.find((c) => c.id === s.classId)?.name ?? "Classe";
+      const cls = classes.find((c) => c.id === s.classId);
+      const cl = cls?.name ?? "Classe";
+      const lvl = cls ? (cls.type === "cours" ? cls.coursLevel : cls.formationLevel) : undefined;
+      const t = teachers.find((te) => te.id === s.teacherId);
       const label = `${cl} - ${mod} (${sub.pricePerSession} DA / séance)`;
 
       if (!casualSearchQuery || label.toLowerCase().includes(casualSearchQuery.toLowerCase())) {
         list.push({
           label: `${cl} - ${mod}`,
           price: sub.pricePerSession,
+          teacherName: t ? `${t.firstName} ${t.lastName}` : undefined,
+          classLabel: lvl ? `${cl} (${lvl})` : cl,
         });
       }
     });
 
     // Search inside stages
     coursework.forEach((cw) => {
+      const t = teachers.find((te) => te.id === cw.teacherId);
       const label = `Perfectionnement: ${cw.name} (${cw.total} DA)`;
       if (!casualSearchQuery || label.toLowerCase().includes(casualSearchQuery.toLowerCase())) {
         list.push({
           label: `Perfectionnement: ${cw.name}`,
           price: cw.total,
+          teacherName: t ? `${t.firstName} ${t.lastName}` : undefined,
         });
       }
     });
@@ -275,7 +362,80 @@ export function IndependentPage() {
     });
 
     setIsCreateCasualOpen(false);
+
+    // Single flow: creation done -> immediately propose to print the receipt.
+    setReceiptData({
+      personName: selectedStudent
+        ? `${selectedStudent.firstName} ${selectedStudent.lastName}`
+        : passengerNameCalculated || "-",
+      isRegisteredStudent: !!selectedStudent,
+      itemLabel: selectedItem.label,
+      teacherName: selectedItem.teacherName,
+      classLabel: selectedItem.classLabel,
+      price: selectedItem.price,
+      date: casualDate,
+      createdAt: new Date().toISOString(),
+    });
+
     resetCasualForm();
+  };
+
+  const handlePrintCasualReceipt = (data: CasualReceiptData) => {
+    const L = RECEIPT_LABELS[language];
+    const receiptNum = `SL-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+
+    const bodyHtml = `
+      ${letterheadHtml(school)}
+      ${bannerHtml(L.docTitle, `${L.receiptNo} <strong style="font-family:monospace;">${receiptNum}</strong>`)}
+
+      <div class="frame frame-info" style="margin-bottom:15px;">
+        <h3>${L.seanceTitle}</h3>
+        <table style="margin-top:0;">
+          <tr>
+            <td style="width:30%; font-weight:bold; color:#5c567a;">${L.person}</td>
+            <td style="font-weight:bold; font-size:1.05em;">${data.personName}
+              <span class="badge ${data.isRegisteredStudent ? "badge-primary" : "badge-warning"}" style="margin-inline-start:6px;">
+                ${data.isRegisteredStudent ? L.registered : L.passenger}
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <td style="font-weight:bold; color:#5c567a;">${L.item}</td>
+            <td style="font-weight:bold;">${data.itemLabel}</td>
+          </tr>
+          ${data.teacherName ? `<tr><td style="font-weight:bold; color:#5c567a;">${L.teacher}</td><td>${data.teacherName}</td></tr>` : ""}
+          ${data.classLabel ? `<tr><td style="font-weight:bold; color:#5c567a;">${L.classLevel}</td><td>${data.classLabel}</td></tr>` : ""}
+          <tr>
+            <td style="font-weight:bold; color:#5c567a;">${L.date}</td>
+            <td style="font-family:monospace;">${fmtDate(data.date, language)}</td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="summary-card" style="margin-top:0;">
+        <h3>${L.payTitle}</h3>
+        <div class="summary-line"><span>${L.amount}</span><strong>${data.price} ${L.da}</strong></div>
+        <div class="summary-line"><span>${L.method}</span><strong>${L.cash}</strong></div>
+        <div class="summary-line"><span>${L.paidOn}</span><strong>${fmtDateTime(data.createdAt, language)}</strong></div>
+        <div class="net-pay-box">
+          <span>${L.total}</span>
+          <span>${data.price} ${L.da}</span>
+        </div>
+      </div>
+
+      ${signaturesHtml(L.signClient, L.signCashier)}
+      ${metaFooterHtml(school.name, language)}
+    `;
+
+    printHtmlDocument(
+      printDocument({
+        title: `${L.docTitle} - ${data.personName}`,
+        lang: language,
+        bodyHtml,
+        // Receipt: compact centered column instead of the full A4 width.
+        extraCss: "body { max-width: 620px; margin: 0 auto; }",
+      }),
+    );
   };
 
   const handleEditCasual = () => {
@@ -1181,6 +1341,45 @@ export function IndependentPage() {
           </Button>
           <Button onClick={handleEditCasual}>Enregistrer</Button>
         </div>
+      </Modal>
+
+      {/* Séance libre created -> propose the receipt right away */}
+      <Modal open={receiptData !== null} onClose={() => setReceiptData(null)} title="Reçu de la Séance Libre">
+        {receiptData && (
+          <div className="space-y-6 text-center py-4">
+            <div className="mx-auto w-12 h-12 bg-success/10 rounded-full flex items-center justify-center text-success text-xl">
+              ✔
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-sm font-bold text-ink">Séance libre enregistrée avec succès !</h3>
+              <p className="text-xs text-muted max-w-sm mx-auto leading-relaxed">
+                <strong>{receiptData.itemLabel}</strong> pour <strong>{receiptData.personName}</strong> —{" "}
+                <strong>{receiptData.price} DA</strong> encaissés.
+                <br />
+                Souhaitez-vous imprimer le reçu ?
+              </p>
+            </div>
+
+            <div className="flex justify-center gap-3 pt-4 border-t border-line">
+              <Button
+                variant="outline"
+                onClick={() => setReceiptData(null)}
+                className="px-5 py-2 rounded-xl text-xs font-bold"
+              >
+                Ignorer
+              </Button>
+              <Button
+                onClick={() => {
+                  handlePrintCasualReceipt(receiptData);
+                  setReceiptData(null);
+                }}
+                className="px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-2"
+              >
+                <Printer className="h-4 w-4" /> Imprimer le Reçu
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

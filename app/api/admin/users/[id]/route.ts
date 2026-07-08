@@ -34,7 +34,7 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
 }
 
 /** Delete a user's login entirely. Cascades to profiles + the role-specific
- *  row (students/teachers/parents/reception_staff) via FK ON DELETE CASCADE. */
+ *  row (students/teachers/parents) via FK ON DELETE CASCADE. */
 export async function DELETE(_request: Request, ctx: { params: Promise<{ id: string }> }) {
   if (!(await requireStaffCaller())) {
     return NextResponse.json({ error: "Not authorized" }, { status: 403 });
@@ -43,7 +43,17 @@ export async function DELETE(_request: Request, ctx: { params: Promise<{ id: str
   const { id } = await ctx.params;
   const admin = createAdminClient();
   const { error } = await admin.auth.admin.deleteUser(id);
-  if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+  // Workers (reception_staff) may exist WITHOUT an auth account (Ménage, or
+  // Réception/Sécurité created without credentials) — "user not found" just
+  // means there was no login to remove.
+  if (error && !/not.?found/i.test(error.message)) {
+    return NextResponse.json({ error: error.message }, { status: 400 });
+  }
+
+  // reception_staff no longer cascades from profiles (its FK was dropped so
+  // login-less workers can exist) — remove the row explicitly; this is a
+  // no-op for every other role.
+  await admin.from("reception_staff").delete().eq("id", id);
 
   return NextResponse.json({ ok: true });
 }
