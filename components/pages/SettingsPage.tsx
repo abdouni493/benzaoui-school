@@ -52,6 +52,8 @@ export function SettingsPage() {
   const [nif, setNif] = useState(school?.nif || "");
   const [nis, setNis] = useState(school?.nis || "");
   const [registrationFee, setRegistrationFee] = useState<number>(school?.registrationFee || 0);
+  const [absencePenaltyEnabled, setAbsencePenaltyEnabled] = useState<boolean>(school?.absencePenaltyEnabled ?? true);
+  const [absencePenaltySince, setAbsencePenaltySince] = useState<string>(school?.absencePenaltySince || "");
 
   // `school` loads asynchronously (fetched from Supabase after mount), so
   // the useState initializers above only capture whatever was there at the
@@ -69,7 +71,19 @@ export function SettingsPage() {
     setNif(school.nif || "");
     setNis(school.nis || "");
     setRegistrationFee(school.registrationFee || 0);
+    setAbsencePenaltyEnabled(school.absencePenaltyEnabled ?? true);
+    setAbsencePenaltySince(school.absencePenaltySince || "");
   }, [school?.id]);
+
+  // Saved on its own (not folded into handleSaveSchool) so that, on a project
+  // where the weekly-absence migration hasn't been applied yet, an unknown
+  // column error here can't block the rest of the school form from saving.
+  const handleSaveAbsenceBilling = () => {
+    updateSchool({
+      absencePenaltyEnabled,
+      absencePenaltySince: absencePenaltySince || undefined,
+    });
+  };
 
   // Admin Account Form State (name + password; email change requires
   // re-confirmation via Supabase Auth so it's shown read-only here)
@@ -281,6 +295,47 @@ export function SettingsPage() {
                         placeholder="Ex: 1000"
                         className="rounded-xl"
                       />
+                    </div>
+
+                    <div className="sm:col-span-2 border border-line/60 bg-canvas/10 p-4 rounded-2xl space-y-3">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="h-4 w-4 text-warning mt-0.5 shrink-0" />
+                        <div>
+                          <label className="block text-xs font-bold text-ink">Facturation automatique des absences</label>
+                          <p className="text-[10px] text-muted mt-0.5 leading-relaxed">
+                            Pour chaque module, si l&apos;élève n&apos;a ni scanné sa carte ni été marqué présent
+                            pendant 7 jours, le prix de la séance de ce module est débité de son solde
+                            (la dette est autorisée). Le décompte repart à chaque présence.
+                          </p>
+                        </div>
+                      </div>
+                      <label className="flex items-center gap-2 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={absencePenaltyEnabled}
+                          onChange={(e) => setAbsencePenaltyEnabled(e.target.checked)}
+                          className="h-4 w-4 accent-primary"
+                        />
+                        <span className="text-xs font-semibold text-ink">
+                          {absencePenaltyEnabled ? "Activée" : "Désactivée"}
+                        </span>
+                      </label>
+                      <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+                        <div className="flex-1">
+                          <label className="block text-[10px] font-semibold text-muted mb-1">
+                            Facturer les semaines à partir du (les absences avant cette date ne sont jamais facturées)
+                          </label>
+                          <Input
+                            type="date"
+                            value={absencePenaltySince}
+                            onChange={(e) => setAbsencePenaltySince(e.target.value)}
+                            className="rounded-xl"
+                          />
+                        </div>
+                        <Button variant="outline" onClick={handleSaveAbsenceBilling} className="shrink-0">
+                          <Save className="h-3.5 w-3.5 me-1.5" /> Enregistrer
+                        </Button>
+                      </div>
                     </div>
 
                     <div className="sm:col-span-2 border-t border-line/50 pt-4 mt-2 flex flex-col sm:flex-row items-center gap-4 bg-canvas/10 p-4 rounded-2xl">

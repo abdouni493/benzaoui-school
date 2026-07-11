@@ -35,6 +35,11 @@ export interface School {
   nis?: string;
   /** one-time registration fee charged once per student on first enrollment */
   registrationFee?: number;
+  /** master switch for the automatic weekly-absence billing */
+  absencePenaltyEnabled?: boolean;
+  /** floor date (YYYY-MM-DD): absences are only billed for weeks ending on/after
+   *  this day, so enabling the feature never retro-bills old history */
+  absencePenaltySince?: string;
 }
 
 export type ClassType = "cours" | "formation";
@@ -161,6 +166,25 @@ export interface BalanceTransaction {
   /** module of the séance behind a deduction/refund — used by the per-module
    *  transactions filter in the student file (null for plain topups) */
   moduleId?: string;
+}
+
+/** One automatic weekly-absence charge: a module the student was absent on for
+ *  a full 7-day window, billed at that module's séance price. Also mirrored as a
+ *  `deduction` BalanceTransaction so it shows in every transaction list. */
+export interface AbsencePenalty {
+  id: string;
+  studentId: string;
+  subscriptionId?: string;
+  sessionId?: string;
+  moduleId?: string;
+  /** first/last day of the absent 7-day window (YYYY-MM-DD) */
+  periodStart: string;
+  periodEnd: string;
+  /** amount deducted (> 0) */
+  amount: number;
+  /** resulting balance (may be negative = debt) */
+  balanceAfter: number;
+  createdAt: string;
 }
 
 export type AttendanceStatus = "present" | "late" | "absent";

@@ -803,6 +803,7 @@ function StudentPaymentsView({
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredTx.reverse().map((tx) => {
             const isPos = tx.amount > 0;
+            const isAbsence = !isPos && tx.description.startsWith("Absence hebdomadaire");
             return (
               <Card key={tx.id} className="relative overflow-visible hover:shadow-md transition-all duration-200">
                 <CardBody className="flex flex-col justify-between h-56 relative">
@@ -812,9 +813,11 @@ function StudentPaymentsView({
                       <div className={`h-10 w-10 rounded-full border text-xs font-bold flex items-center justify-center tracking-wider shrink-0 ${
                         isPos
                           ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-600"
+                          : isAbsence
+                          ? "bg-amber-500/10 border-amber-500/20 text-amber-600"
                           : "bg-rose-500/10 border-rose-500/20 text-rose-600"
                       }`}>
-                        {isPos ? "RC" : "DD"}
+                        {isPos ? "RC" : isAbsence ? "AB" : "DD"}
                       </div>
                       <div className="min-w-0">
                         <h4 className="text-sm font-bold text-ink truncate" title={tx.description}>
@@ -832,13 +835,13 @@ function StudentPaymentsView({
                         <div>
                           <span className="text-[10px] text-muted block uppercase font-semibold">Opération</span>
                           <span className="font-semibold text-ink">
-                            {isPos ? "Recharge de Solde" : "Déduction de Cours"}
+                            {isPos ? "Recharge de Solde" : isAbsence ? "Absence hebdomadaire" : "Déduction de Cours"}
                           </span>
                         </div>
                         <div className="text-right">
                           <span className="text-[10px] text-muted block uppercase font-semibold">Type</span>
-                          <span className={`font-bold ${isPos ? "text-emerald-600" : "text-rose-600"}`}>
-                            {isPos ? "Crédit (+)" : "Débit (-)"}
+                          <span className={`font-bold ${isPos ? "text-emerald-600" : isAbsence ? "text-amber-600" : "text-rose-600"}`}>
+                            {isPos ? "Crédit (+)" : isAbsence ? "Absence (débit)" : "Débit (-)"}
                           </span>
                         </div>
                       </div>
@@ -848,8 +851,8 @@ function StudentPaymentsView({
                   {/* Footer area like StudentCard */}
                   <div className="border-t border-line/60 pt-3 mt-4 flex items-center justify-between">
                     <span className="text-[10px] text-muted flex items-center gap-1">
-                      <span className={`h-1.5 w-1.5 rounded-full ${isPos ? "bg-success" : "bg-danger"}`} />
-                      RFID Card Transaction
+                      <span className={`h-1.5 w-1.5 rounded-full ${isPos ? "bg-success" : isAbsence ? "bg-warning" : "bg-danger"}`} />
+                      {isAbsence ? "Facturation automatique — absence" : "RFID Card Transaction"}
                     </span>
                     <Badge tone={isPos ? "success" : "danger"} className="font-mono font-bold text-xs px-2.5 py-0.5">
                       {isPos ? `+${tx.amount}` : tx.amount} DA

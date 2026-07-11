@@ -3,6 +3,7 @@
 import { create } from "zustand";
 import { createClient } from "@/lib/supabase/client";
 import type {
+  AbsencePenalty,
   Announcement,
   AttendanceRecord,
   BalanceTransaction,
@@ -44,6 +45,7 @@ export interface Database {
   students: Student[];
   balanceTx: BalanceTransaction[];
   attendance: AttendanceRecord[];
+  absencePenalties: AbsencePenalty[];
   unpaidTeacher: UnpaidTeacherSession[];
   acomptes: TeacherAcompte[];
   absences: TeacherAbsence[];
@@ -88,6 +90,7 @@ function emptyDatabase(): Database {
     students: [],
     balanceTx: [],
     attendance: [],
+    absencePenalties: [],
     unpaidTeacher: [],
     acomptes: [],
     absences: [],
@@ -245,6 +248,19 @@ const attendanceMapper = makeMapper<AttendanceRecord>([
   ["status", "status"],
 ]);
 
+const absencePenaltiesMapper = makeMapper<AbsencePenalty>([
+  ["id", "id"],
+  ["studentId", "student_id"],
+  ["subscriptionId", "subscription_id"],
+  ["sessionId", "session_id"],
+  ["moduleId", "module_id"],
+  ["periodStart", "period_start"],
+  ["periodEnd", "period_end"],
+  ["amount", "amount"],
+  ["balanceAfter", "balance_after"],
+  ["createdAt", "created_at"],
+]);
+
 const unpaidTeacherMapper = makeMapper<UnpaidTeacherSession>([
   ["id", "id"],
   ["teacherId", "teacher_id"],
@@ -367,6 +383,7 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
   },
   balanceTx: { table: "balance_tx", select: "*", ...balanceTxMapper },
   attendance: { table: "attendance", select: "*", ...attendanceMapper },
+  absencePenalties: { table: "absence_penalties", select: "*", ...absencePenaltiesMapper },
   unpaidTeacher: { table: "unpaid_teacher_sessions", select: "*", ...unpaidTeacherMapper },
   acomptes: { table: "teacher_acomptes", select: "*", ...acomptesMapper },
   absences: { table: "teacher_absences", select: "*", ...absencesMapper },
@@ -402,6 +419,8 @@ const schoolMapper = makeMapper<School>([
   ["nif", "nif"],
   ["nis", "nis"],
   ["registrationFee", "registration_fee"],
+  ["absencePenaltyEnabled", "absence_penalty_enabled"],
+  ["absencePenaltySince", "absence_penalty_since"],
 ]);
 
 /** These entity tables are auth-linked (id === auth.users.id): creation goes
@@ -456,6 +475,9 @@ interface DataActions {
     opts?: { date?: string; allowDebt?: boolean; skipTeacherDue?: boolean },
   ) => Promise<ScanResult>;
   cancelAttendance: (attendanceId: string) => Promise<ScanResult>;
+  /** Bills every module a student has been absent on for a full week (idempotent,
+   *  server-side). Returns how many weekly charges were written. */
+  processWeeklyAbsences: () => Promise<{ ok: boolean; charged?: number; students?: number }>;
   settleTeacherPercentage: (teacherId: string) => Promise<TeacherSettlement>;
   addBalance: (
     studentId: string,
@@ -564,6 +586,22 @@ export const useData = create<DataStore>((set, get) => ({
     }
     const res = data as ScanResult;
     if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  // Automatic weekly-absence billing lives entirely in the process_weekly_absences
+  // RPC (enrollment walk, 7-day windows, deduction, absence_penalties + balance_tx
+  // rows). It is idempotent + throttled server-side, so calling it on staff load
+  // is safe; we only refresh local state when it actually charged something.
+  processWeeklyAbsences: async () => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("process_weekly_absences", {});
+    if (error || !data) {
+      // Table/RPC missing (migration not applied yet) or not authorized — no-op.
+      return { ok: false };
+    }
+    const res = data as { ok: boolean; charged?: number; students?: number };
+    if (res.ok && (res.charged ?? 0) > 0) await get().fetchAll();
     return res;
   },
 

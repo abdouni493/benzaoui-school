@@ -50,6 +50,7 @@ export function StudentsPage() {
     coursework,
     balanceTx,
     attendance,
+    absencePenalties,
     parents,
     filieres,
     push,
@@ -701,6 +702,8 @@ export function StudentsPage() {
 
     // Get attendance records
     const studentAttendance = attendance.filter((a) => a.studentId === stu.id);
+    // Automatic weekly-absence charges (shown in the presence table too).
+    const studentPenalties = absencePenalties.filter((p) => p.studentId === stu.id);
 
     // Financial totals
     const totalTopups = studentTx.filter(t => t.type === "topup").reduce((sum, t) => sum + t.amount, 0);
@@ -892,14 +895,16 @@ export function StudentsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  ${studentAttendance.length === 0
-                    ? `<tr><td colspan="4" style="text-align:center; font-style:italic; color:#999;">Aucune présence scannée.</td></tr>`
-                    : studentAttendance.slice(-8).reverse().map(a => {
+                  ${(() => {
+                    const fmtDay = (d: string) => d.split("-").reverse().join("/");
+                    const presenceRows = [
+                      ...studentAttendance.map((a) => {
                         const sess = sessions.find(s => s.id === a.sessionId);
                         const mod = sess ? modules.find(m => m.id === sess.moduleId)?.name : "";
                         const cls = sess ? classes.find(c => c.id === sess.classId)?.name : "";
-                        
-                        return `
+                        return {
+                          sort: new Date(a.timestamp).getTime(),
+                          html: `
                           <tr>
                             <td>${formatDateTime(a.timestamp)}</td>
                             <td style="font-weight:bold;">${mod} <span style="font-size:0.85em; font-weight:normal; color:#888;">(${cls})</span></td>
@@ -909,10 +914,29 @@ export function StudentsPage() {
                               </span>
                             </td>
                             <td style="text-align:right; font-weight:bold; color:#b91c1c;">-${a.amountDeducted} DA</td>
-                          </tr>
-                        `;
-                      }).join("")
-                  }
+                          </tr>`,
+                        };
+                      }),
+                      ...studentPenalties.map((p) => {
+                        const mod = modules.find(m => m.id === p.moduleId)?.name ?? "";
+                        return {
+                          sort: new Date(`${p.periodEnd}T12:00:00`).getTime(),
+                          html: `
+                          <tr>
+                            <td>${fmtDay(p.periodStart)} → ${fmtDay(p.periodEnd)}</td>
+                            <td style="font-weight:bold;">${mod} <span style="font-size:0.85em; font-weight:normal; color:#888;">(Absence semaine)</span></td>
+                            <td style="text-align:center;">
+                              <span class="badge badge-warning" style="background:#fee2e2; color:#b91c1c;">Absent</span>
+                            </td>
+                            <td style="text-align:right; font-weight:bold; color:#b91c1c;">-${p.amount} DA</td>
+                          </tr>`,
+                        };
+                      }),
+                    ].sort((a, b) => b.sort - a.sort);
+                    return presenceRows.length === 0
+                      ? `<tr><td colspan="4" style="text-align:center; font-style:italic; color:#999;">Aucune présence scannée.</td></tr>`
+                      : presenceRows.slice(0, 8).map(r => r.html).join("");
+                  })()}
                 </tbody>
               </table>
             </div>
@@ -932,20 +956,25 @@ export function StudentsPage() {
                 <tbody>
                   ${studentTx.length === 0
                     ? `<tr><td colspan="4" style="text-align:center; font-style:italic; color:#999;">Aucune transaction sur ce compte.</td></tr>`
-                    : studentTx.slice(-10).reverse().map(tx => `
+                    : studentTx.slice(-10).reverse().map(tx => {
+                        const isAbsence = tx.amount < 0 && tx.description.startsWith("Absence hebdomadaire");
+                        const typeLabel = tx.type === "topup" ? "Rechargement" : isAbsence ? "Absence (semaine)" : "Dépense / Séance";
+                        const typeClass = tx.type === "topup" ? "badge-success" : "badge-primary";
+                        return `
                         <tr>
                           <td>${formatDate(tx.date)}</td>
                           <td>${tx.description}</td>
                           <td>
-                            <span class="badge ${tx.type === "topup" ? "badge-success" : "badge-primary"}">
-                              ${tx.type === "topup" ? "Rechargement" : "Dépense / Séance"}
+                            <span class="badge ${typeClass}"${isAbsence ? ' style="background:#fef3c7; color:#b45309;"' : ""}>
+                              ${typeLabel}
                             </span>
                           </td>
                           <td style="text-align:right; font-weight:bold; color:${tx.amount >= 0 ? "#15803d" : "#b91c1c"};">
                             ${tx.amount >= 0 ? "+" : ""}${tx.amount} DA
                           </td>
                         </tr>
-                      `).join("")
+                      `;
+                      }).join("")
                   }
                 </tbody>
               </table>
@@ -1775,17 +1804,28 @@ export function StudentsPage() {
                       {txList.length === 0 ? (
                         <p className="text-xs text-muted italic">Aucune transaction pour ce filtre.</p>
                       ) : (
-                        [...txList].reverse().map((tx) => (
-                          <div key={tx.id} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
-                            <div>
-                              <strong className="text-ink block">{tx.description}</strong>
-                              <span className="text-[10px] text-muted">{tx.date.substring(0, 16).replace("T", " ")}</span>
+                        [...txList].reverse().map((tx) => {
+                          const isAbsence = tx.amount < 0 && tx.description.startsWith("Absence hebdomadaire");
+                          return (
+                            <div
+                              key={tx.id}
+                              className={`flex justify-between items-center text-xs p-3 rounded-xl border ${
+                                isAbsence ? "bg-warning/5 border-warning/40" : "bg-canvas border-line"
+                              }`}
+                            >
+                              <div>
+                                <strong className="text-ink block flex items-center gap-1.5">
+                                  {isAbsence && <Badge tone="warning">Absence</Badge>}
+                                  {tx.description}
+                                </strong>
+                                <span className="text-[10px] text-muted">{tx.date.substring(0, 16).replace("T", " ")}</span>
+                              </div>
+                              <strong className={tx.amount > 0 ? "text-success font-bold" : "text-danger font-bold"}>
+                                {tx.amount > 0 ? `+${tx.amount}` : tx.amount} DA
+                              </strong>
                             </div>
-                            <strong className={tx.amount > 0 ? "text-success font-bold" : "text-danger font-bold"}>
-                              {tx.amount > 0 ? `+${tx.amount}` : tx.amount} DA
-                            </strong>
-                          </div>
-                        ))
+                          );
+                        })
                       )}
                     </div>
                   </div>
@@ -1794,13 +1834,7 @@ export function StudentsPage() {
 
               {detailsTab === "attendance" && (() => {
                 const moduleOptions = getStudentModuleOptions(selectedStudent);
-                const attList = attendance.filter((att) => {
-                  if (att.studentId !== selectedStudent.id) return false;
-                  if (attModuleFilter !== "all") {
-                    const sess = sessions.find((se) => se.id === att.sessionId);
-                    if (!sess || sess.moduleId !== attModuleFilter) return false;
-                  }
-                  const when = new Date(att.timestamp);
+                const inDateWindow = (when: Date) => {
                   if (attDateMode === "month" && attMonth) {
                     const key = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}`;
                     if (key !== attMonth) return false;
@@ -1810,7 +1844,28 @@ export function StudentsPage() {
                     if (attEnd && when > new Date(`${attEnd}T23:59:59.999`)) return false;
                   }
                   return true;
+                };
+                const attList = attendance.filter((att) => {
+                  if (att.studentId !== selectedStudent.id) return false;
+                  if (attModuleFilter !== "all") {
+                    const sess = sessions.find((se) => se.id === att.sessionId);
+                    if (!sess || sess.moduleId !== attModuleFilter) return false;
+                  }
+                  return inDateWindow(new Date(att.timestamp));
                 });
+                // Automatic weekly-absence charges, shown alongside real scans so
+                // the presence history tells the whole story (a "-price DA" entry
+                // for every module week the student never showed up for).
+                const penList = absencePenalties.filter((pen) => {
+                  if (pen.studentId !== selectedStudent.id) return false;
+                  if (attModuleFilter !== "all" && pen.moduleId !== attModuleFilter) return false;
+                  return inDateWindow(new Date(`${pen.periodEnd}T12:00:00`));
+                });
+                const fmtDay = (d: string) => d.split("-").reverse().join("/");
+                const rows = [
+                  ...attList.map((att) => ({ kind: "att" as const, id: att.id, when: new Date(att.timestamp), att })),
+                  ...penList.map((pen) => ({ kind: "pen" as const, id: pen.id, when: new Date(`${pen.periodEnd}T12:00:00`), pen })),
+                ].sort((a, b) => b.when.getTime() - a.when.getTime());
                 return (
                   <div className="space-y-3">
                     <div className="flex flex-wrap items-center gap-2 bg-canvas/40 border border-line rounded-xl p-2">
@@ -1856,31 +1911,59 @@ export function StudentsPage() {
                         </div>
                       )}
 
-                      <span className="text-[10px] text-muted ms-auto font-mono">{attList.length} présence(s)</span>
+                      <span className="text-[10px] text-muted ms-auto font-mono">
+                        {attList.length} présence(s)
+                        {penList.length > 0 ? ` · ${penList.length} absence(s) facturée(s)` : ""}
+                      </span>
                     </div>
 
                     <div className="space-y-2 max-h-60 overflow-y-auto">
-                      {attList.length === 0 ? (
+                      {rows.length === 0 ? (
                         <p className="text-xs text-muted italic">Aucune présence pour ces filtres.</p>
                       ) : (
-                        [...attList].reverse().map((att) => {
-                          const s = sessions.find((se) => se.id === att.sessionId);
-                          const modName = s ? modules.find((m) => m.id === s.moduleId)?.name : "Module";
+                        rows.map((row) => {
+                          if (row.kind === "att") {
+                            const att = row.att;
+                            const s = sessions.find((se) => se.id === att.sessionId);
+                            const modName = s ? modules.find((m) => m.id === s.moduleId)?.name : "Module";
+                            const grpName = s ? groups.find((g) => g.id === s.groupId)?.name : undefined;
+                            return (
+                              <div key={att.id} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
+                                <div>
+                                  <strong className="text-ink block">
+                                    Présence: {modName}
+                                    {grpName ? <span className="text-muted font-semibold"> — {grpName}</span> : null}
+                                  </strong>
+                                  <span className="text-[10px] text-muted">{att.timestamp.substring(0, 16).replace("T", " ")}</span>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <Badge tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}>
+                                    {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
+                                  </Badge>
+                                  <span className="font-bold text-danger text-[10px]">-{att.amountDeducted} DA</span>
+                                </div>
+                              </div>
+                            );
+                          }
+                          const pen = row.pen;
+                          const s = sessions.find((se) => se.id === pen.sessionId);
+                          const modName = modules.find((m) => m.id === pen.moduleId)?.name ?? "Module";
                           const grpName = s ? groups.find((g) => g.id === s.groupId)?.name : undefined;
                           return (
-                            <div key={att.id} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
+                            <div key={pen.id} className="flex justify-between items-center text-xs bg-danger/5 border border-danger/30 p-3 rounded-xl">
                               <div>
                                 <strong className="text-ink block">
-                                  Présence: {modName}
+                                  Absence facturée: {modName}
                                   {grpName ? <span className="text-muted font-semibold"> — {grpName}</span> : null}
                                 </strong>
-                                <span className="text-[10px] text-muted">{att.timestamp.substring(0, 16).replace("T", " ")}</span>
+                                <span className="text-[10px] text-muted">
+                                  Semaine du {fmtDay(pen.periodStart)} au {fmtDay(pen.periodEnd)}
+                                  {" · "}solde après : <span className={pen.balanceAfter < 0 ? "text-danger font-bold" : ""}>{pen.balanceAfter} DA</span>
+                                </span>
                               </div>
                               <div className="flex items-center gap-2">
-                                <Badge tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}>
-                                  {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
-                                </Badge>
-                                <span className="font-bold text-danger text-[10px]">-{att.amountDeducted} DA</span>
+                                <Badge tone="danger">Absent (semaine)</Badge>
+                                <span className="font-bold text-danger text-[10px]">-{pen.amount} DA</span>
                               </div>
                             </div>
                           );

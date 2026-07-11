@@ -15,6 +15,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const fetchSchool = useData((s) => s.fetchSchool);
   const fetchAll = useData((s) => s.fetchAll);
   const clearData = useData((s) => s.clear);
+  const processWeeklyAbsences = useData((s) => s.processWeeklyAbsences);
 
   useEffect(() => {
     fetchSchool();
@@ -23,8 +24,18 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!hydrated) return;
-    if (user) fetchAll();
-    else clearData();
+    if (user) {
+      fetchAll();
+      // Staff load is the safety-net trigger for the automatic weekly-absence
+      // billing (server-side, idempotent, throttled to once/day). The action
+      // re-fetches on its own if it charged anything, so any freshly-written
+      // debits show up without an extra refresh here.
+      if (user.role === "admin" || user.role === "reception") {
+        processWeeklyAbsences();
+      }
+    } else {
+      clearData();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, user?.id]);
 
