@@ -1,21 +1,27 @@
 "use client";
 
 /**
- * Voice announcements for the RFID check-in, using the browser's built-in
- * Web Speech API (SpeechSynthesisUtterance) — no external service, no cost.
+ * Voice announcements for the RFID check-in, played from the pre-recorded
+ * audio files in `public/speech/` so the voice is identical on every device
+ * (including the Vercel-hosted version — no dependency on locally installed
+ * TTS voices).
  *
- * NOTE — voice availability & quality vary by OS/browser: Windows + Chrome
- * (the entrance kiosk target) usually ships decent French voices out of the
- * box, but ARABIC voices must be tested on the actual machine. When no Arabic
- * voice is installed we log a console.warn and fall back to the default
- * voice, so we know to switch to pre-recorded audio later if needed.
+ * The browser's Web Speech API is kept only as a last-resort fallback when
+ * the audio file itself cannot be played (file missing, decode error…).
  */
 
 import type { Language } from "@/lib/store/settings";
 
 export type SpeechCaseType = "good" | "low" | "expired";
 
-const MESSAGES: Record<Language, Record<SpeechCaseType, (name: string) => string>> = {
+/** Served statically from `public/speech/` at the site root. */
+const AUDIO_FILES: Record<SpeechCaseType, string> = {
+  good: "/speech/you_can_enter.mp3",
+  low: "/speech/soon_expire.mp3",
+  expired: "/speech/sorry_you_cant_enter.mp3",
+};
+
+const FALLBACK_MESSAGES: Record<Language, Record<SpeechCaseType, (name: string) => string>> = {
   fr: {
     good: () => "Bienvenue, vous pouvez entrer.",
     low: () => "Bienvenue, vous pouvez entrer, mais votre solde est bientôt épuisé.",
@@ -28,78 +34,87 @@ const MESSAGES: Record<Language, Record<SpeechCaseType, (name: string) => string
   },
 };
 
-/** Best installed voice for the language (matched on the BCP-47 prefix),
- *  preferring local (non-network) voices for kiosk reliability. */
-function pickVoice(lang: Language): SpeechSynthesisVoice | undefined {
-  const candidates = window.speechSynthesis
-    .getVoices()
-    .filter((v) => v.lang.toLowerCase().startsWith(lang));
-  return candidates.find((v) => v.localService) ?? candidates[0];
+const audioCache = new Map<SpeechCaseType, HTMLAudioElement>();
+let currentAudio: HTMLAudioElement | null = null;
+
+function getAudio(caseType: SpeechCaseType): HTMLAudioElement {
+  let audio = audioCache.get(caseType);
+  if (!audio) {
+    audio = new Audio(AUDIO_FILES[caseType]);
+    audio.preload = "auto";
+    audioCache.set(caseType, audio);
+  }
+  return audio;
+}
+
+/** Warm the three clips (call once on app mount) so the first scan of the
+ *  day doesn't wait on a network fetch of the MP3. */
+export function preloadSpeech(): void {
+  if (typeof window === "undefined" || typeof Audio === "undefined") return;
+  (Object.keys(AUDIO_FILES) as SpeechCaseType[]).forEach(getAudio);
 }
 
 /**
- * Speak the check-in verdict. `studentName` is only used for the "expired"
- * case. Any announcement still playing is cancelled first, so a new scan
- * interrupts the previous message.
+ * Play the check-in verdict clip. Any announcement still playing is stopped
+ * first, so a new scan interrupts the previous message. `studentName` and
+ * `lang` are only used by the TTS fallback.
  */
 export function speakMessage(
   caseType: SpeechCaseType,
   studentName: string,
   lang: Language,
 ): void {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-    console.warn("[speech] Web Speech API not available in this browser — announcement skipped.");
-    return;
+  if (typeof window === "undefined" || typeof Audio === "undefined") return;
+
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.currentTime = 0;
   }
 
-  const speak = () => {
-    const utterance = new SpeechSynthesisUtterance(MESSAGES[lang][caseType](studentName));
-    utterance.lang = lang === "ar" ? "ar-SA" : "fr-FR";
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
+  const audio = getAudio(caseType);
+  audio.currentTime = 0;
+  currentAudio = audio;
 
-    const voice = pickVoice(lang);
-    if (voice) {
-      utterance.voice = voice;
-    } else if (lang === "ar") {
-      console.warn(
-        "[speech] No Arabic TTS voice installed on this device — using the browser default. " +
-          "If pronunciation is unusable, plan a fallback to pre-recorded audio files.",
-      );
-    }
+  audio.play().catch((err) => {
+    console.warn(`[speech] Could not play ${AUDIO_FILES[caseType]} (${err}) — falling back to TTS.`);
+    speakFallback(caseType, studentName, lang);
+  });
+}
 
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-  };
-
-  // Chrome loads its voice list asynchronously: the first getVoices() call
-  // can return []. Wait for `voiceschanged`, with a timeout fallback because
-  // some platforms never fire the event.
-  if (window.speechSynthesis.getVoices().length === 0) {
-    let spoken = false;
-    const onReady = () => {
-      if (spoken) return;
-      spoken = true;
-      window.speechSynthesis.removeEventListener("voiceschanged", onReady);
-      speak();
-    };
-    window.speechSynthesis.addEventListener("voiceschanged", onReady);
-    window.setTimeout(onReady, 400);
-  } else {
-    speak();
-  }
+function speakFallback(caseType: SpeechCaseType, studentName: string, lang: Language): void {
+  if (!("speechSynthesis" in window)) return;
+  const utterance = new SpeechSynthesisUtterance(FALLBACK_MESSAGES[lang][caseType](studentName));
+  utterance.lang = lang === "ar" ? "ar-SA" : "fr-FR";
+  utterance.rate = 0.95;
+  const voice = window.speechSynthesis
+    .getVoices()
+    .filter((v) => v.lang.toLowerCase().startsWith(lang))
+    .sort((a, b) => Number(b.localService) - Number(a.localService))[0];
+  if (voice) utterance.voice = voice;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
 }
 
 /**
- * Map a check-in RPC result to the announcement case, or null when nothing
- * should be spoken (cooldown ignores, already-present, scheduling rejects…).
+ * Map a check-in RPC result to the announcement clip, or null when nothing
+ * should be played (cooldown ignores, wrong-schedule rejects…).
+ *
+ *  - sufficient balance → "you can enter"
+ *  - balance soon exhausted → "soon to expire"
+ *  - balance exhausted / in debt / subscription expired → "sorry"
  */
 export function speechCaseForScan(result: {
   ok: boolean;
   messageKey: string;
   lowBalance?: boolean;
 }): SpeechCaseType | null {
-  if (result.messageKey === "scan.expired") return "expired";
+  if (
+    result.messageKey === "scan.expired" ||
+    result.messageKey === "scan.debtBlocked" ||
+    result.messageKey === "scan.subscriptionExpired"
+  ) {
+    return "expired";
+  }
   if (result.ok && (result.messageKey === "scan.success" || result.messageKey === "scan.successLate")) {
     return result.lowBalance ? "low" : "good";
   }

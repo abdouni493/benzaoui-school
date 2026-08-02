@@ -2,146 +2,26 @@
 
 import { useEffect, useRef } from "react";
 import { motion } from "framer-motion";
-import { useData, uid } from "@/lib/store/data";
-import { useSettings } from "@/lib/store/settings";
 import { useToast, type Toast } from "@/lib/store/toast";
-import { X, CheckCircle, AlertTriangle, Info, Bell, Send } from "lucide-react";
+import { X, CheckCircle, AlertTriangle, Info, Bell } from "lucide-react";
 import { formatDA } from "@/lib/utils";
-import { studentName } from "@/lib/helpers";
-import { speakMessage, speechCaseForScan } from "@/lib/speech";
+import { preloadSpeech } from "@/lib/speech";
+import { useScanProcessor } from "@/lib/useScanProcessor";
 
 export function GlobalRFIDListener() {
-  const { scanCard, students, subscriptions, push } = useData();
-  const { language, autoSendWhatsapp, autoSendEmail } = useSettings();
-  const { toasts, addToast, removeToast } = useToast();
+  const processScan = useScanProcessor();
+  const { toasts, removeToast } = useToast();
 
   const bufferRef = useRef<string>("");
   const lastKeyTimeRef = useRef<number>(0);
 
+  // Fetch the announcement clips once on mount so the first scan plays
+  // instantly, even on the Vercel-hosted version.
   useEffect(() => {
-    const runScan = async (code: string) => {
-      // Run scanner
-      const result = await scanCard(code);
-      const student = result.studentId
-        ? students.find((s) => s.id === result.studentId)
-        : undefined;
+    preloadSpeech();
+  }, []);
 
-      // Voice announcement (Web Speech API) — spoken AFTER the check-in RPC
-      // verdict is known: "good"/"low" on an accepted scan, "expired" (with
-      // the student's name) when the balance can't cover the séance. Other
-      // rejections and the 30-min cooldown stay visual-only.
-      const speechCase = speechCaseForScan(result);
-      if (speechCase) {
-        speakMessage(speechCase, student ? studentName(student) : "", language);
-      }
-
-      if (result.messageKey === "scan.cooldown") {
-        // Accidental double swipe inside the 30-minute window: ignored
-        // completely (no deduction, no presence) — gentle feedback only.
-        addToast({
-          type: "info",
-          title: "Déjà enregistré / تم التسجيل مسبقًا",
-          message: "Passage ignoré : moins de 30 minutes depuis le dernier scan accepté. Aucun débit, aucune présence dupliquée.",
-          studentName: student ? studentName(student) : undefined,
-        });
-        return;
-      }
-
-      if (result.ok && student) {
-        // Low-balance signal comes from the RPC (based on the séance's own
-        // price); fall back to a local estimate for older responses.
-        const studentSubs = subscriptions.filter((sub) =>
-          student.subscriptionIds.includes(sub.id)
-        );
-        const minCost = studentSubs.length > 0 ? Math.max(...studentSubs.map((s) => s.pricePerSession)) : 500;
-        const isLow =
-          result.lowBalance ??
-          (!student.isFree && result.newBalance !== undefined && result.newBalance < minCost * 2);
-        const isDebt = result.debt ?? (result.newBalance !== undefined && result.newBalance < 0);
-
-        let autoSentAlert = false;
-
-        // Send automatic alert if low/debt and toggles are active
-        if ((isLow || isDebt) && (autoSendWhatsapp || autoSendEmail)) {
-          autoSentAlert = true;
-
-          // Push parent notification
-          if (student.parentId) {
-            const parentId = student.parentId;
-            const newNtf = {
-              id: uid("ntf"),
-              parentId,
-              title: isDebt
-                ? "Alerte: solde en dette (Automatique)"
-                : "Alerte de solde faible (Automatique)",
-              description: `Le solde de votre enfant ${student.firstName} ${student.lastName} est de ${formatDA(result.newBalance ?? 0)}. Veuillez recharger son compte rapidement. L'accès aux cours en dépend.`,
-              date: new Date().toISOString(),
-              read: false,
-              auto: true,
-            };
-            push("notifications", newNtf);
-          }
-        }
-
-        const sessionInfo = result.moduleName
-          ? `${result.moduleName}${result.sessionStart ? ` (${result.sessionStart} - ${result.sessionEnd})` : ""}`
-          : undefined;
-        const isLate = result.messageKey === "scan.successLate";
-        const isAlready = result.messageKey === "scan.alreadyPresent";
-
-        // Show success toast — with the exact séance the scan was matched to
-        addToast({
-          type: isDebt ? "warning" : isLate ? "warning" : isAlready ? "info" : "success",
-          title: isAlready
-            ? "Déjà pointé — aucun débit"
-            : isDebt
-              ? "Présence enregistrée — SOLDE EN DETTE"
-              : isLate
-                ? "Présence en Retard"
-                : "Présence Enregistrée",
-          message: isAlready
-            ? `L'élève a déjà pointé pour ${sessionInfo ?? "cette séance"} aujourd'hui.`
-            : isDebt
-              ? `${sessionInfo ? `Séance ${sessionInfo}. ` : ""}Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée.`
-              : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.`,
-          studentName: studentName(student),
-          cost: result.cost,
-          newBalance: result.newBalance,
-          autoSentAlert,
-        });
-      } else {
-        // Show failure toast — surface the exact reason so reception sees why
-        // the card was rejected (wrong day / too early / séance finished /
-        // debt / expired subscription / unknown card).
-        const failureMessages: Record<string, string> = {
-          "scan.notFound": "Carte RFID introuvable ou non associée.",
-          "scan.noSessionToday": "Aucune séance de son niveau/module aujourd'hui — carte refusée.",
-          "scan.noSessionNow": "Ce n'est pas l'heure de la séance de cet élève.",
-          "scan.tooEarly": `Trop tôt — la séance n'a pas encore commencé.${result.nextStart ? ` Prochaine séance à ${result.nextStart}.` : ""}`,
-          "scan.sessionEnded": "Séance déjà terminée — scan refusé, l'élève est compté ABSENT.",
-          "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui — carte refusée.",
-          "scan.notEligible": "La séance en cours est d'un autre niveau ou d'un module non affecté à cet élève — carte refusée.",
-          "scan.expired": `Solde épuisé${result.balance !== undefined ? ` (${formatDA(result.balance)})` : ""} — entrée refusée. Aucune présence ni dette enregistrée : la dette ne peut être créée que manuellement depuis l'écran Présences.`,
-          "scan.debtBlocked": `Élève EN DETTE${result.balance !== undefined ? ` (${formatDA(result.balance)})` : ""} — entrée refusée. Veuillez régler la dette à la caisse.`,
-          "scan.noSession": "Aucune séance active trouvée pour cet élève en ce moment.",
-          "scan.error": "Erreur lors du scan — veuillez réessayer.",
-        };
-        addToast({
-          type: "danger",
-          title:
-            result.messageKey === "scan.expired"
-              ? "Entrée Refusée — SOLDE ÉPUISÉ"
-              : result.messageKey === "scan.debtBlocked"
-                ? "Entrée Refusée — DETTE"
-                : "Échec du Scan",
-          message:
-            failureMessages[result.messageKey] ??
-            "Aucune séance active trouvée pour cet élève en ce moment.",
-          studentName: student ? studentName(student) : undefined,
-        });
-      }
-    };
-
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // If Enter key is pressed, process buffer
       if (e.key === "Enter") {
@@ -163,7 +43,7 @@ export function GlobalRFIDListener() {
           if (!isInputField || isRFID) {
             e.preventDefault();
             e.stopPropagation();
-            runScan(code);
+            processScan(code);
           }
         }
         return;
@@ -194,7 +74,7 @@ export function GlobalRFIDListener() {
 
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [scanCard, students, subscriptions, language, autoSendWhatsapp, autoSendEmail, addToast, push]);
+  }, [processScan]);
 
   return (
     <div className="fixed bottom-5 right-5 z-50 space-y-3 w-96 max-w-[calc(100vw-40px)] no-print pointer-events-none">

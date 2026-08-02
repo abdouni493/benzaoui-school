@@ -10,24 +10,21 @@ import { useData, type ScanResult } from "@/lib/store/data";
 import { studentName } from "@/lib/helpers";
 import { useTranslation } from "@/lib/i18n/useTranslation";
 import { formatDA } from "@/lib/utils";
-import { speakMessage, speechCaseForScan } from "@/lib/speech";
+import { useScanProcessor } from "@/lib/useScanProcessor";
 
 export function ScanModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { t, language } = useTranslation();
-  const scanCard = useData((s) => s.scanCard);
+  const { t } = useTranslation();
+  const processScan = useScanProcessor();
   const students = useData((s) => s.students);
   const [code, setCode] = useState("");
   const [result, setResult] = useState<ScanResult | null>(null);
 
   const doScan = async () => {
     if (!code.trim()) return;
-    const res = await scanCard(code.trim());
-    // Voice verdict once the RPC answered (good / low / expired).
-    const speechCase = speechCaseForScan(res);
-    if (speechCase) {
-      const stu = res.studentId ? students.find((s) => s.id === res.studentId) : undefined;
-      speakMessage(speechCase, stu ? studentName(stu) : "", language);
-    }
+    // Same pipeline as the hardware RFID reader (deduction, presence, voice
+    // announcement, automatic alerts) — a manually typed code behaves exactly
+    // like a card swipe; the modal additionally shows the detailed verdict.
+    const res = await processScan(code.trim());
     setResult(res);
     setCode("");
   };
