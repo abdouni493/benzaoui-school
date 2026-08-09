@@ -61,12 +61,27 @@ export function SubscriptionsPage() {
     const cls = classes.find((c) => c.id === s.classId);
     const mod = modules.find((m) => m.id === s.moduleId);
     const t = teachers.find((te) => te.id === s.teacherId);
+    const nameOf = <T extends { id: string; name: string }>(list: T[], id: string) =>
+      list.find((x) => x.id === id)?.name ?? "-";
     return {
-      class: cls?.name ?? "-",
+      class: s.isOpen
+        ? (s.classIds?.length ? s.classIds : [s.classId]).map((id) => nameOf(classes, id)).join(" · ")
+        : cls?.name ?? "-",
       level: cls?.type === "cours" ? cls.coursLevel : cls?.formationLevel,
       isFormation: cls?.type === "formation",
+      isOpen: !!s.isOpen,
+      title: s.title,
+      periodStart: s.periodStart,
+      periodEnd: s.periodEnd,
+      groupsLabel: s.isOpen
+        ? (s.groupIds?.length ? s.groupIds : [s.groupId]).map((id) => nameOf(groups, id)).join(" · ")
+        : nameOf(groups, s.groupId),
+      sallesLabel: s.isOpen
+        ? (s.salleIds?.length ? s.salleIds : [s.salleId]).map((id) => nameOf(salles, id)).join(" · ")
+        : nameOf(salles, s.salleId),
       module: mod?.name ?? "-",
       teacher: t ? `${t.firstName} ${t.lastName}` : "-",
+      teacherIsPassager: !!t?.isPassager,
       days: s.days,
       time: `${s.startTime}-${s.endTime}`,
     };
@@ -77,7 +92,19 @@ export function SubscriptionsPage() {
     return s ? classes.find((c) => c.id === s.classId)?.type === "formation" : false;
   };
 
-  // Group subscriptions by class/module/teacher (ignoring group) to display uniquely
+  const isOpenSession = (sesId: string) => !!sessions.find((se) => se.id === sesId)?.isOpen;
+
+  /** Sibling groups of a regular course (same class + module + teacher). A
+   *  séance libre is never grouped with anything: its timing IS the product. */
+  const siblingSessionsOf = (s: ScheduleSession) =>
+    s.isOpen
+      ? [s]
+      : sessions.filter(
+          (se) => !se.isOpen && se.classId === s.classId && se.moduleId === s.moduleId && se.teacherId === s.teacherId,
+        );
+
+  // Group subscriptions by class/module/teacher (ignoring group) to display
+  // uniquely. Séance libre timings are always listed individually.
   const getUniqueSubscriptions = () => {
     const seen = new Set<string>();
     const unique: Subscription[] = [];
@@ -85,8 +112,7 @@ export function SubscriptionsPage() {
     subscriptions.forEach((sub) => {
       const s = sessions.find((se) => se.id === sub.sessionId);
       if (!s) return;
-      // Unique key based on class, module, teacher
-      const key = `${s.classId}-${s.moduleId}-${s.teacherId}`;
+      const key = s.isOpen ? `open-${s.id}` : `${s.classId}-${s.moduleId}-${s.teacherId}`;
       if (!seen.has(key)) {
         seen.add(key);
         unique.push(sub);
@@ -101,12 +127,7 @@ export function SubscriptionsPage() {
     const s = sessions.find((se) => se.id === sub.sessionId);
     if (!s) return 0;
 
-    // Find all sessions sharing same class, module, teacher (different groups)
-    const siblingSessionIds = new Set(
-      sessions
-        .filter((se) => se.classId === s.classId && se.moduleId === s.moduleId && se.teacherId === s.teacherId)
-        .map((se) => se.id)
-    );
+    const siblingSessionIds = new Set(siblingSessionsOf(s).map((se) => se.id));
 
     // Sum attendance records for these session ids
     return attendance
@@ -114,13 +135,16 @@ export function SubscriptionsPage() {
       .reduce((sum, att) => sum + att.amountDeducted, 0);
   };
 
-  // Search schedule sessions (deduplicated by class, module, teacher)
+  // Search schedule sessions (deduplicated by class, module, teacher). Séance
+  // libre timings already carry their own subscription, so they are not
+  // offered here — they would create a duplicate tariff.
   const getFilteredSessionsForSearch = () => {
     const seen = new Set<string>();
     const list: ScheduleSession[] = [];
 
     // Filter sessions matching search query
     sessions.forEach((s) => {
+      if (s.isOpen) return;
       const cls = classes.find((c) => c.id === s.classId);
       const mod = modules.find((m) => m.id === s.moduleId);
       const t = teachers.find((te) => te.id === s.teacherId);
@@ -157,9 +181,7 @@ export function SubscriptionsPage() {
     if (!s) return;
 
     // Find all schedule sessions sharing the same class, module, and teacher (all groups)
-    const matchingSessions = sessions.filter(
-      (se) => se.classId === s.classId && se.moduleId === s.moduleId && se.teacherId === s.teacherId
-    );
+    const matchingSessions = siblingSessionsOf(s);
 
     // Create subscriptions for each of them if not already existing
     matchingSessions.forEach((matchSes) => {
@@ -195,9 +217,7 @@ export function SubscriptionsPage() {
     if (!s) return;
 
     // Find all matching sessions (sibling groups) and update their subscription price
-    const matchingSessions = sessions.filter(
-      (se) => se.classId === s.classId && se.moduleId === s.moduleId && se.teacherId === s.teacherId
-    );
+    const matchingSessions = siblingSessionsOf(s);
 
     matchingSessions.forEach((matchSes) => {
       const matchSub = subscriptions.find((su) => su.sessionId === matchSes.id);
@@ -212,6 +232,9 @@ export function SubscriptionsPage() {
       }
     });
 
+    // Keep the timing's own price in sync so the Planner shows the same tariff.
+    if (s.isOpen && !isFormation) updateItem("sessions", s.id, { openPrice: pricePerSession });
+
     setIsEditOpen(false);
     resetForm();
   };
@@ -221,9 +244,7 @@ export function SubscriptionsPage() {
       const s = sessions.find((se) => se.id === sub.sessionId);
       if (!s) return;
 
-      const matchingSessions = sessions.filter(
-        (se) => se.classId === s.classId && se.moduleId === s.moduleId && se.teacherId === s.teacherId
-      );
+      const matchingSessions = siblingSessionsOf(s);
 
       matchingSessions.forEach((matchSes) => {
         const matchSub = subscriptions.find((su) => su.sessionId === matchSes.id);
@@ -320,10 +341,10 @@ export function SubscriptionsPage() {
               <CardBody className="flex flex-col justify-between min-h-48">
                 <div>
                   <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-2">
-                      <Ticket className="h-5 w-5 text-primary" />
-                      <div>
-                        <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Ticket className={`h-5 w-5 shrink-0 ${details.isOpen ? "text-success" : "text-primary"}`} />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <h4 className="text-sm font-bold text-ink">
                             {details.module}
                           </h4>
@@ -332,10 +353,20 @@ export function SubscriptionsPage() {
                               Formation
                             </Badge>
                           )}
+                          {details.isOpen && (
+                            <Badge tone="success" className="text-[9px] px-1.5 py-0">
+                              Séance Libre
+                            </Badge>
+                          )}
                         </div>
-                        <span className="text-xs text-muted block">
-                          {details.class} - {details.level}
+                        <span className="text-xs text-muted block truncate">
+                          {details.isOpen ? details.class : `${details.class} - ${details.level}`}
                         </span>
+                        {details.isOpen && (
+                          <span className="text-[10px] text-muted block font-mono">
+                            {details.time} · {details.periodStart} → {details.periodEnd}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -378,8 +409,25 @@ export function SubscriptionsPage() {
                   <div className="mt-4 space-y-1 text-xs">
                     <div className="flex justify-between text-muted">
                       <span>Enseignant:</span>
-                      <strong className="text-ink">{details.teacher}</strong>
+                      <strong className="text-ink">
+                        {details.teacher}
+                        {details.teacherIsPassager && (
+                          <Badge tone="warning" className="ml-1.5 text-[9px] px-1 py-0">Passager</Badge>
+                        )}
+                      </strong>
                     </div>
+                    {details.isOpen && (
+                      <>
+                        <div className="flex justify-between text-muted">
+                          <span>Groupes:</span>
+                          <strong className="text-ink truncate max-w-[60%] text-right">{details.groupsLabel}</strong>
+                        </div>
+                        <div className="flex justify-between text-muted">
+                          <span>Salles:</span>
+                          <strong className="text-ink truncate max-w-[60%] text-right">{details.sallesLabel}</strong>
+                        </div>
+                      </>
+                    )}
                     {details.isFormation ? (
                       <>
                         <div className="flex justify-between text-muted">

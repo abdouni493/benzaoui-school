@@ -6,62 +6,56 @@
  * (including the Vercel-hosted version — no dependency on locally installed
  * TTS voices).
  *
- * The browser's Web Speech API is kept only as a last-resort fallback when
- * the audio file itself cannot be played (file missing, decode error…).
+ * There are exactly FIVE verdicts, one clip each:
+ *   1. debt                — the student's balance is negative (dette)
+ *   2. creditInsufficient  — balance too low to cover the séance / expired
+ *   3. welcome             — accepted, the student may enter
+ *   4. alreadyScanned      — card swiped again (cooldown or already present)
+ *   5. cardNotFound        — unknown badge
  *
- * scan.notEligible and scan.noSessionToday deliberately have NO clip: several
- * séances of different levels run at the same time, so those rejections stay
- * visual-only (toast) to avoid announcing a wrong "not your séance" verdict.
+ * Every other rejection (trop tôt, séance terminée, séance d'un autre niveau,
+ * aucune séance aujourd'hui) stays VISUAL-ONLY: several séances of different
+ * levels run at the same time, so announcing a verdict out loud there would be
+ * misleading. `speechCaseForScan` returns null for those.
+ *
+ * The browser's Web Speech API is kept only as a last-resort fallback when the
+ * audio file itself cannot be played (file missing, decode error…).
  */
 
 import type { Language } from "@/lib/store/settings";
 
 export type SpeechCaseType =
-  | "good"
-  | "low"
-  | "expired"
-  | "late"
-  | "notFound"
-  | "cooldown"
-  | "alreadyPresent"
-  | "tooEarly"
-  | "sessionEnded";
+  | "debt"
+  | "creditInsufficient"
+  | "welcome"
+  | "alreadyScanned"
+  | "cardNotFound";
 
-/** Served statically from `public/speech/` at the site root. */
+/** Served statically from `public/speech/` at the site root.
+ *  File names are lowercase on purpose — the Vercel filesystem is
+ *  case-sensitive, a mismatch would silently 404 into the TTS fallback. */
 const AUDIO_FILES: Record<SpeechCaseType, string> = {
-  good: "/speech/you_can_enter.mp3",
-  low: "/speech/soon_expire.mp3",
-  expired: "/speech/sorry_you_cant_enter.mp3",
-  late: "/speech/late_arrival.mp3",
-  notFound: "/speech/card_not_found.mp3",
-  cooldown: "/speech/already_scanned.mp3",
-  alreadyPresent: "/speech/already_present.mp3",
-  tooEarly: "/speech/too_early.mp3",
-  sessionEnded: "/speech/session_ended.mp3",
+  debt: "/speech/debt.mp3",
+  creditInsufficient: "/speech/credit_insufficient.mp3",
+  welcome: "/speech/welcome.mp3",
+  alreadyScanned: "/speech/already_scanned.mp3",
+  cardNotFound: "/speech/card_not_found.mp3",
 };
 
 const FALLBACK_MESSAGES: Record<Language, Record<SpeechCaseType, (name: string) => string>> = {
   fr: {
-    good: () => "Bienvenue, vous pouvez entrer.",
-    low: () => "Bienvenue, vous pouvez entrer, mais votre solde est bientôt épuisé.",
-    expired: (name) => `Désolé ${name}, vous ne pouvez pas entrer car votre solde est épuisé.`,
-    late: () => "Vous pouvez entrer, mais vous êtes en retard. Merci d'arriver à l'heure la prochaine fois.",
-    notFound: () => "Carte non reconnue. Veuillez vous présenter à la réception.",
-    cooldown: () => "Votre passage est déjà enregistré. Vous pouvez entrer.",
-    alreadyPresent: () => "Vous êtes déjà pointé pour cette séance. Bonne séance.",
-    tooEarly: () => "Vous êtes en avance. Votre séance n'a pas encore commencé, merci de patienter.",
-    sessionEnded: () => "Désolé, votre séance est déjà terminée. Veuillez vous adresser à la réception.",
+    debt: (name) => `Désolé ${name}, vous ne pouvez pas entrer : votre compte est en dette.`,
+    creditInsufficient: (name) => `Désolé ${name}, vous ne pouvez pas entrer car votre solde est épuisé.`,
+    welcome: () => "Bienvenue, vous pouvez entrer.",
+    alreadyScanned: () => "Votre passage est déjà enregistré.",
+    cardNotFound: () => "Carte non reconnue. Veuillez vous présenter à la réception.",
   },
   ar: {
-    good: () => "مرحبًا، يمكنك الدخول.",
-    low: () => "مرحبًا، يمكنك الدخول، لكن رصيدك سينتهي قريبًا.",
-    expired: (name) => `عذرًا ${name}، لا يمكنك الدخول لأن رصيدك قد انتهى.`,
-    late: () => "يمكنك الدخول، لكنك متأخر. يرجى الحضور في الوقت المحدد المرة القادمة.",
-    notFound: () => "البطاقة غير معروفة. يرجى التوجه إلى الاستقبال.",
-    cooldown: () => "تم تسجيل دخولك من قبل. يمكنك الدخول.",
-    alreadyPresent: () => "حضورك مسجل مسبقًا لهذه الحصة. حصة موفقة.",
-    tooEarly: () => "لقد أتيت مبكرًا. لم تبدأ حصتك بعد، يرجى الانتظار.",
-    sessionEnded: () => "عذرًا، لقد انتهت حصتك. يرجى التوجه إلى الاستقبال.",
+    debt: (name) => `عذرًا ${name}، لا يمكنك الدخول: حسابك عليه دين.`,
+    creditInsufficient: (name) => `عذرًا ${name}، لا يمكنك الدخول لأن رصيدك قد انتهى.`,
+    welcome: () => "مرحبًا، يمكنك الدخول.",
+    alreadyScanned: () => "تم تسجيل دخولك من قبل.",
+    cardNotFound: () => "البطاقة غير معروفة. يرجى التوجه إلى الاستقبال.",
   },
 };
 
@@ -127,39 +121,45 @@ function speakFallback(caseType: SpeechCaseType, studentName: string, lang: Lang
 }
 
 /**
- * Map a check-in RPC result to the announcement clip, or null when nothing
- * should be played (notEligible / noSessionToday / technical error).
+ * Map a check-in RPC result to one of the five clips, or null when nothing
+ * should be announced.
  *
- *  - sufficient balance → "you can enter" (or "late arrival" when late)
- *  - balance soon exhausted → "soon to expire" (takes priority over lateness)
- *  - balance exhausted / in debt / subscription expired → "sorry"
- *  - unknown card / double swipe / already badged / too early / séance over
- *    → their dedicated clips
+ * A rejection for money is split in two: `debt` when the balance is already
+ * negative (the RPC sets `debt: true`), `creditInsufficient` otherwise.
  */
 export function speechCaseForScan(result: {
   ok: boolean;
   messageKey: string;
-  lowBalance?: boolean;
+  debt?: boolean;
+  newBalance?: number;
 }): SpeechCaseType | null {
+  const inDebt = result.debt ?? (result.newBalance !== undefined && result.newBalance < 0);
+
   switch (result.messageKey) {
-    case "scan.expired":
-    case "scan.debtBlocked":
-    case "scan.subscriptionExpired":
-      return "expired";
     case "scan.notFound":
-      return "notFound";
+      return "cardNotFound";
+
     case "scan.cooldown":
-      return "cooldown";
     case "scan.alreadyPresent":
-      return "alreadyPresent";
-    case "scan.tooEarly":
-      return "tooEarly";
-    case "scan.sessionEnded":
-      return "sessionEnded";
+      return "alreadyScanned";
+
+    case "scan.debtBlocked":
+      return "debt";
+
+    case "scan.expired":
+    case "scan.subscriptionExpired":
+      return inDebt ? "debt" : "creditInsufficient";
+
+    case "scan.successDebt":
+      return "debt";
+
     case "scan.success":
-      return result.ok ? (result.lowBalance ? "low" : "good") : null;
     case "scan.successLate":
-      return result.ok ? (result.lowBalance ? "low" : "late") : null;
+      if (!result.ok) return null;
+      return inDebt ? "debt" : "welcome";
+
+    // scan.tooEarly / scan.sessionEnded / scan.notEligible / scan.noSessionToday
+    // and technical errors stay visual-only.
     default:
       return null;
   }

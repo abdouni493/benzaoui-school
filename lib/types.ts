@@ -87,9 +87,41 @@ export interface Teacher {
   monthlyAmount?: number;
   startDate?: string;
   percentage?: number;
+  /** "enseignant passager": intervenant sans compte de connexion, réglé
+   *  créneau par créneau depuis la fiche enseignant */
+  isPassager?: boolean;
 }
 
-export type ReceptionPaymentType = "daily" | "monthly" | "half_day";
+/** One settlement written for a teacher (fixed amount or percentage-based). */
+export interface TeacherPayment {
+  id: string;
+  teacherId: string;
+  amount: number;
+  method: "fixed" | "percent";
+  percentage?: number;
+  studentsCount: number;
+  sessionsCount: number;
+  description: string;
+  /** frozen snapshot of the settled timings, so the receipt can be reprinted */
+  details: TeacherPaymentDetail[];
+  paidAt: string;
+}
+
+export interface TeacherPaymentDetail {
+  dateKey: string;
+  sessionId: string;
+  title: string;
+  moduleName: string;
+  groupName: string;
+  startTime: string;
+  endTime: string;
+  presents: number;
+  passagers: number;
+  gross: number;
+  share: number;
+}
+
+export type ReceptionPaymentType = "daily" | "monthly" | "half_day" | "hourly";
 /** Réception / Agent de sécurité / Ménage — Ménage never gets a login. */
 export type WorkerRole = "reception" | "security" | "menage";
 export interface ReceptionStaff {
@@ -102,6 +134,25 @@ export interface ReceptionStaff {
   startDate: string;
   salary: number;
   role?: WorkerRole;
+  /** badge used by the worker check-in scanner */
+  rfid?: string;
+  /** paymentType === "hourly": price of one worked hour */
+  hourlyRate?: number;
+}
+
+/** One worked day of an hourly worker (clock-in / clock-out). */
+export interface WorkerShift {
+  id: string;
+  workerId: string;
+  workDate: string; // YYYY-MM-DD
+  startAt?: string;
+  endAt?: string;
+  minutes: number;
+  /** the day ended without a clock-out: hours frozen until reception fixes it */
+  frozen: boolean;
+  paid: boolean;
+  paymentId?: string;
+  createdAt: string;
 }
 
 export interface ScheduleSession {
@@ -114,6 +165,17 @@ export interface ScheduleSession {
   days: Day[];
   startTime: string; // HH:mm
   endTime: string; // HH:mm
+  /** "séance libre" timing: several classes/groups/salles over a date period */
+  isOpen?: boolean;
+  /** explicit, readable name — only set for séance libre timings */
+  title?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  classIds?: string[];
+  groupIds?: string[];
+  salleIds?: string[];
+  /** price of one séance libre (mirrored into the auto-created subscription) */
+  openPrice?: number;
 }
 
 export interface Subscription {
@@ -133,6 +195,22 @@ export interface SubscriptionDates {
   expiryDate?: string;
 }
 
+/** Reduction granted to ONE student on ONE module, applied by every price
+ *  calculation (scan, manual présence, weekly absence billing). */
+export type DiscountType = "percent" | "amount";
+export interface SubscriptionDiscount {
+  type: DiscountType;
+  value: number;
+}
+
+/** Weekly-absence billing switch for a single module. */
+export interface ModuleAbsenceRule {
+  moduleId: string;
+  enabled: boolean;
+  /** length of the absence window in days (7 = the default weekly rule) */
+  daysWindow: number;
+}
+
 export interface Student {
   id: string;
   firstName: string;
@@ -147,8 +225,18 @@ export interface Student {
   subscriptionIds: string[];
   /** formation enrollments: start/expiry per subscription id */
   subscriptionDates?: Record<string, SubscriptionDates>;
+  /** per-module reduction, keyed by subscription id */
+  subscriptionDiscounts?: Record<string, SubscriptionDiscount>;
   /** outstanding one-time registration cost not yet settled */
   registrationDue?: number;
+}
+
+/** Portal password kept so the payment receipt can print the student's login.
+ *  Stored in a staff-only table — never readable by the student/parent. */
+export interface StudentCredential {
+  studentId: string;
+  password: string;
+  updatedAt: string;
 }
 
 export type BalanceTxType =
@@ -239,6 +327,10 @@ export interface Announcement {
   audience: Audience;
   endDate: string;
   date: string;
+  /** empty = whole school; otherwise only these groups (and, when
+   *  includeParents is on, the parents of their students) */
+  targetGroupIds?: string[];
+  includeParents?: boolean;
 }
 
 export interface ExpenseCategory {
@@ -305,4 +397,12 @@ export interface IndependentSession {
   itemLabel: string;
   price: number;
   date: string;
+  /** séance libre timing this attendance belongs to (drives the teacher payout) */
+  sessionId?: string;
+  startTime?: string;
+  endTime?: string;
+  createdAt?: string;
+  /** the teacher has already been settled for this passager's séance — a
+   *  créneau attended only by passagers has no unpaid_teacher_sessions row */
+  teacherPaid?: boolean;
 }

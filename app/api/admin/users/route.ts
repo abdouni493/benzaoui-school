@@ -27,6 +27,8 @@ interface CreateUserBody {
   // reception / workers
   salary?: number;
   workerRole?: string;
+  workerRfid?: string;
+  hourlyRate?: number;
 }
 
 /** Who is allowed to call this endpoint, per role being created:
@@ -125,6 +127,8 @@ export async function POST(request: Request) {
       start_date: body.startDate ?? new Date().toISOString().slice(0, 10),
       salary: body.salary ?? 0,
       role: body.workerRole ?? "reception",
+      rfid: body.workerRfid?.trim() || null,
+      hourly_rate: body.hourlyRate ?? 0,
     });
     if (error) return rollback(error.message);
   } else if (role === "parent") {

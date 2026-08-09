@@ -4,7 +4,7 @@ import type {
   SchoolClass,
   Student,
   Subscription,
-  Teacher,
+  SubscriptionDiscount,
 } from "@/lib/types";
 
 export const teacherName = (db: Database, id: string) => {
@@ -52,6 +52,35 @@ export function sessionLabel(
 
 export function subscriptionPrice(db: Database, sub: Subscription): number {
   return sub.pricePerSession;
+}
+
+// ---- Per-module reductions ----
+/**
+ * Price actually charged once the student's reduction on that module is
+ * applied. Mirrors the `public.discounted_price()` SQL function 1:1 — the scan,
+ * the manual présence and the weekly-absence billing all use the SQL one, so
+ * this must stay in sync or the UI would advertise a price the server doesn't
+ * charge. Never returns a negative price.
+ */
+export function netPriceFor(basePrice: number, discount?: SubscriptionDiscount): number {
+  const price = Math.max(0, Math.round(basePrice || 0));
+  if (!discount || discount.value <= 0) return price;
+  const cut =
+    discount.type === "percent"
+      ? Math.round((price * Math.min(Math.max(discount.value, 0), 100)) / 100)
+      : Math.max(discount.value, 0);
+  return Math.max(0, price - cut);
+}
+
+/** Human label for a reduction, e.g. "-20%" or "-500 DA". Empty when none. */
+export function discountLabel(discount?: SubscriptionDiscount): string {
+  if (!discount || discount.value <= 0) return "";
+  return discount.type === "percent" ? `-${discount.value}%` : `-${discount.value} DA`;
+}
+
+/** Net price of one séance for a given student on a given subscription. */
+export function studentSeancePrice(student: Student, sub: Subscription): number {
+  return netPriceFor(sub.pricePerSession, student.subscriptionDiscounts?.[sub.id]);
 }
 
 export function subscriptionLabel(db: Database, sub: Subscription): string {

@@ -23,6 +23,10 @@ export interface CreateUserPayload {
   salary?: number;
   /** worker (reception_staff) job: reception | security | menage */
   workerRole?: string;
+  /** worker badge used by the clock-in / clock-out scanner */
+  workerRfid?: string;
+  /** hourly contracts: price of one worked hour */
+  hourlyRate?: number;
 }
 
 /** Creates a Supabase Auth login + the matching role-specific row via the

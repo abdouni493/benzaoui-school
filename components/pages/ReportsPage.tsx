@@ -33,6 +33,7 @@ import {
   CircleDollarSign,
   UserCog,
   ClipboardList,
+  PieChart as PieIcon,
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -114,6 +115,8 @@ interface Section {
   icon: ReactNode;
   cards: MetricSpec[];
   panels: CalcPanel[];
+  /** Free-form block rendered under the cards/panels (charts, custom tables). */
+  custom?: ReactNode;
 }
 
 /* ------------------------------------------------------------------ */
@@ -263,6 +266,110 @@ function CalcCard({ panel }: { panel: CalcPanel }) {
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* Donut chart (pure SVG — no chart library in the dependency list)    */
+/* ------------------------------------------------------------------ */
+
+interface Slice {
+  label: string;
+  value: number;
+  color: string;
+  hint?: string;
+}
+
+/**
+ * Ring chart: one arc per slice, drawn with stroke-dasharray on concentric
+ * circles. Percentages are computed against the sum of the slices, so the
+ * ring always closes. The centre shows the headline figure.
+ */
+function DonutChart({
+  slices,
+  centerLabel,
+  centerValue,
+  centerTone = "text-ink",
+}: {
+  slices: Slice[];
+  centerLabel: string;
+  centerValue: string;
+  centerTone?: string;
+}) {
+  const total = slices.reduce((s, x) => s + Math.max(0, x.value), 0);
+  const radius = 70;
+  const circumference = 2 * Math.PI * radius;
+
+  // Each arc starts where the previous ones ended, so the offset is the sum of
+  // every fraction before it (no accumulator mutated inside the map).
+  const fractions = slices.map((s) => (total > 0 ? Math.max(0, s.value) / total : 0));
+  const arcs = slices.map((s, i) => {
+    const fraction = fractions[i];
+    const before = fractions.slice(0, i).reduce((a, b) => a + b, 0);
+    return {
+      ...s,
+      pct: fraction * 100,
+      dash: `${fraction * circumference} ${circumference}`,
+      // Negative offset because the ring is drawn clockwise from 12 o'clock.
+      offsetDash: -before * circumference,
+    };
+  });
+
+  return (
+    <div className="flex flex-col items-center gap-4 sm:flex-row sm:items-center sm:gap-8">
+      <div className="relative shrink-0">
+        <svg width="190" height="190" viewBox="0 0 190 190" className="-rotate-90">
+          <circle cx="95" cy="95" r={radius} fill="none" strokeWidth="28" className="stroke-line/60" />
+          {arcs.map((a, i) =>
+            a.pct > 0 ? (
+              <circle
+                key={i}
+                cx="95"
+                cy="95"
+                r={radius}
+                fill="none"
+                strokeWidth="28"
+                stroke={a.color}
+                strokeDasharray={a.dash}
+                strokeDashoffset={a.offsetDash}
+              />
+            ) : null,
+          )}
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+          <span className="text-[9px] font-bold uppercase tracking-wider text-muted">{centerLabel}</span>
+          <strong className={`text-lg font-black ${centerTone}`}>{centerValue}</strong>
+        </div>
+      </div>
+
+      {/* Legend: the same numbers, spelled out beside the ring */}
+      <div className="w-full flex-1 space-y-2">
+        {arcs.map((a, i) => (
+          <div key={i} className="flex items-center justify-between gap-3 rounded-xl border border-line/60 bg-canvas/30 px-3 py-2">
+            <span className="flex min-w-0 items-center gap-2 text-xs">
+              <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: a.color }} />
+              <span className="min-w-0">
+                <strong className="block truncate text-ink">{a.label}</strong>
+                {a.hint && <span className="block text-[9px] text-muted">{a.hint}</span>}
+              </span>
+            </span>
+            <span className="shrink-0 text-right">
+              <strong className="block text-xs text-ink">{formatDA(a.value)}</strong>
+              <span className="block text-[10px] font-bold text-muted">{a.pct.toFixed(1)} %</span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Slim horizontal bar used by the per-teacher contribution list. */
+function ShareBar({ pct, color }: { pct: number; color: string }) {
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-line/60">
+      <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.max(0, pct))}%`, backgroundColor: color }} />
+    </div>
+  );
+}
+
 /* ================================================================== */
 /* Page                                                                */
 /* ================================================================== */
@@ -301,6 +408,9 @@ export function ReportsPage() {
 
   const [detail, setDetail] = useState<{ title: string; spec: DetailSpec } | null>(null);
   const [modalSearch, setModalSearch] = useState("");
+
+  /** "Analyse générale" tab: focus the per-teacher breakdown on one teacher. */
+  const [teacherAnalysisId, setTeacherAnalysisId] = useState("all");
 
   const handleGenerate = () => {
     if (!startDate || !endDate) {
@@ -1389,9 +1499,342 @@ export function ReportsPage() {
       ],
     };
 
+    /* =========================== ANALYSE GÉNÉRALE ===================== */
+    // Split the staff payouts between teachers and the other workers. The cash
+    // ledger only carries free-text descriptions, so we match on the person's
+    // last name; a teacher match wins when a name is shared.
+    const teacherLastNames = teachers.map((t) => t.lastName.toLowerCase()).filter(Boolean);
+    const workerLastNames = reception.map((r) => r.lastName.toLowerCase()).filter(Boolean);
+    const staffMovements = fCash.filter((t) => t.type === "teacher_payment" || t.type === "acompte");
+
+    let teacherPayout = 0;
+    let workerPayout = 0;
+    let unclassifiedPayout = 0;
+    staffMovements.forEach((t) => {
+      const desc = (t.description || "").toLowerCase();
+      const amount = Math.abs(t.amount);
+      if (teacherLastNames.some((n) => desc.includes(n))) teacherPayout += amount;
+      else if (workerLastNames.some((n) => desc.includes(n))) workerPayout += amount;
+      else unclassifiedPayout += amount;
+    });
+
+    const analysisRevenue = cashStudent + cashDeposit;
+    const analysisExpenses = cashExpenseWithdraw;
+    const analysisCosts = teacherPayout + workerPayout + unclassifiedPayout + analysisExpenses;
+    const analysisProfit = analysisRevenue - analysisCosts;
+    const pctOf = (n: number) => (analysisRevenue > 0 ? (n / analysisRevenue) * 100 : 0);
+
+    const donutSlices: Slice[] = [
+      {
+        label: "Bénéfice net",
+        value: Math.max(0, analysisProfit),
+        color: "#22c55e",
+        hint: "Recettes − charges de la période",
+      },
+      {
+        label: "Paiements enseignants",
+        value: teacherPayout,
+        color: "#7c3aed",
+        hint: "Salaires, parts de séances et acomptes",
+      },
+      {
+        label: "Dépenses",
+        value: analysisExpenses,
+        color: "#ef4444",
+        hint: "Dépenses de fonctionnement et retraits",
+      },
+      {
+        label: "Paiements autres travailleurs",
+        value: workerPayout + unclassifiedPayout,
+        color: "#f59e0b",
+        hint: "Réception, sécurité, ménage",
+      },
+    ];
+
+    // ---- Per-teacher contribution -------------------------------------------
+    // What each teacher brought in (presences on his séances, plus the
+    // passagers of his séances libres) and what he cost over the same period.
+    const teacherStats = teachers
+      .map((t) => {
+        const mySessionIds = new Set(sessions.filter((s) => s.teacherId === t.id).map((s) => s.id));
+        const generated =
+          sum(
+            fAtt.filter((a) => mySessionIds.has(a.sessionId)),
+            (a) => a.amountDeducted,
+          ) +
+          sum(
+            fInd.filter((i) => i.sessionId && mySessionIds.has(i.sessionId) && !i.studentId),
+            (i) => i.price,
+          );
+        // Earned share over the period (paid or not), from the dues ledger.
+        const earned = sum(
+          fUnpaidRange.filter((u) => u.teacherId === t.id),
+          (u) => u.amount,
+        );
+        const paid = sum(
+          staffMovements.filter((c) => (c.description || "").toLowerCase().includes(t.lastName.toLowerCase())),
+          (c) => Math.abs(c.amount),
+        );
+        const presences = fAtt.filter((a) => mySessionIds.has(a.sessionId)).length;
+        return {
+          id: t.id,
+          name: `${t.firstName} ${t.lastName}`,
+          isPassager: !!t.isPassager,
+          contract: t.isPassager ? "À la séance" : t.paymentType === "monthly" ? "Mensuel" : `${t.percentage ?? 0} %`,
+          presences,
+          generated,
+          earned,
+          paid,
+          margin: generated - earned,
+        };
+      })
+      .filter((t) => t.generated > 0 || t.earned > 0 || t.paid > 0)
+      .sort((a, b) => b.generated - a.generated);
+
+    const teacherGeneratedTotal = teacherStats.reduce((s, t) => s + t.generated, 0);
+    const teacherEarnedTotal = teacherStats.reduce((s, t) => s + t.earned, 0);
+    const TEACHER_COLORS = ["#7c3aed", "#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#06b6d4", "#a855f7", "#84cc16"];
+
+    const analysisSection: Section = {
+      id: "analysis",
+      label: "Analyse générale",
+      icon: <PieIcon className="h-4 w-4" />,
+      cards: [
+        {
+          label: "Recettes totales (période)",
+          value: inflow(analysisRevenue),
+          tone: "success",
+          icon: <ArrowUpRight className="h-5 w-5" />,
+          hint: "Base de calcul des pourcentages",
+        },
+        {
+          label: "Part enseignants",
+          value: `${pctOf(teacherPayout).toFixed(1)} %`,
+          tone: "primary",
+          icon: <UserCog className="h-5 w-5" />,
+          hint: `${formatDA(teacherPayout)} versés`,
+        },
+        {
+          label: "Part dépenses",
+          value: `${pctOf(analysisExpenses).toFixed(1)} %`,
+          tone: "danger",
+          icon: <Receipt className="h-5 w-5" />,
+          hint: `${formatDA(analysisExpenses)} de charges`,
+        },
+        {
+          label: "Part autres travailleurs",
+          value: `${pctOf(workerPayout + unclassifiedPayout).toFixed(1)} %`,
+          tone: "warning",
+          icon: <Users className="h-5 w-5" />,
+          hint: `${formatDA(workerPayout + unclassifiedPayout)} versés`,
+        },
+        {
+          label: "Marge bénéficiaire",
+          value: `${pctOf(Math.max(0, analysisProfit)).toFixed(1)} %`,
+          tone: analysisProfit >= 0 ? "success" : "danger",
+          icon: <Banknote className="h-5 w-5" />,
+          hint: analysisProfit >= 0 ? "Part des recettes conservée" : "Période déficitaire",
+        },
+        {
+          label: "Bénéfice net consolidé",
+          value: signed(analysisProfit),
+          tone: analysisProfit >= 0 ? "success" : "danger",
+          icon: <FileSpreadsheet className="h-5 w-5" />,
+          hint: "Recettes − enseignants − travailleurs − dépenses",
+          featured: true,
+        },
+      ],
+      panels: [
+        {
+          title: "Décomposition détaillée des recettes",
+          subtitle: `Période du ${reportRange.start} au ${reportRange.end}`,
+          icon: <Banknote className="h-4 w-4 text-primary" />,
+          lines: [
+            { label: "Encaissements élèves", value: inflow(cashStudent), tone: "success" },
+            { label: "Dépôts manuels en caisse", value: inflow(cashDeposit), tone: "success" },
+            { label: "TOTAL DES RECETTES", value: inflow(analysisRevenue), tone: "success", emphasis: true },
+            {
+              label: "Paiements enseignants",
+              value: outflow(teacherPayout),
+              tone: "primary",
+              formula: `${pctOf(teacherPayout).toFixed(1)} % des recettes`,
+            },
+            {
+              label: "Paiements autres travailleurs",
+              value: outflow(workerPayout + unclassifiedPayout),
+              tone: "warning",
+              formula: `${pctOf(workerPayout + unclassifiedPayout).toFixed(1)} % des recettes`,
+            },
+            {
+              label: "Dépenses & retraits",
+              value: outflow(analysisExpenses),
+              tone: "danger",
+              formula: `${pctOf(analysisExpenses).toFixed(1)} % des recettes`,
+            },
+            { label: "TOTAL DES CHARGES", value: outflow(analysisCosts), tone: "danger", emphasis: true },
+            {
+              label: "BÉNÉFICE NET",
+              value: signed(analysisProfit),
+              tone: analysisProfit >= 0 ? "success" : "danger",
+              strong: true,
+              formula: `${pctOf(analysisProfit).toFixed(1)} % des recettes`,
+            },
+          ],
+          note:
+            unclassifiedPayout > 0
+              ? `${formatDA(unclassifiedPayout)} de règlements n'ont pas pu être rattachés à un enseignant ni à un travailleur (libellé de caisse non reconnu) et sont comptés avec les autres travailleurs.`
+              : undefined,
+        },
+      ],
+      custom: (
+        <div className="space-y-6">
+          {/* The circle itself */}
+          <Card className="border border-line card-shadow">
+            <CardBody className="space-y-4 p-5">
+              <div>
+                <h4 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-ink">
+                  <PieIcon className="h-4 w-4 text-primary" /> Répartition des recettes de la période
+                </h4>
+                <p className="text-[11px] text-muted">
+                  Chaque part du cercle représente sa fraction des {formatDA(analysisRevenue)} encaissés.
+                </p>
+              </div>
+              {analysisRevenue === 0 ? (
+                <p className="py-10 text-center text-xs italic text-muted">
+                  Aucune recette sur cette période — le graphique s&apos;affichera dès le premier encaissement.
+                </p>
+              ) : (
+                <DonutChart
+                  slices={donutSlices}
+                  centerLabel="Bénéfice net"
+                  centerValue={signed(analysisProfit)}
+                  centerTone={analysisProfit >= 0 ? "text-success" : "text-danger"}
+                />
+              )}
+              {analysisProfit < 0 && (
+                <div className="rounded-xl border border-danger/25 bg-danger/5 p-3 text-[11px] text-danger">
+                  Les charges dépassent les recettes de <strong>{formatDA(Math.abs(analysisProfit))}</strong> sur
+                  cette période : la part &laquo;&nbsp;bénéfice&nbsp;&raquo; du cercle est donc nulle.
+                </div>
+              )}
+            </CardBody>
+          </Card>
+
+          {/* Per-teacher contribution */}
+          <Card className="border border-line card-shadow">
+            <CardBody className="space-y-4 p-5">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h4 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-ink">
+                    <UserCog className="h-4 w-4 text-primary" /> Analyse par enseignant
+                  </h4>
+                  <p className="text-[11px] text-muted">
+                    Part de chaque enseignant dans les {formatDA(teacherGeneratedTotal)} générés par les séances.
+                  </p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] font-bold uppercase text-muted">Filtrer</label>
+                  <select
+                    value={teacherAnalysisId}
+                    onChange={(e) => setTeacherAnalysisId(e.target.value)}
+                    className="rounded-xl border border-line bg-surface px-3 py-2 text-xs text-ink outline-none focus:border-primary"
+                  >
+                    <option value="all">Tous les enseignants</option>
+                    {teacherStats.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {teacherStats.length === 0 ? (
+                <p className="py-10 text-center text-xs italic text-muted">
+                  Aucune activité enseignante sur cette période.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {teacherStats
+                    .filter((t) => teacherAnalysisId === "all" || t.id === teacherAnalysisId)
+                    .map((t, i) => {
+                      const sharePct = teacherGeneratedTotal > 0 ? (t.generated / teacherGeneratedTotal) * 100 : 0;
+                      const payPct = teacherEarnedTotal > 0 ? (t.earned / teacherEarnedTotal) * 100 : 0;
+                      const color = TEACHER_COLORS[i % TEACHER_COLORS.length];
+                      return (
+                        <div key={t.id} className="rounded-2xl border border-line bg-canvas/30 p-4 space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+                              <strong className="truncate text-sm text-ink">{t.name}</strong>
+                              <Badge tone={t.isPassager ? "warning" : "primary"} className="text-[9px]">
+                                {t.isPassager ? "Passager" : t.contract}
+                              </Badge>
+                            </div>
+                            <strong className="text-sm" style={{ color }}>{sharePct.toFixed(1)} % des gains</strong>
+                          </div>
+
+                          <ShareBar pct={sharePct} color={color} />
+
+                          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                            <div className="rounded-xl border border-line/60 bg-surface p-2.5 text-center">
+                              <span className="block text-[9px] font-bold uppercase text-muted">Présences</span>
+                              <strong className="text-sm text-ink">{t.presences}</strong>
+                            </div>
+                            <div className="rounded-xl border border-line/60 bg-surface p-2.5 text-center">
+                              <span className="block text-[9px] font-bold uppercase text-muted">Généré</span>
+                              <strong className="text-sm text-success">{formatDA(t.generated)}</strong>
+                            </div>
+                            <div className="rounded-xl border border-line/60 bg-surface p-2.5 text-center">
+                              <span className="block text-[9px] font-bold uppercase text-muted">Sa part</span>
+                              <strong className="text-sm text-primary">{formatDA(t.earned)}</strong>
+                              <span className="block text-[9px] text-muted">{payPct.toFixed(1)} % des parts</span>
+                            </div>
+                            <div className="rounded-xl border border-line/60 bg-surface p-2.5 text-center">
+                              <span className="block text-[9px] font-bold uppercase text-muted">Marge école</span>
+                              <strong className={`text-sm ${t.margin >= 0 ? "text-success" : "text-danger"}`}>
+                                {signed(t.margin)}
+                              </strong>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between rounded-xl bg-surface px-3 py-2 text-[11px]">
+                            <span className="text-muted">Déjà versé sur la période</span>
+                            <strong className="text-ink">{formatDA(t.paid)}</strong>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                  {teacherAnalysisId === "all" && (
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border-2 border-primary/30 bg-primary-50/40 p-4 text-xs">
+                      <span className="font-bold uppercase tracking-wider text-muted">Total enseignants</span>
+                      <span className="flex flex-wrap gap-4">
+                        <span>
+                          Généré : <strong className="text-success">{formatDA(teacherGeneratedTotal)}</strong>
+                        </span>
+                        <span>
+                          Parts enseignants : <strong className="text-primary">{formatDA(teacherEarnedTotal)}</strong>
+                        </span>
+                        <span>
+                          Marge école :{" "}
+                          <strong className={teacherGeneratedTotal - teacherEarnedTotal >= 0 ? "text-success" : "text-danger"}>
+                            {signed(teacherGeneratedTotal - teacherEarnedTotal)}
+                          </strong>
+                        </span>
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+        </div>
+      ),
+    };
+
     return {
       sections: [
         overviewSection,
+        analysisSection,
         studentsSection,
         attendanceSection,
         subscriptionsSection,
@@ -1405,6 +1848,9 @@ export function ReportsPage() {
   }, [
     isGenerated,
     reportRange,
+    // the "Analyse générale" block is built inside this memo, so the teacher
+    // filter has to invalidate it
+    teacherAnalysisId,
     cash,
     students,
     unpaidTeacher,
@@ -1506,6 +1952,9 @@ export function ReportsPage() {
               <MetricCard key={i} spec={c} onOpen={openDetail} />
             ))}
           </div>
+
+          {/* Charts / custom blocks (Analyse générale) */}
+          {current.custom}
 
           {/* Small calculations */}
           {current.panels.length > 0 && (

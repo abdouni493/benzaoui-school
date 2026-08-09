@@ -32,7 +32,7 @@ import {
 
 export function SettingsPage() {
   const dataStore = useData();
-  const { school, updateSchool, restoreState } = dataStore;
+  const { school, modules, moduleAbsenceRules, setModuleAbsenceRule, updateSchool, restoreState } = dataStore;
   const sessionUser = useSession((s) => s.user);
   const loginSession = useSession((s) => s.login);
   const [logoUploading, setLogoUploading] = useState(false);
@@ -335,6 +335,62 @@ export function SettingsPage() {
                         <Button variant="outline" onClick={handleSaveAbsenceBilling} className="shrink-0">
                           <Save className="h-3.5 w-3.5 me-1.5" /> Enregistrer
                         </Button>
+                      </div>
+
+                      {/* Per-module programming: each module can be excluded, or
+                          use a window other than 7 days. */}
+                      <div className="border-t border-line/50 pt-3 space-y-2">
+                        <label className="block text-[10px] font-bold uppercase tracking-wider text-muted">
+                          Programmation par module ({modules.length})
+                        </label>
+                        <p className="text-[10px] text-muted leading-relaxed">
+                          Chaque module est facturé indépendamment : décochez-en un pour ne jamais facturer
+                          ses absences, ou modifiez sa fenêtre (7 jours par défaut).
+                        </p>
+                        {modules.length === 0 ? (
+                          <p className="text-[10px] italic text-muted py-2">Aucun module enregistré.</p>
+                        ) : (
+                          <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                            {modules.map((m) => {
+                              const rule = moduleAbsenceRules.find((r) => r.moduleId === m.id);
+                              const enabled = rule?.enabled ?? true;
+                              const win = rule?.daysWindow ?? 7;
+                              return (
+                                <div
+                                  key={m.id}
+                                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2"
+                                >
+                                  <label className="flex items-center gap-2 cursor-pointer select-none min-w-0">
+                                    <input
+                                      type="checkbox"
+                                      checked={enabled}
+                                      onChange={(e) => setModuleAbsenceRule(m.id, e.target.checked, win)}
+                                      className="h-4 w-4 accent-primary shrink-0"
+                                      disabled={!absencePenaltyEnabled}
+                                    />
+                                    <span className={`text-xs font-semibold truncate ${enabled ? "text-ink" : "text-muted line-through"}`}>
+                                      {m.name}
+                                    </span>
+                                  </label>
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <span className="text-[10px] text-muted">Fenêtre</span>
+                                    <Input
+                                      type="number"
+                                      min={1}
+                                      value={win}
+                                      onChange={(e) =>
+                                        setModuleAbsenceRule(m.id, enabled, Math.max(1, Number(e.target.value) || 7))
+                                      }
+                                      className="w-16 rounded-lg text-xs"
+                                      disabled={!absencePenaltyEnabled || !enabled}
+                                    />
+                                    <span className="text-[10px] text-muted">jours</span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     </div>
 

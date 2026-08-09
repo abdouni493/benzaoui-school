@@ -36,7 +36,7 @@ export const fr = {
     subjects: "Sujets & Exercices",
     administration: "Administration",
     workers: "Travailleurs",
-    independent: "Séances Libres & Perfectionnement",
+    independent: "Séances Libres",
     parents: "Parents",
     announcements: "Annonces",
     expenses: "Dépenses",

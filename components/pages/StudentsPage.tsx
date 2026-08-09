@@ -28,8 +28,24 @@ import {
   Send,
   AlertTriangle,
 } from "lucide-react";
-import type { Student, Subscription, SubscriptionDates, Coursework, BalanceTransaction } from "@/lib/types";
-import { addMonths, daysUntil, formatDateFr, todayIso, EXPIRY_WARNING_DAYS } from "@/lib/helpers";
+import type {
+  Student,
+  Subscription,
+  SubscriptionDates,
+  SubscriptionDiscount,
+  DiscountType,
+  Coursework,
+  BalanceTransaction,
+} from "@/lib/types";
+import {
+  addMonths,
+  daysUntil,
+  discountLabel,
+  formatDateFr,
+  netPriceFor,
+  todayIso,
+  EXPIRY_WARNING_DAYS,
+} from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 import { printHtmlDocument } from "@/lib/print";
 import { buildStudentPaymentsReport } from "@/lib/reports/studentPayments";
@@ -53,12 +69,14 @@ export function StudentsPage() {
     absencePenalties,
     parents,
     filieres,
+    studentCredentials,
     push,
     deleteFrom,
     updateItem,
     addBalance,
     payDebt,
     scanCard,
+    setStudentPassword,
   } = useData();
 
   const { language, autoSendWhatsapp, autoSendEmail, setAutoSendWhatsapp, setAutoSendEmail } = useSettings();
@@ -118,6 +136,11 @@ export function StudentsPage() {
   const [assignSearch, setAssignSearch] = useState("");
   const [selectedAssignIds, setSelectedAssignIds] = useState<string[]>([]); // subscription or coursework ids
   const [assignStartDates, setAssignStartDates] = useState<Record<string, string>>({}); // formation sub id -> start date
+  // Per-module reduction: subscription id -> { type, value }
+  const [assignDiscounts, setAssignDiscounts] = useState<Record<string, SubscriptionDiscount>>({});
+  // "Réduction groupée": one reduction applied at once to every ticked module
+  const [bulkDiscountType, setBulkDiscountType] = useState<DiscountType>("percent");
+  const [bulkDiscountValue, setBulkDiscountValue] = useState<number>(0);
 
   // Active overlay actions index
   const [overlayStudentId, setOverlayStudentId] = useState<string | null>(null);
@@ -328,6 +351,10 @@ export function StudentsPage() {
       };
       push("students", newStudent);
 
+      // Keep the portal password so the payment receipt can print the login.
+      // It lives in a staff-only table — never readable by the student/parent.
+      await setStudentPassword(studentId, password);
+
       setIsCreateOpen(false);
       resetForm();
     } catch (err) {
@@ -341,6 +368,9 @@ export function StudentsPage() {
     if (password) {
       try {
         await resetUserPassword(selectedStudent.id, password);
+        // Mirror the new password into the staff-only table so the receipt
+        // keeps printing credentials that actually work.
+        await setStudentPassword(selectedStudent.id, password);
       } catch (err) {
         alert(err instanceof Error ? err.message : "Erreur lors du changement de mot de passe.");
         return;
@@ -481,6 +511,9 @@ export function StudentsPage() {
     setPayAmount(0);
     setSelectedAssignIds([]);
     setAssignStartDates({});
+    setAssignDiscounts({});
+    setBulkDiscountType("percent");
+    setBulkDiscountValue(0);
     setAssignSearch("");
     setSelectedStudent(null);
     setIsEmailDirty(false);
@@ -523,8 +556,42 @@ export function StudentsPage() {
       if (start) dates[subId] = start;
     }
     setAssignStartDates(dates);
+    setAssignDiscounts({ ...(stu.subscriptionDiscounts ?? {}) });
+    setBulkDiscountType("percent");
+    setBulkDiscountValue(0);
     setIsAssignOpen(true);
     setOverlayStudentId(null);
+  };
+
+  /** Apply the "réduction groupée" to every currently ticked module at once,
+   *  instead of setting each one individually. */
+  const applyBulkDiscount = () => {
+    if (selectedAssignIds.length === 0) {
+      alert("Sélectionnez d'abord les modules concernés par la réduction.");
+      return;
+    }
+    const next = { ...assignDiscounts };
+    for (const id of selectedAssignIds) {
+      if (bulkDiscountValue > 0) next[id] = { type: bulkDiscountType, value: bulkDiscountValue };
+      else delete next[id];
+    }
+    setAssignDiscounts(next);
+  };
+
+  const clearAllDiscounts = () => {
+    setAssignDiscounts({});
+    setBulkDiscountValue(0);
+  };
+
+  const setItemDiscount = (id: string, patch: Partial<SubscriptionDiscount>) => {
+    setAssignDiscounts((prev) => {
+      const current = prev[id] ?? { type: "percent" as DiscountType, value: 0 };
+      const merged = { ...current, ...patch };
+      const next = { ...prev };
+      if (merged.value > 0) next[id] = merged;
+      else delete next[id];
+      return next;
+    });
   };
 
   const openTopup = (stu: Student) => {
@@ -599,9 +666,17 @@ export function StudentsPage() {
       };
     }
 
+    // Only keep reductions that still belong to a selected module.
+    const subscriptionDiscounts: Record<string, SubscriptionDiscount> = {};
+    for (const subId of selectedAssignIds) {
+      const d = assignDiscounts[subId];
+      if (d && d.value > 0) subscriptionDiscounts[subId] = d;
+    }
+
     updateItem("students", selectedStudent.id, {
       subscriptionIds: selectedAssignIds,
       subscriptionDates,
+      subscriptionDiscounts,
       registrationDue: (selectedStudent.registrationDue || 0) + chargeRegistration,
     });
 
@@ -1028,12 +1103,58 @@ export function StudentsPage() {
     printHtmlDocument(html);
   };
 
+  /** The modules a student is enrolled in, with the price actually charged
+   *  (per-module reduction applied) — printed on the payment receipt. */
+  const getStudentEnrollmentRows = (stu: Student) =>
+    stu.subscriptionIds.flatMap((subId) => {
+      const sub = subscriptions.find((s) => s.id === subId);
+      if (!sub) {
+        const cw = coursework.find((c) => c.id === subId);
+        return cw
+          ? [{
+              module: `Stage: ${cw.name}`,
+              classLabel: "-",
+              group: "-",
+              teacher: teachers.find((t) => t.id === cw.teacherId)
+                ? `${teachers.find((t) => t.id === cw.teacherId)!.firstName} ${teachers.find((t) => t.id === cw.teacherId)!.lastName}`
+                : "-",
+              basePrice: cw.total,
+              netPrice: cw.total,
+              discountLabel: "",
+              unit: "total",
+            }]
+          : [];
+      }
+      const sess = sessions.find((se) => se.id === sub.sessionId);
+      if (!sess) return [];
+      const cls = classes.find((c) => c.id === sess.classId);
+      const lvl = cls ? (cls.type === "cours" ? cls.coursLevel : cls.formationLevel) : undefined;
+      const t = teachers.find((te) => te.id === sess.teacherId);
+      const isFormation = cls?.type === "formation";
+      const basePrice = isFormation ? sub.levelPrice ?? 0 : sub.pricePerSession;
+      const disc = stu.subscriptionDiscounts?.[subId];
+      return [{
+        module: modules.find((m) => m.id === sess.moduleId)?.name ?? "Module",
+        classLabel: cls ? (lvl ? `${cls.name} (${lvl})` : cls.name) : "-",
+        group: groups.find((g) => g.id === sess.groupId)?.name ?? "-",
+        teacher: t ? `${t.firstName} ${t.lastName}` : "-",
+        basePrice,
+        netPrice: netPriceFor(basePrice, disc),
+        discountLabel: disc && disc.value > 0
+          ? disc.type === "percent" ? `-${disc.value}%` : `-${disc.value} DA`
+          : "",
+        unit: isFormation ? `${sub.periodMonths ?? 0} mois` : "séance",
+      }];
+    });
+
   const handlePrintInvoice = (stu: Student, amount: number, desc: string, settledReg: boolean) => {
     // Get fresh values from useData store
     const updatedStudents = useData.getState().students;
     const updatedStu = updatedStudents.find(s => s.id === stu.id) || stu;
 
     const invoiceNum = `REC-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+    const portalPassword = studentCredentials.find((c) => c.studentId === stu.id)?.password ?? "";
+    const enrollments = getStudentEnrollmentRows(updatedStu);
 
     const logoHtml = school.logo
       ? `<img src="${school.logo}" alt="logo" class="school-logo" />`
@@ -1106,6 +1227,23 @@ export function StudentsPage() {
               text-align: right;
             }
             
+            /* Portal credentials block */
+            .credentials { border: 1px solid #e8e6f4; border-top: 4px solid #3b82f6; background: #fff; border-radius: 12px; padding: 12px; margin-bottom: 15px; }
+            .credentials h3 { margin: 0 0 8px; font-size: 0.9em; color: #1e40af; border-bottom: 1px dashed #e8e6f4; padding-bottom: 5px; }
+            .cred-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 15px; }
+            .cred-note { margin-top: 8px; font-size: 0.68em; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 5px 8px; }
+
+            /* Modules table */
+            .modules-card { border: 1px solid #e8e6f4; border-top: 4px solid #7c3aed; background: #fff; border-radius: 12px; padding: 12px; margin-bottom: 15px; }
+            .modules-card h3 { margin: 0 0 8px; font-size: 0.9em; color: #7c3aed; border-bottom: 1px dashed #e8e6f4; padding-bottom: 5px; }
+            table.modules { width: 100%; border-collapse: collapse; font-size: 0.78em; }
+            table.modules th { background: #fcfbff; color: #5c567a; text-transform: uppercase; font-size: 0.9em; letter-spacing: 0.3px; text-align: left; padding: 6px 8px; border-bottom: 1px solid #f1f0fb; }
+            table.modules td { padding: 6px 8px; border-bottom: 1px solid #f1f0fb; }
+            table.modules tr:last-child td { border-bottom: 0; }
+            .num { text-align: right; font-family: monospace; font-weight: 700; }
+            .strike { text-decoration: line-through; color: #9ca3af; font-weight: 400; }
+            .cut { color: #b91c1c; font-weight: 700; }
+
             /* Payment Synthesis Card */
             .synthesis-card { background: #fdfcff; border: 2px solid #7c3aed; border-radius: 12px; padding: 14px; margin-top: 15px; }
             .synthesis-line { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f1f0fb; font-size: 0.9em; }
@@ -1177,6 +1315,68 @@ export function StudentsPage() {
                 <span class="info-value">${desc}</span>
               </div>
             </div>
+          </div>
+
+          <!-- Portal account (login the family uses on the app) -->
+          <div class="credentials">
+            <h3>🔐 Compte de l'Élève (Espace en ligne)</h3>
+            <div class="cred-grid">
+              <div class="info-item">
+                <span class="info-label">Email / Identifiant :</span>
+                <span class="info-value" style="font-family: monospace;">${stu.email || "-"}</span>
+              </div>
+              <div class="info-item">
+                <span class="info-label">Mot de passe :</span>
+                <span class="info-value" style="font-family: monospace; letter-spacing: 0.5px;">${
+                  portalPassword || "— (non enregistré)"
+                }</span>
+              </div>
+            </div>
+            <div class="cred-note">
+              ⚠️ Document confidentiel — remettre en main propre au parent / à l'élève.
+              ${portalPassword ? "Le mot de passe peut être modifié à tout moment depuis l'espace personnel." : "Le mot de passe n'a pas été enregistré à la création : réinitialisez-le depuis la fiche de l'élève pour le faire apparaître ici."}
+            </div>
+          </div>
+
+          <!-- Modules the student is subscribed to -->
+          <div class="modules-card">
+            <h3>📚 Modules Souscrits (${enrollments.length})</h3>
+            ${
+              enrollments.length === 0
+                ? `<p style="font-size:0.78em; color:#999; font-style:italic; margin:6px 0 0;">Aucun module souscrit pour le moment.</p>`
+                : `<table class="modules">
+              <thead>
+                <tr>
+                  <th>Module</th>
+                  <th>Classe / Niveau</th>
+                  <th>Groupe</th>
+                  <th>Enseignant</th>
+                  <th class="num">Tarif</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${enrollments
+                  .map(
+                    (e) => `
+                <tr>
+                  <td style="font-weight:bold; color:#1e1b4b;">${e.module}</td>
+                  <td>${e.classLabel}</td>
+                  <td>${e.group}</td>
+                  <td>${e.teacher}</td>
+                  <td class="num">
+                    ${
+                      e.discountLabel
+                        ? `<span class="strike">${e.basePrice}</span> ${e.netPrice} DA<br/><span class="cut" style="font-size:0.85em;">${e.discountLabel}</span>`
+                        : `${e.netPrice} DA`
+                    }
+                    <br/><span style="font-weight:400; color:#9ca3af; font-size:0.85em;">/ ${e.unit}</span>
+                  </td>
+                </tr>`,
+                  )
+                  .join("")}
+              </tbody>
+            </table>`
+            }
           </div>
 
           <!-- Payment Synthesis Card -->
@@ -1998,11 +2198,64 @@ export function StudentsPage() {
             </div>
           </div>
 
+          {/* Bulk reduction: one rate for every ticked module, in one go —
+              instead of opening each module and setting it individually. */}
+          <div className="rounded-xl border border-primary/25 bg-primary-50/40 p-3 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-primary flex items-center gap-1.5">
+                <DollarSign className="h-3.5 w-3.5" /> Réduction groupée ({selectedAssignIds.length} module(s) sélectionné(s))
+              </span>
+              {Object.keys(assignDiscounts).length > 0 && (
+                <button onClick={clearAllDiscounts} className="text-[10px] font-bold text-danger hover:underline">
+                  Tout réinitialiser
+                </button>
+              )}
+            </div>
+            <div className="flex flex-wrap items-end gap-2">
+              <div>
+                <label className="block text-[10px] font-semibold text-muted mb-1">Type</label>
+                <Select
+                  value={bulkDiscountType}
+                  onChange={(e) => setBulkDiscountType(e.target.value as DiscountType)}
+                  className="w-40"
+                >
+                  <option value="percent">Pourcentage (%)</option>
+                  <option value="amount">Montant fixe (DA)</option>
+                </Select>
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold text-muted mb-1">
+                  Valeur {bulkDiscountType === "percent" ? "(%)" : "(DA)"}
+                </label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={bulkDiscountType === "percent" ? 100 : undefined}
+                  value={bulkDiscountValue || ""}
+                  onChange={(e) => setBulkDiscountValue(Number(e.target.value))}
+                  placeholder={bulkDiscountType === "percent" ? "Ex: 20" : "Ex: 500"}
+                  className="w-32"
+                />
+              </div>
+              <Button size="sm" onClick={applyBulkDiscount} className="mb-0.5">
+                Appliquer à la sélection
+              </Button>
+            </div>
+            <p className="text-[10px] leading-relaxed text-muted">
+              Cochez plusieurs modules puis appliquez la réduction une seule fois. Chaque module reste
+              modifiable individuellement ci-dessous. Le tarif réduit est celui réellement débité au scan,
+              en présence manuelle et par la facturation d&apos;absence hebdomadaire.
+            </p>
+          </div>
+
           <div className="border border-line rounded-xl max-h-72 overflow-y-auto p-2 bg-canvas/30 space-y-1">
             {getAssignableItems().map((item) => {
               const isChecked = selectedAssignIds.includes(item.id);
               const startDate = assignStartDates[item.id] || todayIso();
               const expiryDate = item.isFormation ? addMonths(startDate, item.periodMonths ?? 0) : "";
+              const discount = assignDiscounts[item.id];
+              const net = netPriceFor(item.price, discount);
+              const hasDiscount = !!discount && discount.value > 0;
               return (
                 <div key={item.id}>
                   <button
@@ -2028,12 +2281,20 @@ export function StudentsPage() {
                             Formation
                           </span>
                         )}
+                        {hasDiscount && (
+                          <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-success/15 text-success">
+                            {discountLabel(discount)}
+                          </span>
+                        )}
                       </strong>
                       <span className="text-muted block text-[10px]">{item.details}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-primary font-bold">
-                        {item.price} DA
+                        {hasDiscount && (
+                          <span className="text-muted font-normal line-through mr-1">{item.price}</span>
+                        )}
+                        {net} DA
                         {item.isFormation && (
                           <span className="text-muted font-semibold"> / {item.periodMonths} mois</span>
                         )}
@@ -2042,26 +2303,66 @@ export function StudentsPage() {
                     </div>
                   </button>
 
-                  {/* Formation: pick the start date, expiry is derived from the period */}
-                  {isChecked && item.isFormation && (
+                  {isChecked && (
                     <div className="mt-1 mb-2 ml-4 mr-1 p-2.5 rounded-xl bg-surface border border-line flex flex-wrap items-end gap-4">
+                      {/* Formation: pick the start date, expiry is derived from the period */}
+                      {item.isFormation && (
+                        <>
+                          <div>
+                            <label className="block text-[10px] font-semibold text-muted mb-1">Date de début *</label>
+                            <Input
+                              type="date"
+                              value={startDate}
+                              onChange={(e) =>
+                                setAssignStartDates({ ...assignStartDates, [item.id]: e.target.value })
+                              }
+                              className="w-40"
+                            />
+                          </div>
+                          <div className="pb-1.5 text-xs">
+                            <span className="block text-[10px] font-semibold text-muted mb-1">
+                              Date d&apos;expiration (calculée)
+                            </span>
+                            <strong className="text-primary">{formatDateFr(expiryDate)}</strong>
+                            <span className="text-muted"> · {item.periodMonths} mois</span>
+                          </div>
+                        </>
+                      )}
+
+                      {/* Per-module reduction */}
                       <div>
-                        <label className="block text-[10px] font-semibold text-muted mb-1">Date de début *</label>
+                        <label className="block text-[10px] font-semibold text-muted mb-1">Réduction</label>
+                        <Select
+                          value={discount?.type ?? "percent"}
+                          onChange={(e) => setItemDiscount(item.id, { type: e.target.value as DiscountType })}
+                          className="w-36"
+                        >
+                          <option value="percent">Pourcentage (%)</option>
+                          <option value="amount">Montant fixe (DA)</option>
+                        </Select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-semibold text-muted mb-1">
+                          Valeur {(discount?.type ?? "percent") === "percent" ? "(%)" : "(DA)"}
+                        </label>
                         <Input
-                          type="date"
-                          value={startDate}
-                          onChange={(e) =>
-                            setAssignStartDates({ ...assignStartDates, [item.id]: e.target.value })
-                          }
-                          className="w-40"
+                          type="number"
+                          min={0}
+                          max={(discount?.type ?? "percent") === "percent" ? 100 : undefined}
+                          value={discount?.value || ""}
+                          onChange={(e) => setItemDiscount(item.id, { value: Number(e.target.value) })}
+                          placeholder="0"
+                          className="w-28"
                         />
                       </div>
                       <div className="pb-1.5 text-xs">
                         <span className="block text-[10px] font-semibold text-muted mb-1">
-                          Date d&apos;expiration (calculée)
+                          Tarif après réduction
                         </span>
-                        <strong className="text-primary">{formatDateFr(expiryDate)}</strong>
-                        <span className="text-muted"> · {item.periodMonths} mois</span>
+                        <strong className={hasDiscount ? "text-success" : "text-ink"}>{net} DA</strong>
+                        {hasDiscount && (
+                          <span className="text-muted"> (au lieu de {item.price} DA)</span>
+                        )}
                       </div>
                     </div>
                   )}
@@ -2069,6 +2370,21 @@ export function StudentsPage() {
               );
             })}
           </div>
+
+          {/* Running total of what the student will be charged per séance */}
+          {selectedAssignIds.length > 0 && (
+            <div className="flex items-center justify-between rounded-xl border border-line bg-canvas/40 p-3 text-xs">
+              <span className="text-muted font-semibold">
+                Total par séance après réductions ({selectedAssignIds.length} module(s))
+              </span>
+              <strong className="text-primary text-sm">
+                {getAssignableItems()
+                  .filter((i) => selectedAssignIds.includes(i.id))
+                  .reduce((sum, i) => sum + netPriceFor(i.price, assignDiscounts[i.id]), 0)}{" "}
+                DA
+              </strong>
+            </div>
+          )}
 
           <div className="flex justify-end gap-2 pt-4">
             <Button variant="outline" onClick={() => setIsAssignOpen(false)}>

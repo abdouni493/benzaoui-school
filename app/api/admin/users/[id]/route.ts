@@ -50,10 +50,11 @@ export async function DELETE(_request: Request, ctx: { params: Promise<{ id: str
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
 
-  // reception_staff no longer cascades from profiles (its FK was dropped so
-  // login-less workers can exist) — remove the row explicitly; this is a
-  // no-op for every other role.
+  // reception_staff and teachers no longer cascade from profiles (their FK was
+  // dropped so login-less workers / enseignants passagers can exist) — remove
+  // the rows explicitly; this is a no-op for every other role.
   await admin.from("reception_staff").delete().eq("id", id);
+  await admin.from("teachers").delete().eq("id", id);
 
   return NextResponse.json({ ok: true });
 }

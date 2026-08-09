@@ -15,6 +15,7 @@ import type {
   Group,
   IndependentSession,
   Module,
+  ModuleAbsenceRule,
   Notification,
   Parent,
   ReceptionStaff,
@@ -23,12 +24,15 @@ import type {
   ScheduleSession,
   SchoolClass,
   Student,
+  StudentCredential,
   Subject,
   Subscription,
   Teacher,
   TeacherAbsence,
   TeacherAcompte,
+  TeacherPayment,
   UnpaidTeacherSession,
+  WorkerShift,
 } from "@/lib/types";
 
 export interface Database {
@@ -39,10 +43,14 @@ export interface Database {
   salles: Salle[];
   classes: SchoolClass[];
   teachers: Teacher[];
+  teacherPayments: TeacherPayment[];
   reception: ReceptionStaff[];
+  workerShifts: WorkerShift[];
   sessions: ScheduleSession[];
   subscriptions: Subscription[];
   students: Student[];
+  studentCredentials: StudentCredential[];
+  moduleAbsenceRules: ModuleAbsenceRule[];
   balanceTx: BalanceTransaction[];
   attendance: AttendanceRecord[];
   absencePenalties: AbsencePenalty[];
@@ -84,10 +92,14 @@ function emptyDatabase(): Database {
     salles: [],
     classes: [],
     teachers: [],
+    teacherPayments: [],
     reception: [],
+    workerShifts: [],
     sessions: [],
     subscriptions: [],
     students: [],
+    studentCredentials: [],
+    moduleAbsenceRules: [],
     balanceTx: [],
     attendance: [],
     absencePenalties: [],
@@ -173,6 +185,20 @@ const teachersMapper = makeMapper<Teacher>([
   ["monthlyAmount", "monthly_amount"],
   ["startDate", "start_date"],
   ["percentage", "percentage"],
+  ["isPassager", "is_passager"],
+]);
+
+const teacherPaymentsMapper = makeMapper<TeacherPayment>([
+  ["id", "id"],
+  ["teacherId", "teacher_id"],
+  ["amount", "amount"],
+  ["method", "method"],
+  ["percentage", "percentage"],
+  ["studentsCount", "students_count"],
+  ["sessionsCount", "sessions_count"],
+  ["description", "description"],
+  ["details", "details"],
+  ["paidAt", "paid_at"],
 ]);
 
 const receptionMapper = makeMapper<ReceptionStaff>([
@@ -185,6 +211,33 @@ const receptionMapper = makeMapper<ReceptionStaff>([
   ["startDate", "start_date"],
   ["salary", "salary"],
   ["role", "role"],
+  ["rfid", "rfid"],
+  ["hourlyRate", "hourly_rate"],
+]);
+
+const workerShiftsMapper = makeMapper<WorkerShift>([
+  ["id", "id"],
+  ["workerId", "worker_id"],
+  ["workDate", "work_date"],
+  ["startAt", "start_at"],
+  ["endAt", "end_at"],
+  ["minutes", "minutes"],
+  ["frozen", "frozen"],
+  ["paid", "paid"],
+  ["paymentId", "payment_id"],
+  ["createdAt", "created_at"],
+]);
+
+const studentCredentialsMapper = makeMapper<StudentCredential>([
+  ["studentId", "student_id"],
+  ["password", "password"],
+  ["updatedAt", "updated_at"],
+]);
+
+const moduleAbsenceRulesMapper = makeMapper<ModuleAbsenceRule>([
+  ["moduleId", "module_id"],
+  ["enabled", "enabled"],
+  ["daysWindow", "days_window"],
 ]);
 
 const parentsBaseMapper = makeMapper<Parent>([
@@ -219,6 +272,14 @@ const sessionsMapper = makeMapper<ScheduleSession>([
   ["days", "days"],
   ["startTime", "start_time"],
   ["endTime", "end_time"],
+  ["isOpen", "is_open"],
+  ["title", "title"],
+  ["periodStart", "period_start"],
+  ["periodEnd", "period_end"],
+  ["classIds", "class_ids"],
+  ["groupIds", "group_ids"],
+  ["salleIds", "salle_ids"],
+  ["openPrice", "open_price"],
 ]);
 
 const subscriptionsMapper = makeMapper<Subscription>([
@@ -303,6 +364,8 @@ const announcementsMapper = makeMapper<Announcement>([
   ["audience", "audience"],
   ["endDate", "end_date"],
   ["date", "date"],
+  ["targetGroupIds", "target_group_ids"],
+  ["includeParents", "include_parents"],
 ]);
 
 const categoriesMapper = makeMapper<ExpenseCategory>([["id", "id"], ["name", "name"]]);
@@ -350,6 +413,11 @@ const independentMapper = makeMapper<IndependentSession>([
   ["itemLabel", "item_label"],
   ["price", "price"],
   ["date", "date"],
+  ["sessionId", "session_id"],
+  ["startTime", "start_time"],
+  ["endTime", "end_time"],
+  ["createdAt", "created_at"],
+  ["teacherPaid", "teacher_paid"],
 ]);
 
 const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
@@ -359,7 +427,11 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
   salles: { table: "salles", select: "*", ...sallesMapper },
   classes: { table: "classes", select: "*", ...classesMapper },
   teachers: { table: "teachers", select: "*", ...teachersMapper },
+  teacherPayments: { table: "teacher_payments", select: "*", ...teacherPaymentsMapper },
   reception: { table: "reception_staff", select: "*", ...receptionMapper },
+  workerShifts: { table: "worker_shifts", select: "*", ...workerShiftsMapper },
+  studentCredentials: { table: "student_credentials", select: "*", ...studentCredentialsMapper },
+  moduleAbsenceRules: { table: "module_absence_rules", select: "*", ...moduleAbsenceRulesMapper },
   sessions: { table: "sessions", select: "*", ...sessionsMapper },
   subscriptions: { table: "subscriptions", select: "*", ...subscriptionsMapper },
   students: {
@@ -376,6 +448,14 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
           .map((r: any) => [ // eslint-disable-line @typescript-eslint/no-explicit-any
             r.subscription_id,
             { startDate: r.start_date ?? undefined, expiryDate: r.expiry_date ?? undefined },
+          ]),
+      ),
+      subscriptionDiscounts: Object.fromEntries(
+        (row.student_subscriptions ?? [])
+          .filter((r: any) => r.discount_type && r.discount_value > 0) // eslint-disable-line @typescript-eslint/no-explicit-any
+          .map((r: any) => [ // eslint-disable-line @typescript-eslint/no-explicit-any
+            r.subscription_id,
+            { type: r.discount_type, value: r.discount_value ?? 0 },
           ]),
       ),
     }),
@@ -461,6 +541,17 @@ export interface TeacherSettlement {
   messageKey?: string;
 }
 
+/** Result of a worker badge swipe (clock-in / clock-out). */
+export interface WorkerScanResult {
+  ok: boolean;
+  workerId?: string;
+  workerName?: string;
+  date?: string;
+  startAt?: string;
+  minutes?: number;
+  messageKey: string;
+}
+
 interface DataActions {
   loaded: boolean;
   fetchSchool: () => Promise<void>;
@@ -479,6 +570,32 @@ interface DataActions {
    *  server-side). Returns how many weekly charges were written. */
   processWeeklyAbsences: () => Promise<{ ok: boolean; charged?: number; students?: number }>;
   settleTeacherPercentage: (teacherId: string) => Promise<TeacherSettlement>;
+
+  /** Worker badge: 1st swipe of the day = clock-in, 2nd = clock-out. */
+  scanWorkerCard: (code: string) => Promise<WorkerScanResult>;
+  /** Freezes days started without a clock-out once the day is over. */
+  freezeOpenWorkerShifts: () => Promise<{ ok: boolean; frozen?: number }>;
+  /** Settles the selected worked days; they never reappear as unpaid. */
+  payWorkerShifts: (
+    workerId: string,
+    shiftIds: string[],
+    amount: number,
+    description?: string,
+  ) => Promise<{ ok: boolean; days?: number; minutes?: number; messageKey?: string }>;
+  /** Settles the selected teacher timings ("YYYY-MM-DD|sessionId" keys). */
+  payTeacherSessions: (args: {
+    teacherId: string;
+    keys: string[];
+    amount: number;
+    method: "fixed" | "percent";
+    percentage?: number;
+    details?: unknown[];
+    description?: string;
+  }) => Promise<{ ok: boolean; paymentId?: string; sessions?: number; messageKey?: string }>;
+  /** Stores/updates the printable portal password (staff-only table). */
+  setStudentPassword: (studentId: string, password: string) => Promise<void>;
+  /** Turns the weekly-absence billing on/off for a single module. */
+  setModuleAbsenceRule: (moduleId: string, enabled: boolean, daysWindow?: number) => Promise<void>;
   addBalance: (
     studentId: string,
     amount: number,
@@ -619,6 +736,97 @@ export const useData = create<DataStore>((set, get) => ({
     return res;
   },
 
+  // ---- Workers: badge + hourly settlement -----------------------------------
+  scanWorkerCard: async (code) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("scan_worker_card", { p_code: code.trim() });
+    if (error || !data) {
+      // Table/RPC missing (migration not applied) or unknown badge.
+      return { ok: false, messageKey: "worker.notFound" };
+    }
+    const res = data as WorkerScanResult;
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  freezeOpenWorkerShifts: async () => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("freeze_open_worker_shifts", {});
+    if (error || !data) return { ok: false };
+    const res = data as { ok: boolean; frozen?: number };
+    if (res.ok && (res.frozen ?? 0) > 0) await get().fetchAll();
+    return res;
+  },
+
+  payWorkerShifts: async (workerId, shiftIds, amount, description) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("pay_worker_shifts", {
+      p_worker_id: workerId,
+      p_shift_ids: shiftIds,
+      p_amount: Math.round(amount),
+      p_description: description ?? "",
+    });
+    if (error || !data) {
+      console.error("pay_worker_shifts failed:", error?.message);
+      return { ok: false, messageKey: "worker.error" };
+    }
+    const res = data as { ok: boolean; days?: number; minutes?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  payTeacherSessions: async ({ teacherId, keys, amount, method, percentage, details, description }) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("pay_teacher_sessions", {
+      p_teacher_id: teacherId,
+      p_keys: keys,
+      p_amount: Math.round(amount),
+      p_method: method,
+      p_percentage: percentage ?? null,
+      p_details: details ?? [],
+      p_description: description ?? "",
+    });
+    if (error || !data) {
+      console.error("pay_teacher_sessions failed:", error?.message);
+      return { ok: false, messageKey: "pay.error" };
+    }
+    const res = data as { ok: boolean; paymentId?: string; sessions?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  setStudentPassword: async (studentId, password) => {
+    const supabase = createClient();
+    const row = { student_id: studentId, password, updated_at: new Date().toISOString() };
+    const { error } = await supabase.from("student_credentials").upsert(row, { onConflict: "student_id" });
+    if (error) {
+      console.error("Failed to store the student password:", error.message);
+      return;
+    }
+    set((state) => ({
+      studentCredentials: [
+        ...state.studentCredentials.filter((c) => c.studentId !== studentId),
+        { studentId, password, updatedAt: row.updated_at },
+      ],
+    }));
+  },
+
+  setModuleAbsenceRule: async (moduleId, enabled, daysWindow = 7) => {
+    const supabase = createClient();
+    const row = { module_id: moduleId, enabled, days_window: daysWindow };
+    const { error } = await supabase.from("module_absence_rules").upsert(row, { onConflict: "module_id" });
+    if (error) {
+      console.error("Failed to save the module absence rule:", error.message);
+      return;
+    }
+    set((state) => ({
+      moduleAbsenceRules: [
+        ...state.moduleAbsenceRules.filter((r) => r.moduleId !== moduleId),
+        { moduleId, enabled, daysWindow },
+      ],
+    }));
+  },
+
   addBalance: async (studentId, amount, description, settleRegistration) => {
     const supabase = createClient();
     const { error } = await supabase.rpc("add_student_balance", {
@@ -667,13 +875,13 @@ export const useData = create<DataStore>((set, get) => ({
     if (key === "students" && updatedFields && "subscriptionIds" in updatedFields) {
       const fields = updatedFields as Partial<Student>;
       const ids = fields.subscriptionIds ?? [];
-      // Keep existing formation dates when the caller only changes the id list
-      // (e.g. unsubscribing from one module).
-      const dates =
-        fields.subscriptionDates ??
-        get().students.find((s) => s.id === id)?.subscriptionDates ??
-        {};
+      const previous = get().students.find((s) => s.id === id);
+      // Keep existing formation dates / reductions when the caller only changes
+      // the id list (e.g. unsubscribing from one module).
+      const dates = fields.subscriptionDates ?? previous?.subscriptionDates ?? {};
+      const discounts = fields.subscriptionDiscounts ?? previous?.subscriptionDiscounts ?? {};
       const hasDates = ids.some((sid) => dates[sid]?.startDate || dates[sid]?.expiryDate);
+      const hasDiscounts = ids.some((sid) => (discounts[sid]?.value ?? 0) > 0);
       supabase
         .from("student_subscriptions")
         .delete()
@@ -683,18 +891,21 @@ export const useData = create<DataStore>((set, get) => ({
             supabase
               .from("student_subscriptions")
               .insert(
-                ids.map((subscription_id) =>
-                  // Only send the date columns when a date is actually set, so
-                  // cours-only enrollments still work before the migration.
-                  hasDates
-                    ? {
-                        student_id: id,
-                        subscription_id,
-                        start_date: dates[subscription_id]?.startDate ?? null,
-                        expiry_date: dates[subscription_id]?.expiryDate ?? null,
-                      }
-                    : { student_id: id, subscription_id },
-                ),
+                ids.map((subscription_id) => {
+                  // Only send the optional columns when they carry a value, so
+                  // cours-only enrollments still work before the migrations.
+                  const row: Record<string, unknown> = { student_id: id, subscription_id };
+                  if (hasDates) {
+                    row.start_date = dates[subscription_id]?.startDate ?? null;
+                    row.expiry_date = dates[subscription_id]?.expiryDate ?? null;
+                  }
+                  if (hasDiscounts) {
+                    const d = discounts[subscription_id];
+                    row.discount_type = d && d.value > 0 ? d.type : null;
+                    row.discount_value = d && d.value > 0 ? d.value : 0;
+                  }
+                  return row;
+                }),
               )
               .then(({ error }) => {
                 if (error) console.error("Failed to sync student_subscriptions:", error.message);

@@ -16,22 +16,63 @@ import { speakMessage, speechCaseForScan } from "@/lib/speech";
  * a manually typed code behaves exactly like a card swipe.
  */
 export function useScanProcessor() {
-  const { scanCard, students, subscriptions, push } = useData();
+  const { scanCard, scanWorkerCard, students, subscriptions, push } = useData();
   const { language, autoSendWhatsapp, autoSendEmail } = useSettings();
   const { addToast } = useToast();
 
   const processScan = useCallback(
     async (code: string): Promise<ScanResult> => {
       const result = await scanCard(code);
+
+      // Same reader for both populations: a badge unknown to the students
+      // table is retried against the workers table (pointage arrivée/départ)
+      // before it is declared unreadable.
+      if (result.messageKey === "scan.notFound") {
+        const worker = await scanWorkerCard(code);
+        if (worker.ok || worker.messageKey === "worker.frozen") {
+          const hours = worker.minutes !== undefined ? (worker.minutes / 60).toFixed(2) : undefined;
+          const workerMessages: Record<string, { title: string; message: string; type: "success" | "info" | "warning" }> = {
+            "worker.clockIn": {
+              title: "Arrivée pointée",
+              message: "Début de journée enregistré. Badgez à nouveau en partant pour clôturer la journée.",
+              type: "success",
+            },
+            "worker.clockOut": {
+              title: "Départ pointé",
+              message: `Journée clôturée — ${hours ?? "0"} h travaillées.`,
+              type: "success",
+            },
+            "worker.alreadyClosed": {
+              title: "Journée déjà clôturée",
+              message: `La journée est déjà pointée (${hours ?? "0"} h). Aucun changement.`,
+              type: "info",
+            },
+            "worker.frozen": {
+              title: "Journée gelée",
+              message:
+                "Une journée précédente a été ouverte sans pointage de sortie : les heures sont gelées. Corrigez l'heure de fin depuis la fiche du travailleur.",
+              type: "warning",
+            },
+          };
+          const info = workerMessages[worker.messageKey];
+          addToast({
+            type: info?.type ?? "info",
+            title: info?.title ?? "Pointage travailleur",
+            message: info?.message ?? "",
+            studentName: worker.workerName,
+          });
+          return { ok: worker.ok, messageKey: worker.messageKey };
+        }
+      }
+
       const student = result.studentId
         ? students.find((s) => s.id === result.studentId)
         : undefined;
 
       // Voice announcement (pre-recorded clips in public/speech/) — played
-      // AFTER the check-in RPC verdict is known: "you can enter" / "soon to
-      // expire" on an accepted scan, "sorry" when the balance can't cover the
-      // séance (or debt / expired subscription). Other rejections and the
-      // 30-min cooldown stay visual-only.
+      // AFTER the check-in RPC verdict is known. Five verdicts only: dette,
+      // solde insuffisant, bienvenue, déjà scanné, carte introuvable. Every
+      // other rejection stays visual-only.
       const speechCase = speechCaseForScan(result);
       if (speechCase) {
         speakMessage(speechCase, student ? studentName(student) : "", language);
@@ -145,7 +186,7 @@ export function useScanProcessor() {
 
       return result;
     },
-    [scanCard, students, subscriptions, language, autoSendWhatsapp, autoSendEmail, addToast, push],
+    [scanCard, scanWorkerCard, students, subscriptions, language, autoSendWhatsapp, autoSendEmail, addToast, push],
   );
 
   return processScan;
