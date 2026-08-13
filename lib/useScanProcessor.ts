@@ -84,7 +84,7 @@ export function useScanProcessor() {
         addToast({
           type: "info",
           title: "Déjà enregistré / تم التسجيل مسبقًا",
-          message: "Passage ignoré : moins de 30 minutes depuis le dernier scan accepté. Aucun débit, aucune présence dupliquée.",
+          message: "Passage ignoré : moins de 30 minutes depuis le dernier scan accepté sur CE créneau. Aucun débit, aucune présence dupliquée. (Un autre cours ou un autre groupe reste scannable immédiatement.)",
           studentName: student ? studentName(student) : undefined,
         });
         return result;
@@ -126,11 +126,20 @@ export function useScanProcessor() {
           }
         }
 
+        // The séance the badge was matched to — including the GROUP, because a
+        // student may follow another group of the same cours (rattrapage).
         const sessionInfo = result.moduleName
-          ? `${result.moduleName}${result.sessionStart ? ` (${result.sessionStart} - ${result.sessionEnd})` : ""}`
+          ? `${result.moduleName}${result.groupName ? ` — ${result.groupName}` : ""}${
+              result.sessionStart ? ` (${result.sessionStart} - ${result.sessionEnd})` : ""
+            }`
           : undefined;
         const isLate = result.messageKey === "scan.successLate";
         const isAlready = result.messageKey === "scan.alreadyPresent";
+        const substitution = result.otherGroup
+          ? ` Rattrapage : présence enregistrée sur le groupe ${result.groupName ?? "suivi"}${
+              result.ownGroupName ? ` (inscrit en ${result.ownGroupName})` : ""
+            }.`
+          : "";
 
         // Show success toast — with the exact séance the scan was matched to
         addToast({
@@ -141,12 +150,14 @@ export function useScanProcessor() {
               ? "Présence enregistrée — SOLDE EN DETTE"
               : isLate
                 ? "Présence en Retard"
-                : "Présence Enregistrée",
+                : result.otherGroup
+                  ? "Présence Enregistrée — Rattrapage"
+                  : "Présence Enregistrée",
           message: isAlready
-            ? `L'élève a déjà pointé pour ${sessionInfo ?? "cette séance"} aujourd'hui.`
+            ? `L'élève a déjà pointé pour ${sessionInfo ?? "cette séance"} aujourd'hui.${substitution}`
             : isDebt
-              ? `${sessionInfo ? `Séance ${sessionInfo}. ` : ""}Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée.`
-              : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.`,
+              ? `${sessionInfo ? `Séance ${sessionInfo}. ` : ""}Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée.${substitution}`
+              : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.${substitution}`,
           studentName: studentName(student),
           cost: result.cost,
           newBalance: result.newBalance,

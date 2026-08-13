@@ -28,7 +28,16 @@ import {
   ArrowDownCircle,
   ArrowUpCircle
 } from "lucide-react";
-import type { Student, Subscription, ScheduleSession } from "@/lib/types";
+import type {
+  AbsencePenalty,
+  AttendanceRecord,
+  Group,
+  Module,
+  Salle,
+  ScheduleSession,
+  Student,
+  Subscription,
+} from "@/lib/types";
 
 interface PageProps {
   slug: string;
@@ -43,8 +52,11 @@ export function StudentPages({ slug }: PageProps) {
     modules,
     classes,
     groups,
+    salles,
     announcements,
     balanceTx,
+    attendance,
+    absencePenalties,
     subjects,
     updateItem,
   } = useData();
@@ -82,6 +94,18 @@ export function StudentPages({ slug }: PageProps) {
       return <StudentScheduleView student={student} activeSubs={activeSubs} getSessionInfo={getSessionInfo} />;
     case "subjects":
       return <StudentSubjectsView student={student} activeSubs={activeSubs} getSessionInfo={getSessionInfo} subjects={subjects} />;
+    case "attendance":
+      return (
+        <StudentAttendanceView
+          student={student}
+          attendance={attendance}
+          absencePenalties={absencePenalties}
+          sessions={sessions}
+          modules={modules}
+          groups={groups}
+          salles={salles}
+        />
+      );
     case "payments":
       return <StudentPaymentsView student={student} balanceTx={balanceTx} />;
     case "announcements":
@@ -648,6 +672,222 @@ function StudentSubjectsView({
           </div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------
+// 3b. ATTENDANCE VIEW — mes présences et mes absences
+// ----------------------------------------------------
+/** Every présence (including the ones badged on another group of the same
+ *  cours) and every week billed as absent, in one timeline. */
+function StudentAttendanceView({
+  student,
+  attendance,
+  absencePenalties,
+  sessions,
+  modules,
+  groups,
+  salles,
+}: {
+  student: Student;
+  attendance: AttendanceRecord[];
+  absencePenalties: AbsencePenalty[];
+  sessions: ScheduleSession[];
+  modules: Module[];
+  groups: Group[];
+  salles: Salle[];
+}) {
+  const [moduleFilter, setModuleFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState<"all" | "present" | "absent">("all");
+
+  const myAtt = attendance.filter((a) => a.studentId === student.id);
+  const myPen = absencePenalties.filter((p) => p.studentId === student.id);
+
+  const moduleName = (id?: string) => modules.find((m) => m.id === id)?.name ?? "Module";
+  const groupName = (id?: string) => groups.find((g) => g.id === id)?.name ?? "";
+  const salleName = (id?: string) => salles.find((s) => s.id === id)?.name ?? "";
+  const fmtDay = (d: string) => d.split("-").reverse().join("/");
+
+  const moduleIds = [
+    ...new Set([
+      ...myAtt.map((a) => sessions.find((s) => s.id === a.sessionId)?.moduleId).filter(Boolean),
+      ...myPen.map((p) => p.moduleId).filter(Boolean),
+    ]),
+  ] as string[];
+
+  const attRows = myAtt
+    .filter((a) => {
+      if (kindFilter === "absent") return false;
+      if (!moduleFilter) return true;
+      return sessions.find((s) => s.id === a.sessionId)?.moduleId === moduleFilter;
+    })
+    .map((a) => ({ kind: "att" as const, id: a.id, when: new Date(a.timestamp), att: a }));
+
+  const penRows = myPen
+    .filter((p) => {
+      if (kindFilter === "present") return false;
+      if (!moduleFilter) return true;
+      return p.moduleId === moduleFilter;
+    })
+    .map((p) => ({ kind: "pen" as const, id: p.id, when: new Date(`${p.periodEnd}T12:00:00`), pen: p }));
+
+  const rows = [...attRows, ...penRows].sort((a, b) => b.when.getTime() - a.when.getTime());
+
+  const presentCount = myAtt.filter((a) => a.status !== "absent").length;
+  const lateCount = myAtt.filter((a) => a.status === "late").length;
+  const absentCount = myPen.length + myAtt.filter((a) => a.status === "absent").length;
+  const absentCost = myPen.reduce((sum, p) => sum + p.amount, 0);
+
+  return (
+    <div className="space-y-6 text-xs">
+      <PageHeader
+        emoji="✅"
+        title="Mes présences et absences"
+        subtitle="Chaque passage de carte, et chaque semaine facturée comme absence"
+      />
+
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Card>
+          <CardBody className="space-y-1 p-4">
+            <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">Présences</span>
+            <strong className="text-lg text-success">{presentCount}</strong>
+          </CardBody>
+        </Card>
+        <Card>
+          <CardBody className="space-y-1 p-4">
+            <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">Dont retards</span>
+            <strong className="text-lg text-warning">{lateCount}</strong>
+          </CardBody>
+        </Card>
+        <Card>
+          <CardBody className="space-y-1 p-4">
+            <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">Absences</span>
+            <strong className="text-lg text-danger">{absentCount}</strong>
+          </CardBody>
+        </Card>
+        <Card>
+          <CardBody className="space-y-1 p-4">
+            <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">Absences facturées</span>
+            <strong className="text-lg text-danger">{absentCost} DA</strong>
+          </CardBody>
+        </Card>
+      </div>
+
+      <Card>
+        <CardBody className="space-y-4 p-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Select value={moduleFilter} onChange={(e) => setModuleFilter(e.target.value)} className="w-52">
+              <option value="">Tous les modules</option>
+              {moduleIds.map((id) => (
+                <option key={id} value={id}>
+                  {moduleName(id)}
+                </option>
+              ))}
+            </Select>
+            <div className="flex gap-1">
+              {([
+                ["all", "Tout"],
+                ["present", "Présences"],
+                ["absent", "Absences"],
+              ] as const).map(([mode, label]) => (
+                <Button
+                  key={mode}
+                  size="sm"
+                  variant={kindFilter === mode ? "primary" : "outline"}
+                  onClick={() => setKindFilter(mode)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+            <span className="ms-auto font-mono text-[10px] text-muted">{rows.length} ligne(s)</span>
+          </div>
+
+          <div className="space-y-2">
+            {rows.length === 0 ? (
+              <p className="italic text-muted">Aucune présence ni absence enregistrée pour ce filtre.</p>
+            ) : (
+              rows.map((row) => {
+                if (row.kind === "att") {
+                  const att = row.att;
+                  const s = sessions.find((se) => se.id === att.sessionId);
+                  const isAbsent = att.status === "absent";
+                  return (
+                    <div
+                      key={att.id}
+                      className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border p-3 ${
+                        isAbsent ? "border-danger/30 bg-danger/5" : "border-line bg-canvas/40"
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <strong className="block text-ink">
+                          {isAbsent ? "Absence" : "Présence"} : {moduleName(s?.moduleId)}
+                          {s && groupName(s.groupId) ? (
+                            <span className="font-semibold text-muted"> — {groupName(s.groupId)}</span>
+                          ) : null}
+                          {att.substituteGroup && (
+                            <Badge tone="primary" className="ms-1.5 px-1.5 py-0 text-[9px]">
+                              Rattrapage
+                            </Badge>
+                          )}
+                        </strong>
+                        <span className="flex items-center gap-1.5 text-[10px] text-muted">
+                          <Clock className="h-3 w-3" />
+                          {att.timestamp.substring(0, 16).replace("T", " ")}
+                          {s ? ` · ${s.startTime}-${s.endTime}` : ""}
+                          {s && salleName(s.salleId) ? ` · Salle ${salleName(s.salleId)}` : ""}
+                        </span>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Badge
+                          tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}
+                        >
+                          {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
+                        </Badge>
+                        <span className="text-[10px] font-bold text-danger">-{att.amountDeducted} DA</span>
+                      </div>
+                    </div>
+                  );
+                }
+                const pen = row.pen;
+                const s = sessions.find((se) => se.id === pen.sessionId);
+                return (
+                  <div
+                    key={pen.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-danger/30 bg-danger/5 p-3"
+                  >
+                    <div className="min-w-0">
+                      <strong className="block text-ink">
+                        Absence facturée : {moduleName(pen.moduleId)}
+                        {s && groupName(s.groupId) ? (
+                          <span className="font-semibold text-muted"> — {groupName(s.groupId)}</span>
+                        ) : null}
+                      </strong>
+                      <span className="text-[10px] text-muted">
+                        Semaine du {fmtDay(pen.periodStart)} au {fmtDay(pen.periodEnd)} · solde après :{" "}
+                        <span className={pen.balanceAfter < 0 ? "font-bold text-danger" : ""}>
+                          {pen.balanceAfter} DA
+                        </span>
+                      </span>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <Badge tone="danger">Absent (semaine)</Badge>
+                      <span className="text-[10px] font-bold text-danger">-{pen.amount} DA</span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <p className="rounded-xl border border-line bg-canvas/40 p-3 text-[10px] leading-relaxed text-muted">
+            ℹ️ Une semaine complète sans aucun passage de carte sur un module auquel vous êtes inscrit est
+            facturée au prix d&apos;une séance de ce module. Badger sur un autre groupe du même cours compte
+            comme une présence normale.
+          </p>
+        </CardBody>
+      </Card>
     </div>
   );
 }

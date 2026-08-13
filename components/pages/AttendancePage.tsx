@@ -133,11 +133,31 @@ export function AttendancePage() {
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
-  // Get all students enrolled in active session
+  // Students on this séance: the ones enrolled in it, PLUS the ones of another
+  // group of the same cours who came to this one (rattrapage) — their badge is
+  // accepted, so the roll-call must show them too.
   const getSessionStudents = (sesId: string) => {
-    const sub = subscriptions.find((su) => su.sessionId === sesId);
-    if (!sub) return [];
-    return students.filter((stu) => stu.subscriptionIds.includes(sub.id));
+    const subIds = subscriptions.filter((su) => su.sessionId === sesId).map((su) => su.id);
+    const enrolled = students.filter((stu) => stu.subscriptionIds.some((id) => subIds.includes(id)));
+    const enrolledIds = new Set(enrolled.map((s) => s.id));
+    const visitorIds = new Set(
+      attendance
+        .filter(
+          (a) =>
+            a.sessionId === sesId &&
+            new Date(a.timestamp).toLocaleDateString("fr-CA") === sheetDate &&
+            !enrolledIds.has(a.studentId),
+        )
+        .map((a) => a.studentId),
+    );
+    return [...enrolled, ...students.filter((s) => visitorIds.has(s.id))];
+  };
+
+  /** True when the student follows this séance from another group of the same
+   *  cours (his own subscription points at a sibling timing). */
+  const isVisitingStudent = (stu: Student, sesId: string) => {
+    const subIds = subscriptions.filter((su) => su.sessionId === sesId).map((su) => su.id);
+    return !stu.subscriptionIds.some((id) => subIds.includes(id));
   };
 
   // Find attendance record for a student in a session on the sheet date
@@ -680,7 +700,10 @@ export function AttendancePage() {
                                   <strong className="text-ink block">
                                     {stu.firstName} {stu.lastName}{" "}
                                     {isFree && <Badge tone="success" className="text-[8px] py-0">Gratuit</Badge>}{" "}
-                                    {inDebt && <Badge tone="danger" className="text-[8px] py-0">DETTE</Badge>}
+                                    {inDebt && <Badge tone="danger" className="text-[8px] py-0">DETTE</Badge>}{" "}
+                                    {isVisitingStudent(stu, activeSession.id) && (
+                                      <Badge tone="primary" className="text-[8px] py-0">Rattrapage — autre groupe</Badge>
+                                    )}
                                   </strong>
                                   <span className="text-[10px] text-muted">
                                     Solde:{" "}

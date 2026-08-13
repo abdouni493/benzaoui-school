@@ -1,11 +1,31 @@
 import type { Database } from "@/lib/store/data";
+import { DAYS } from "@/lib/types";
 import type {
+  Day,
   ScheduleSession,
   SchoolClass,
   Student,
   Subscription,
   SubscriptionDiscount,
 } from "@/lib/types";
+
+/** French weekday labels — shared by every screen that prints a timing. */
+export const DAY_LABELS_FR: Record<Day, string> = {
+  saturday: "Samedi",
+  sunday: "Dimanche",
+  monday: "Lundi",
+  tuesday: "Mardi",
+  wednesday: "Mercredi",
+  thursday: "Jeudi",
+  friday: "Vendredi",
+};
+
+/** "Samedi, Lundi" — always in the school's week order, never the click order. */
+export function formatDays(days: Day[] = []): string {
+  return DAYS.filter((d) => days.includes(d))
+    .map((d) => DAY_LABELS_FR[d])
+    .join(", ");
+}
 
 export const teacherName = (db: Database, id: string) => {
   const t = db.teachers.find((x) => x.id === id);
@@ -30,6 +50,22 @@ export function classLabel(db: Database, cls: SchoolClass): string {
 
 export function classOf(db: Database, id: string): SchoolClass | undefined {
   return db.classes.find((c) => c.id === id);
+}
+
+/** Identity of a "cours": one class + one module + one teacher, taught to
+ *  several groups. Every group of a cours shares ONE tariff, and a student
+ *  enrolled in any of them may attend any other (rattrapage). A séance libre
+ *  timing is a product on its own, so it never merges with anything. */
+export function courseKeyOf(session: ScheduleSession): string {
+  return session.isOpen
+    ? `open-${session.id}`
+    : `${session.classId}|${session.moduleId}|${session.teacherId}`;
+}
+
+/** Every timing of the same cours (i.e. all its groups), week-order sorted. */
+export function siblingSessions(db: Database, session: ScheduleSession): ScheduleSession[] {
+  const key = courseKeyOf(session);
+  return db.sessions.filter((s) => courseKeyOf(s) === key);
 }
 
 /** Full session label. `withGroup=false` drops the group (used by the

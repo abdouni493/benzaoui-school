@@ -65,6 +65,7 @@ export const NAV_BY_ROLE: Record<Role, NavItem[]> = {
   student: [
     { key: "home", emoji: "🏠", href: "/home" },
     { key: "schedule", emoji: "🗓️", href: "/schedule" },
+    { key: "attendance", emoji: "✅", href: "/attendance" },
     { key: "subjects", emoji: "📄", href: "/subjects" },
     { key: "payments", emoji: "💵", href: "/payments" },
     { key: "announcements", emoji: "📣", href: "/announcements" },

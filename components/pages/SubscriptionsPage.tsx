@@ -1,14 +1,28 @@
 "use client";
 
 import { useState } from "react";
-import { useData, uid } from "@/lib/store/data";
+import { useData } from "@/lib/store/data";
+import { courseKeyOf, formatDays } from "@/lib/helpers";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
-import { Input, Select } from "@/components/ui/SearchInput";
+import { Input } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Trash2, Edit, Eye, Plus, MoreVertical, Ticket, Search, Wallet, Check } from "lucide-react";
+import {
+  Trash2,
+  Edit,
+  Eye,
+  Plus,
+  MoreVertical,
+  Ticket,
+  Search,
+  Wallet,
+  Check,
+  Users,
+  Clock,
+  AlertTriangle,
+} from "lucide-react";
 import type { Subscription, ScheduleSession } from "@/lib/types";
 
 export function SubscriptionsPage() {
@@ -22,9 +36,8 @@ export function SubscriptionsPage() {
     groups,
     salles,
     attendance,
-    push,
-    deleteFrom,
-    updateItem,
+    setSubscriptionPrice,
+    deleteSubscriptionPrice,
     updateSchool,
   } = useData();
 
@@ -41,6 +54,7 @@ export function SubscriptionsPage() {
   // formation-only pricing: fixed price for the whole level + duration in months
   const [levelPrice, setLevelPrice] = useState<number>(0);
   const [periodMonths, setPeriodMonths] = useState<number>(0);
+  const [busy, setBusy] = useState(false);
 
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
@@ -55,14 +69,15 @@ export function SubscriptionsPage() {
   };
 
   // Helpers
+  const nameOf = <T extends { id: string; name: string }>(list: T[], id: string) =>
+    list.find((x) => x.id === id)?.name ?? "-";
+
   const getSessionDetails = (sesId: string) => {
     const s = sessions.find((se) => se.id === sesId);
     if (!s) return null;
     const cls = classes.find((c) => c.id === s.classId);
     const mod = modules.find((m) => m.id === s.moduleId);
     const t = teachers.find((te) => te.id === s.teacherId);
-    const nameOf = <T extends { id: string; name: string }>(list: T[], id: string) =>
-      list.find((x) => x.id === id)?.name ?? "-";
     return {
       class: s.isOpen
         ? (s.classIds?.length ? s.classIds : [s.classId]).map((id) => nameOf(classes, id)).join(" · ")
@@ -83,6 +98,7 @@ export function SubscriptionsPage() {
       teacher: t ? `${t.firstName} ${t.lastName}` : "-",
       teacherIsPassager: !!t?.isPassager,
       days: s.days,
+      daysLabel: formatDays(s.days),
       time: `${s.startTime}-${s.endTime}`,
     };
   };
@@ -92,19 +108,41 @@ export function SubscriptionsPage() {
     return s ? classes.find((c) => c.id === s.classId)?.type === "formation" : false;
   };
 
-  const isOpenSession = (sesId: string) => !!sessions.find((se) => se.id === sesId)?.isOpen;
-
   /** Sibling groups of a regular course (same class + module + teacher). A
    *  séance libre is never grouped with anything: its timing IS the product. */
-  const siblingSessionsOf = (s: ScheduleSession) =>
-    s.isOpen
-      ? [s]
-      : sessions.filter(
-          (se) => !se.isOpen && se.classId === s.classId && se.moduleId === s.moduleId && se.teacherId === s.teacherId,
-        );
+  const siblingSessionsOf = (s: ScheduleSession) => {
+    const key = courseKeyOf(s);
+    return sessions
+      .filter((se) => courseKeyOf(se) === key)
+      .sort((a, b) => nameOf(groups, a.groupId).localeCompare(nameOf(groups, b.groupId)));
+  };
 
-  // Group subscriptions by class/module/teacher (ignoring group) to display
-  // uniquely. Séance libre timings are always listed individually.
+  /** The tariff is defined per COURSE, so a card stands for every group of it. */
+  const groupsOfSubscription = (sub: Subscription) => {
+    const s = sessions.find((se) => se.id === sub.sessionId);
+    if (!s) return [];
+    return siblingSessionsOf(s);
+  };
+
+  /** A group with no tariff, or a group priced differently: both mean the
+   *  course is out of sync and one click repairs it. */
+  const inconsistenciesOf = (sub: Subscription) => {
+    const siblings = groupsOfSubscription(sub);
+    const missing = siblings.filter((se) => !subscriptions.some((su) => su.sessionId === se.id));
+    const divergent = siblings.filter((se) => {
+      const other = subscriptions.find((su) => su.sessionId === se.id);
+      return (
+        other &&
+        (other.pricePerSession !== sub.pricePerSession ||
+          (other.levelPrice ?? 0) !== (sub.levelPrice ?? 0) ||
+          (other.periodMonths ?? 0) !== (sub.periodMonths ?? 0))
+      );
+    });
+    return { missing, divergent, count: missing.length + divergent.length };
+  };
+
+  // Group subscriptions by course (ignoring group) to display uniquely.
+  // Séance libre timings are always listed individually.
   const getUniqueSubscriptions = () => {
     const seen = new Set<string>();
     const unique: Subscription[] = [];
@@ -112,7 +150,7 @@ export function SubscriptionsPage() {
     subscriptions.forEach((sub) => {
       const s = sessions.find((se) => se.id === sub.sessionId);
       if (!s) return;
-      const key = s.isOpen ? `open-${s.id}` : `${s.classId}-${s.moduleId}-${s.teacherId}`;
+      const key = courseKeyOf(s);
       if (!seen.has(key)) {
         seen.add(key);
         unique.push(sub);
@@ -122,37 +160,33 @@ export function SubscriptionsPage() {
     return unique;
   };
 
-  // Calculate gains for a subscription (including sibling groups)
+  // Gains of a subscription = every attendance of every group of the course.
   const calculateSubscriptionGains = (sub: Subscription) => {
     const s = sessions.find((se) => se.id === sub.sessionId);
     if (!s) return 0;
-
     const siblingSessionIds = new Set(siblingSessionsOf(s).map((se) => se.id));
-
-    // Sum attendance records for these session ids
     return attendance
       .filter((att) => siblingSessionIds.has(att.sessionId))
       .reduce((sum, att) => sum + att.amountDeducted, 0);
   };
 
-  // Search schedule sessions (deduplicated by class, module, teacher). Séance
-  // libre timings already carry their own subscription, so they are not
-  // offered here — they would create a duplicate tariff.
-  const getFilteredSessionsForSearch = () => {
+  // Search courses (one entry per class+module+teacher, all groups merged).
+  // Séance libre timings already carry their own tariff, so they are not
+  // offered here — they would create a duplicate.
+  const getFilteredCoursesForSearch = () => {
     const seen = new Set<string>();
     const list: ScheduleSession[] = [];
 
-    // Filter sessions matching search query
     sessions.forEach((s) => {
       if (s.isOpen) return;
       const cls = classes.find((c) => c.id === s.classId);
       const mod = modules.find((m) => m.id === s.moduleId);
       const t = teachers.find((te) => te.id === s.teacherId);
 
-      const label = `${mod?.name} ${cls?.name} ${cls?.type === "cours" ? cls.coursLevel : cls?.formationLevel} ${t?.firstName} ${t?.lastName}`.toLowerCase();
+      const label = `${mod?.name} ${cls?.name} ${cls?.type === "cours" ? cls.coursLevel : cls?.formationLevel} ${t?.firstName} ${t?.lastName} ${nameOf(groups, s.groupId)}`.toLowerCase();
       if (searchQuery && !label.includes(searchQuery.toLowerCase())) return;
 
-      const key = `${s.classId}-${s.moduleId}-${s.teacherId}`;
+      const key = courseKeyOf(s);
       if (!seen.has(key)) {
         seen.add(key);
         list.push(s);
@@ -162,97 +196,71 @@ export function SubscriptionsPage() {
     return list;
   };
 
-  const handleCreateSubscription = () => {
+  /** One tariff written on EVERY group of the course, server-side. */
+  const applyPrice = async (sessionId: string) => {
+    const isFormation = isFormationSession(sessionId);
+    if (isFormation && (levelPrice <= 0 || periodMonths <= 0)) {
+      alert("Veuillez saisir le prix du niveau et la période (en mois) de la formation.");
+      return false;
+    }
+    if (!isFormation && pricePerSession <= 0) {
+      alert("Veuillez saisir un prix par séance valide.");
+      return false;
+    }
+
+    setBusy(true);
+    const res = await setSubscriptionPrice(
+      sessionId,
+      isFormation ? 0 : pricePerSession,
+      isFormation ? levelPrice : undefined,
+      isFormation ? periodMonths : undefined,
+    );
+    setBusy(false);
+
+    if (!res.ok) {
+      alert("Enregistrement du tarif impossible. Vérifiez votre connexion et réessayez.");
+      return false;
+    }
+    return true;
+  };
+
+  const handleCreateSubscription = async () => {
     if (!selectedSessionId) {
       alert("Veuillez sélectionner un emploi.");
       return;
     }
-    const isFormation = isFormationSession(selectedSessionId);
-    if (isFormation && (levelPrice <= 0 || periodMonths <= 0)) {
-      alert("Veuillez saisir le prix du niveau et la période (en mois) de la formation.");
-      return;
+    if (await applyPrice(selectedSessionId)) {
+      setIsCreateOpen(false);
+      resetForm();
     }
-    if (!isFormation && pricePerSession <= 0) {
-      alert("Veuillez saisir un prix par séance valide.");
-      return;
-    }
-
-    const s = sessions.find((se) => se.id === selectedSessionId);
-    if (!s) return;
-
-    // Find all schedule sessions sharing the same class, module, and teacher (all groups)
-    const matchingSessions = siblingSessionsOf(s);
-
-    // Create subscriptions for each of them if not already existing
-    matchingSessions.forEach((matchSes) => {
-      const exists = subscriptions.some((su) => su.sessionId === matchSes.id);
-      if (!exists) {
-        const newSub: Subscription = {
-          id: uid("sub"),
-          sessionId: matchSes.id,
-          // formations are paid per level, not per scan
-          pricePerSession: isFormation ? 0 : pricePerSession,
-        };
-        if (isFormation) {
-          newSub.levelPrice = levelPrice;
-          newSub.periodMonths = periodMonths;
-        }
-        push("subscriptions", newSub);
-      }
-    });
-
-    setIsCreateOpen(false);
-    resetForm();
   };
 
-  const handleEditSubscription = () => {
+  const handleEditSubscription = async () => {
     if (!selectedSub) return;
-    const isFormation = isFormationSession(selectedSub.sessionId);
-    if (isFormation && (levelPrice <= 0 || periodMonths <= 0)) {
-      alert("Veuillez saisir le prix du niveau et la période (en mois) de la formation.");
-      return;
+    if (await applyPrice(selectedSub.sessionId)) {
+      setIsEditOpen(false);
+      resetForm();
     }
-    if (!isFormation && pricePerSession <= 0) return;
-    const s = sessions.find((se) => se.id === selectedSub.sessionId);
-    if (!s) return;
-
-    // Find all matching sessions (sibling groups) and update their subscription price
-    const matchingSessions = siblingSessionsOf(s);
-
-    matchingSessions.forEach((matchSes) => {
-      const matchSub = subscriptions.find((su) => su.sessionId === matchSes.id);
-      if (matchSub) {
-        updateItem(
-          "subscriptions",
-          matchSub.id,
-          isFormation
-            ? { pricePerSession: 0, levelPrice, periodMonths }
-            : { pricePerSession }
-        );
-      }
-    });
-
-    // Keep the timing's own price in sync so the Planner shows the same tariff.
-    if (s.isOpen && !isFormation) updateItem("sessions", s.id, { openPrice: pricePerSession });
-
-    setIsEditOpen(false);
-    resetForm();
   };
 
-  const handleDelete = (sub: Subscription) => {
-    if (confirm("Êtes-vous sûr de vouloir supprimer cet abonnement (et ses déclinaisons par groupe) ?")) {
-      const s = sessions.find((se) => se.id === sub.sessionId);
-      if (!s) return;
+  /** Repairs a course whose groups drifted apart (a group added after the
+   *  tariff was set, or an old row created one by one). */
+  const handleHarmonize = async (sub: Subscription) => {
+    setBusy(true);
+    await setSubscriptionPrice(
+      sub.sessionId,
+      sub.pricePerSession,
+      sub.levelPrice,
+      sub.periodMonths,
+    );
+    setBusy(false);
+  };
 
-      const matchingSessions = siblingSessionsOf(s);
-
-      matchingSessions.forEach((matchSes) => {
-        const matchSub = subscriptions.find((su) => su.sessionId === matchSes.id);
-        if (matchSub) {
-          deleteFrom("subscriptions", matchSub.id);
-        }
-      });
-
+  const handleDelete = async (sub: Subscription) => {
+    if (confirm("Supprimer ce tarif pour TOUS les groupes de ce cours ?")) {
+      setBusy(true);
+      await deleteSubscriptionPrice(sub.sessionId);
+      setBusy(false);
       setActiveMenuId(null);
     }
   };
@@ -282,10 +290,47 @@ export function SubscriptionsPage() {
     setActiveMenuId(null);
   };
 
+  /** The groups a price is about to be applied to — shown before saving so the
+   *  user sees exactly what the single tariff covers. */
+  const renderGroupsPreview = (sessionId: string) => {
+    const s = sessions.find((se) => se.id === sessionId);
+    if (!s) return null;
+    const siblings = siblingSessionsOf(s);
+    return (
+      <div className="rounded-xl border border-primary/25 bg-primary-50/40 p-3">
+        <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-primary">
+          <Users className="h-3.5 w-3.5" />
+          Ce tarif s&apos;applique à {siblings.length} groupe{siblings.length > 1 ? "s" : ""} de ce cours
+        </span>
+        <div className="mt-2 space-y-1">
+          {siblings.map((sib) => {
+            const priced = subscriptions.find((su) => su.sessionId === sib.id);
+            return (
+              <div
+                key={sib.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line/60 bg-surface px-2.5 py-1.5 text-[11px]"
+              >
+                <strong className="text-ink">{nameOf(groups, sib.groupId)}</strong>
+                <span className="flex items-center gap-1 text-muted">
+                  <Clock className="h-3 w-3" />
+                  {formatDays(sib.days) || "—"} · {sib.startTime}-{sib.endTime} · Salle{" "}
+                  {nameOf(salles, sib.salleId)}
+                </span>
+                <Badge tone={priced ? "success" : "warning"} className="text-[9px] px-1.5 py-0">
+                  {priced ? `Actuel: ${priced.pricePerSession} DA` : "Sans tarif"}
+                </Badge>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <PageHeader emoji="🎫" title="Abonnements" subtitle="Gérer les tarifs d'abonnements" />
+        <PageHeader emoji="🎫" title="Abonnements" subtitle="Un tarif par cours, appliqué à tous ses groupes" />
         <Button onClick={() => { resetForm(); setIsCreateOpen(true); }} className="flex items-center gap-2">
           <Plus className="h-4 w-4" /> Nouvel Abonnement
         </Button>
@@ -299,7 +344,7 @@ export function SubscriptionsPage() {
               <Wallet className="h-5 w-5" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-ink">Frais d'inscription uniques</h3>
+              <h3 className="text-sm font-bold text-ink">Frais d&apos;inscription uniques</h3>
               <p className="mt-0.5 text-xs text-muted">
                 Frais payés une seule fois par étudiant lors de sa première inscription. Modifiable à tout moment.
               </p>
@@ -329,12 +374,14 @@ export function SubscriptionsPage() {
         </CardBody>
       </Card>
 
-      {/* Unique subscriptions grid (deduplicated by groups) */}
+      {/* One card per course — every group of it shares the same tariff */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {getUniqueSubscriptions().map((sub) => {
           const details = getSessionDetails(sub.sessionId);
           if (!details) return null;
           const totalGains = calculateSubscriptionGains(sub);
+          const courseGroups = groupsOfSubscription(sub);
+          const issues = inconsistenciesOf(sub);
 
           return (
             <Card key={sub.id} className="relative overflow-visible">
@@ -416,7 +463,7 @@ export function SubscriptionsPage() {
                         )}
                       </strong>
                     </div>
-                    {details.isOpen && (
+                    {details.isOpen ? (
                       <>
                         <div className="flex justify-between text-muted">
                           <span>Groupes:</span>
@@ -427,6 +474,13 @@ export function SubscriptionsPage() {
                           <strong className="text-ink truncate max-w-[60%] text-right">{details.sallesLabel}</strong>
                         </div>
                       </>
+                    ) : (
+                      <div className="flex justify-between text-muted">
+                        <span>Groupes couverts:</span>
+                        <strong className="text-ink truncate max-w-[60%] text-right">
+                          {courseGroups.map((se) => nameOf(groups, se.groupId)).join(" · ")}
+                        </strong>
+                      </div>
                     )}
                     {details.isFormation ? (
                       <>
@@ -446,6 +500,26 @@ export function SubscriptionsPage() {
                       </div>
                     )}
                   </div>
+
+                  {issues.count > 0 && (
+                    <div className="mt-3 flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 p-2.5 text-[11px]">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+                      <div className="min-w-0 flex-1">
+                        <strong className="block text-ink">
+                          {issues.missing.length > 0 && `${issues.missing.length} groupe(s) sans tarif`}
+                          {issues.missing.length > 0 && issues.divergent.length > 0 && " · "}
+                          {issues.divergent.length > 0 && `${issues.divergent.length} groupe(s) à un prix différent`}
+                        </strong>
+                        <button
+                          onClick={() => handleHarmonize(sub)}
+                          disabled={busy}
+                          className="mt-1 font-bold text-primary hover:underline disabled:opacity-50"
+                        >
+                          Appliquer ce tarif à tous les groupes
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="border-t border-line pt-3 mt-3 flex items-center justify-between text-xs">
@@ -470,31 +544,42 @@ export function SubscriptionsPage() {
               <Input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Filtrer par module, niveau ou enseignant..."
+                placeholder="Filtrer par module, classe, niveau, enseignant ou groupe..."
                 className="pl-9"
               />
             </div>
           </div>
 
-          <div className="border border-line rounded-xl max-h-48 overflow-y-auto bg-canvas/30 p-2">
+          <div className="border border-line rounded-xl max-h-56 overflow-y-auto bg-canvas/30 p-2">
             <label className="block text-[10px] font-bold text-muted uppercase mb-2 px-2">Résultats de recherche</label>
-            {getFilteredSessionsForSearch().length === 0 ? (
+            {getFilteredCoursesForSearch().length === 0 ? (
               <p className="text-xs text-muted italic px-2">Aucun emploi disponible.</p>
             ) : (
               <div className="space-y-1">
-                {getFilteredSessionsForSearch().map((s) => {
+                {getFilteredCoursesForSearch().map((s) => {
                   const details = getSessionDetails(s.id);
                   if (!details) return null;
                   const isSelected = selectedSessionId === s.id;
+                  const siblings = siblingSessionsOf(s);
+                  const priced = subscriptions.find((su) =>
+                    siblings.some((sib) => sib.id === su.sessionId),
+                  );
                   return (
                     <button
                       key={s.id}
-                      onClick={() => setSelectedSessionId(s.id)}
-                      className={`w-full text-start p-2 rounded-lg text-xs transition-colors flex justify-between items-center ${
+                      onClick={() => {
+                        setSelectedSessionId(s.id);
+                        if (priced) {
+                          setPricePerSession(priced.pricePerSession);
+                          setLevelPrice(priced.levelPrice ?? 0);
+                          setPeriodMonths(priced.periodMonths ?? 0);
+                        }
+                      }}
+                      className={`w-full text-start p-2 rounded-lg text-xs transition-colors flex justify-between items-center gap-2 ${
                         isSelected ? "bg-primary text-white" : "hover:bg-primary-50 text-ink"
                       }`}
                     >
-                      <div>
+                      <div className="min-w-0">
                         <strong className="block font-bold">
                           {details.module}
                           {details.isFormation && (
@@ -506,14 +591,31 @@ export function SubscriptionsPage() {
                         <span className={isSelected ? "text-white/80" : "text-muted"}>
                           Classe: {details.class} | Ens: {details.teacher}
                         </span>
+                        <span className={`block text-[10px] ${isSelected ? "text-white/70" : "text-muted"}`}>
+                          {siblings.length} groupe{siblings.length > 1 ? "s" : ""}:{" "}
+                          {siblings.map((sib) => nameOf(groups, sib.groupId)).join(" · ")}
+                        </span>
                       </div>
-                      {isSelected && <span className="text-xs font-bold bg-white/20 px-2 py-0.5 rounded">Sélectionné</span>}
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {priced && (
+                          <span
+                            className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                              isSelected ? "bg-white/20" : "bg-success/15 text-success"
+                            }`}
+                          >
+                            {priced.pricePerSession} DA
+                          </span>
+                        )}
+                        {isSelected && <span className="text-xs font-bold bg-white/20 px-2 py-0.5 rounded">Sélectionné</span>}
+                      </div>
                     </button>
                   );
                 })}
               </div>
             )}
           </div>
+
+          {selectedSessionId && renderGroupsPreview(selectedSessionId)}
 
           {selectedSessionId && isFormationSession(selectedSessionId) ? (
             <>
@@ -541,8 +643,8 @@ export function SubscriptionsPage() {
               </div>
               <div className="bg-primary-50/50 border border-line rounded-xl p-3 text-xs text-muted">
                 🎓 <strong className="text-ink">Formation :</strong> prix fixe pour tout le niveau, valable pendant la
-                période indiquée. Lors de l'inscription d'un étudiant, vous choisirez sa date de début et la date
-                d'expiration sera calculée automatiquement.
+                période indiquée. Lors de l&apos;inscription d&apos;un étudiant, vous choisirez sa date de début et la date
+                d&apos;expiration sera calculée automatiquement.
               </div>
             </>
           ) : (
@@ -558,26 +660,29 @@ export function SubscriptionsPage() {
           )}
 
           <div className="bg-primary-50/50 border border-line rounded-xl p-3 text-xs text-muted">
-            💡 <strong className="text-ink">Règle automatique :</strong> Si le cours sélectionné comporte plusieurs groupes,
-            l'abonnement sera automatiquement répliqué pour tous les autres groupes avec le même prix.
+            💡 <strong className="text-ink">Un seul tarif par cours :</strong> le prix saisi ici est écrit sur
+            <strong className="text-ink"> tous les groupes </strong> du même cours (même classe, même module, même
+            enseignant) — inutile de les tarifer un par un. Un groupe créé plus tard hérite automatiquement de ce tarif.
           </div>
 
           <div className="bg-canvas/40 border border-line rounded-xl p-3 text-xs text-muted">
-            🎫 Les <strong className="text-ink">frais d'inscription uniques</strong> sont définis globalement en haut de cette page
-            et s'appliquent une seule fois par étudiant.
+            🎫 Les <strong className="text-ink">frais d&apos;inscription uniques</strong> sont définis globalement en haut de cette page
+            et s&apos;appliquent une seule fois par étudiant.
           </div>
 
           <div className="flex justify-end gap-2 pt-4">
-            <Button variant="outline" onClick={() => setIsCreateOpen(false)}>
+            <Button variant="outline" onClick={() => setIsCreateOpen(false)} disabled={busy}>
               Annuler
             </Button>
-            <Button onClick={handleCreateSubscription}>Créer</Button>
+            <Button onClick={handleCreateSubscription} disabled={busy}>
+              {busy ? "Enregistrement…" : "Créer"}
+            </Button>
           </div>
         </div>
       </Modal>
 
       {/* Edit Modal */}
-      <Modal open={isEditOpen} onClose={() => setIsEditOpen(false)} title="Modifier le tarif d'abonnement">
+      <Modal open={isEditOpen} onClose={() => setIsEditOpen(false)} title="Modifier le tarif d'abonnement" wide>
         <div className="space-y-4">
           {selectedSub && (
             <div className="bg-canvas p-3 rounded-xl border border-line text-xs">
@@ -595,6 +700,8 @@ export function SubscriptionsPage() {
               </span>
             </div>
           )}
+
+          {selectedSub && renderGroupsPreview(selectedSub.sessionId)}
 
           {selectedSub && isFormationSession(selectedSub.sessionId) ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -630,10 +737,12 @@ export function SubscriptionsPage() {
           )}
 
           <div className="flex justify-end gap-2 pt-4">
-            <Button variant="outline" onClick={() => setIsEditOpen(false)}>
+            <Button variant="outline" onClick={() => setIsEditOpen(false)} disabled={busy}>
               Annuler
             </Button>
-            <Button onClick={handleEditSubscription}>Enregistrer</Button>
+            <Button onClick={handleEditSubscription} disabled={busy}>
+              {busy ? "Enregistrement…" : "Enregistrer pour tous les groupes"}
+            </Button>
           </div>
         </div>
       </Modal>
@@ -690,25 +799,25 @@ export function SubscriptionsPage() {
               </div>
 
               <div>
-                <h4 className="font-bold text-ink mb-2">👥 Groupes concernés</h4>
-                <div className="bg-surface border border-line p-4 rounded-xl space-y-2 max-h-48 overflow-y-auto">
-                  {(() => {
-                    const s = sessions.find((se) => se.id === selectedSub.sessionId);
-                    if (!s) return null;
-                    const siblings = sessions.filter(
-                      (se) => se.classId === s.classId && se.moduleId === s.moduleId && se.teacherId === s.teacherId
-                    );
-                    return siblings.map((sib) => {
-                      const grName = groups.find((g) => g.id === sib.groupId)?.name ?? "-";
-                      const salName = salles.find((sl) => sl.id === sib.salleId)?.name ?? "-";
-                      return (
-                        <div key={sib.id} className="flex justify-between text-xs bg-canvas/30 p-2 rounded border border-line/50">
-                          <strong className="text-ink font-semibold">{grName}</strong>
-                          <span className="text-muted">Salle: {salName}</span>
+                <h4 className="font-bold text-ink mb-2">👥 Groupes concernés (même tarif)</h4>
+                <div className="bg-surface border border-line p-4 rounded-xl space-y-2 max-h-56 overflow-y-auto">
+                  {groupsOfSubscription(selectedSub).map((sib) => {
+                    const priced = subscriptions.find((su) => su.sessionId === sib.id);
+                    return (
+                      <div key={sib.id} className="rounded border border-line/50 bg-canvas/30 p-2 text-xs">
+                        <div className="flex items-center justify-between">
+                          <strong className="text-ink font-semibold">{nameOf(groups, sib.groupId)}</strong>
+                          <Badge tone={priced ? "success" : "warning"} className="text-[9px] px-1.5 py-0">
+                            {priced ? `${priced.pricePerSession} DA` : "Sans tarif"}
+                          </Badge>
                         </div>
-                      );
-                    });
-                  })()}
+                        <span className="mt-0.5 block text-[10px] text-muted">
+                          {formatDays(sib.days) || "—"} · {sib.startTime}-{sib.endTime} · Salle{" "}
+                          {nameOf(salles, sib.salleId)}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>

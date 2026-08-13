@@ -27,8 +27,16 @@ import {
   Bell,
   Send,
   AlertTriangle,
+  MessageCircle,
+  Clock,
+  MapPin,
+  Users,
+  Repeat,
 } from "lucide-react";
 import type {
+  AbsencePenalty,
+  AttendanceRecord,
+  AttendanceStatus,
   Student,
   Subscription,
   SubscriptionDates,
@@ -40,9 +48,11 @@ import type {
 } from "@/lib/types";
 import {
   addMonths,
+  courseKeyOf,
   daysUntil,
   discountLabel,
   formatDateFr,
+  formatDays,
   netPriceFor,
   todayIso,
   EXPIRY_WARNING_DAYS,
@@ -52,6 +62,14 @@ import { printHtmlDocument } from "@/lib/print";
 import { buildStudentPaymentsReport } from "@/lib/reports/studentPayments";
 import { speakMessage, speechCaseForScan } from "@/lib/speech";
 import { useToast } from "@/lib/store/toast";
+import {
+  WhatsAppMessageModal,
+  type WhatsAppRecipient,
+  type WhatsAppStudentContext,
+} from "@/components/whatsapp/WhatsAppMessageModal";
+import { isSendablePhone } from "@/lib/whatsapp/phone";
+import { getTemplate, suggestTemplate } from "@/lib/whatsapp/templates";
+import type { SendResponse } from "@/lib/whatsapp/types";
 
 /** Libellés des types de ligne du solde (onglet « Transactions »). */
 const TX_TYPE_LABELS: Record<BalanceTxType, string> = {
@@ -87,6 +105,9 @@ export function StudentsPage() {
     updateBalanceTx,
     deleteBalanceTx,
     scanCard,
+    cancelAttendance,
+    updateAttendance,
+    deleteAbsencePenalty,
     setStudentPassword,
   } = useData();
 
@@ -108,6 +129,14 @@ export function StudentsPage() {
   const [isAlertLowBalanceOpen, setIsAlertLowBalanceOpen] = useState(false);
   const [selectedAlertStudentIds, setSelectedAlertStudentIds] = useState<string[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
+
+  // WhatsApp — fenêtre d'envoi partagée par les boutons « élève » et « parent »
+  const [waTarget, setWaTarget] = useState<{
+    recipients: WhatsAppRecipient[];
+    students: WhatsAppStudentContext[];
+    defaultRecipientIds: string[];
+  } | null>(null);
+  const [sendingAlerts, setSendingAlerts] = useState(false);
 
   // Form: Create/Edit Student
   const [firstName, setFirstName] = useState("");
@@ -177,6 +206,16 @@ export function StudentsPage() {
   const [attMonth, setAttMonth] = useState("");
   const [attStart, setAttStart] = useState("");
   const [attEnd, setAttEnd] = useState("");
+  const [attKindFilter, setAttKindFilter] = useState<"all" | "present" | "absent">("all");
+
+  // Correcting one presence / removing one billed absence
+  const [editingAtt, setEditingAtt] = useState<AttendanceRecord | null>(null);
+  const [deletingAtt, setDeletingAtt] = useState<AttendanceRecord | null>(null);
+  const [deletingPen, setDeletingPen] = useState<AbsencePenalty | null>(null);
+  const [attEditStatus, setAttEditStatus] = useState<AttendanceStatus>("present");
+  const [attEditDate, setAttEditDate] = useState("");
+  const [attEditAmount, setAttEditAmount] = useState<number>(0);
+  const [attBusy, setAttBusy] = useState(false);
 
   // Correcting one line of the transaction history (edit / delete)
   const [editingTx, setEditingTx] = useState<BalanceTransaction | null>(null);
@@ -531,6 +570,86 @@ export function StudentsPage() {
     closeTxModals();
   };
 
+  // ---- Correcting the presence history ---------------------------------------
+  // A presence carries money (it debited the séance), so editing/removing one
+  // has to move the balance back by the same amount — both live in a server-side
+  // RPC (update_attendance / cancel_attendance) for that reason.
+  const openEditAtt = (att: AttendanceRecord) => {
+    setEditingAtt(att);
+    setAttEditStatus(att.status);
+    setAttEditDate(att.timestamp.substring(0, 16));
+    setAttEditAmount(att.amountDeducted);
+  };
+
+  const closeAttModals = () => {
+    setEditingAtt(null);
+    setDeletingAtt(null);
+    setDeletingPen(null);
+    setAttBusy(false);
+  };
+
+  const handleUpdateAtt = async () => {
+    if (!editingAtt || !attEditDate) return;
+    setAttBusy(true);
+    const res = await updateAttendance(editingAtt.id, {
+      status: attEditStatus,
+      occurredAt: txInputToIso(attEditDate),
+      amount: Math.max(0, Math.round(attEditAmount || 0)),
+    });
+    setAttBusy(false);
+    if (!res.ok) {
+      addToast({
+        type: "danger",
+        title: "Modification impossible",
+        message:
+          res.messageKey === "attendance.duplicateDay"
+            ? "Une présence existe déjà pour cet élève sur ce créneau à cette date."
+            : "La présence n'a pas pu être modifiée.",
+      });
+      return;
+    }
+    addToast({
+      type: "success",
+      title: "Présence modifiée",
+      message: `Montant: ${res.cost ?? 0} DA — nouveau solde: ${res.newBalance ?? 0} DA.`,
+    });
+    closeAttModals();
+  };
+
+  const handleDeleteAtt = async () => {
+    if (!deletingAtt) return;
+    setAttBusy(true);
+    const res = await cancelAttendance(deletingAtt.id);
+    setAttBusy(false);
+    if (!res.ok) {
+      addToast({ type: "danger", title: "Suppression impossible", message: "La présence n'a pas pu être supprimée." });
+      return;
+    }
+    addToast({
+      type: "success",
+      title: "Présence supprimée",
+      message: `${res.refunded ? `${res.refunded} DA remboursés — ` : ""}nouveau solde: ${res.newBalance ?? 0} DA.`,
+    });
+    closeAttModals();
+  };
+
+  const handleDeletePenalty = async () => {
+    if (!deletingPen) return;
+    setAttBusy(true);
+    const res = await deleteAbsencePenalty(deletingPen.id);
+    setAttBusy(false);
+    if (!res.ok) {
+      addToast({ type: "danger", title: "Suppression impossible", message: "L'absence n'a pas pu être supprimée." });
+      return;
+    }
+    addToast({
+      type: "success",
+      title: "Absence supprimée",
+      message: `${res.refunded ?? 0} DA remboursés — nouveau solde: ${res.newBalance ?? 0} DA.`,
+    });
+    closeAttModals();
+  };
+
   const handleScanCard = async () => {
     if (!scanRfidInput) return;
     const res = await scanCard(scanRfidInput);
@@ -544,20 +663,24 @@ export function StudentsPage() {
 
     if (res.ok && matchedStu) {
       const seance = res.moduleName
-        ? ` — ${res.moduleName}${res.sessionStart ? ` (${res.sessionStart} - ${res.sessionEnd})` : ""}`
+        ? ` — ${res.moduleName}${res.groupName ? ` (${res.groupName})` : ""}${res.sessionStart ? ` (${res.sessionStart} - ${res.sessionEnd})` : ""}`
+        : "";
+      // Attended another group of the same cours: allowed, billed normally.
+      const substitution = res.otherGroup
+        ? ` Rattrapage sur le groupe ${res.groupName ?? "suivi"}${res.ownGroupName ? ` (inscrit en ${res.ownGroupName})` : ""}.`
         : "";
       setScanResult({
         ok: true,
         studentName: `${matchedStu.firstName} ${matchedStu.lastName}`,
         cost: res.cost,
         newBalance: res.newBalance,
-        msg: res.messageKey === "scan.alreadyPresent"
+        msg: (res.messageKey === "scan.alreadyPresent"
           ? "Élève déjà marqué présent pour cette séance aujourd'hui (aucun débit)."
           : res.messageKey === "scan.successDebt"
           ? `Présence enregistrée${seance} — ATTENTION: le solde est passé en DETTE.`
           : res.messageKey === "scan.successLate"
           ? `Présence enregistrée (en retard)${seance}.`
-          : `Présence validée et solde débité${seance} !`,
+          : `Présence validée et solde débité${seance} !`) + substitution,
       });
     } else {
       const failureMsgs: Record<string, string> = {
@@ -569,7 +692,7 @@ export function StudentsPage() {
         "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui.",
         "scan.notEligible": "La séance en cours est d'un autre niveau ou d'un module non affecté à cet élève.",
         "scan.expired": "Solde épuisé — entrée refusée (aucune présence, aucune dette créée).",
-        "scan.cooldown": "Déjà enregistré — passage ignoré (moins de 30 min depuis le dernier scan).",
+        "scan.cooldown": "Déjà enregistré sur cette séance — passage ignoré (moins de 30 min depuis le dernier scan sur ce créneau).",
         "scan.debtBlocked": "Élève EN DETTE — entrée refusée. Veuillez régler la dette.",
         "scan.notFound": "Carte introuvable.",
         "scan.error": "Erreur lors du scan — réessayez.",
@@ -632,6 +755,142 @@ export function StudentsPage() {
     setAttEnd("");
     setIsDetailsOpen(true);
     setOverlayStudentId(null);
+  };
+
+  /** Ouvre l'envoi WhatsApp pour un élève. Les deux numéros (élève et parent
+   *  rattaché) sont toujours proposés ; `focus` détermine celui coché d'emblée,
+   *  pour pouvoir prévenir les deux en une fois sans rouvrir la fenêtre. */
+  const openWhatsApp = (stu: Student, focus: "student" | "parent") => {
+    const parent = parents.find((p) => p.id === stu.parentId);
+    const studentName = `${stu.firstName} ${stu.lastName}`;
+
+    const recipients: WhatsAppRecipient[] = [
+      { id: `student-${stu.id}`, name: studentName, phone: stu.phone, role: "student" },
+    ];
+    if (parent) {
+      recipients.push({
+        id: `parent-${parent.id}`,
+        name: `${parent.firstName} ${parent.lastName}`,
+        phone: parent.phone,
+        role: "parent",
+      });
+    }
+
+    setWaTarget({
+      recipients,
+      students: [
+        {
+          id: stu.id,
+          name: studentName,
+          balance: stu.balance,
+          registrationDue: stu.registrationDue,
+        },
+      ],
+      defaultRecipientIds: [
+        focus === "parent" && parent ? `parent-${parent.id}` : `student-${stu.id}`,
+      ],
+    });
+    setOverlayStudentId(null);
+  };
+
+  /** Alertes de solde en lot : notification dans l'application pour tous, plus
+   *  un WhatsApp personnalisé par élève — au parent rattaché s'il en a un,
+   *  sinon à l'élève lui-même. Un seul appel API pour que la passerelle garde
+   *  l'espacement entre les messages. */
+  const handleSendLowBalanceAlerts = async () => {
+    const selected = selectedAlertStudentIds
+      .map((id) => students.find((s) => s.id === id))
+      .filter((s): s is Student => Boolean(s));
+    if (selected.length === 0) return;
+
+    setSendingAlerts(true);
+
+    const nowIso = new Date().toISOString();
+    selected.forEach((stu) => {
+      push("notifications", {
+        id: uid("ntf"),
+        parentId: stu.parentId ?? "",
+        title: "Alerte de solde faible",
+        description: `Rappel de paiement: Le solde de ${stu.firstName} ${stu.lastName} est de ${stu.balance} DA. Veuillez recharger rapidement. Accès aux cours refusé sans paiement.`,
+        date: nowIso,
+        read: false,
+        auto: false,
+      });
+    });
+
+    const msgLang = language === "ar" ? "ar" : "fr";
+    const waRecipients = selected.flatMap((stu) => {
+      const parent = parents.find((p) => p.id === stu.parentId);
+      // Le parent est le bon interlocuteur quand il existe ; l'élève prend le
+      // relais s'il n'y en a pas de rattaché.
+      const target = isSendablePhone(parent?.phone)
+        ? { phone: parent!.phone, name: `${parent!.firstName} ${parent!.lastName}`, isParent: true }
+        : isSendablePhone(stu.phone)
+          ? { phone: stu.phone, name: `${stu.firstName} ${stu.lastName}`, isParent: false }
+          : null;
+      if (!target) return [];
+
+      const text = getTemplate(suggestTemplate(stu)).build(
+        {
+          studentName: `${stu.firstName} ${stu.lastName}`,
+          balance: stu.balance,
+          registrationDue: stu.registrationDue,
+          schoolName: school?.name || "L'établissement",
+          schoolPhone: school?.phone,
+          audience: target.isParent ? "parent" : "student",
+        },
+        msgLang,
+      );
+      return [{ phone: target.phone, name: target.name, text }];
+    });
+
+    if (waRecipients.length === 0) {
+      setSendingAlerts(false);
+      setIsAlertLowBalanceOpen(false);
+      addToast({
+        type: "warning",
+        title: "Alertes enregistrées",
+        message: `${selected.length} notification(s) créée(s) dans l'application, mais aucun numéro exploitable pour un envoi WhatsApp.`,
+      });
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/whatsapp/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recipients: waRecipients }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok) {
+        addToast({
+          type: "danger",
+          title: "WhatsApp indisponible",
+          message: `${selected.length} notification(s) créée(s) dans l'application. Envoi WhatsApp impossible : ${payload?.error ?? "erreur inconnue"}`,
+        });
+        return;
+      }
+
+      const { sent, failed } = payload as SendResponse;
+      addToast({
+        type: failed > 0 ? "warning" : "success",
+        title: "Alertes envoyées",
+        message:
+          failed > 0
+            ? `${sent} message(s) WhatsApp envoyé(s), ${failed} en échec. ${selected.length} notification(s) créée(s) dans l'application.`
+            : `${sent} message(s) WhatsApp envoyé(s) et ${selected.length} notification(s) créée(s) dans l'application.`,
+      });
+      setIsAlertLowBalanceOpen(false);
+    } catch {
+      addToast({
+        type: "danger",
+        title: "WhatsApp indisponible",
+        message: `${selected.length} notification(s) créée(s) dans l'application, mais le serveur n'a pas répondu pour l'envoi WhatsApp.`,
+      });
+    } finally {
+      setSendingAlerts(false);
+    }
   };
 
   const openAssign = (stu: Student) => {
@@ -771,17 +1030,48 @@ export function StudentsPage() {
     resetForm();
   };
 
-  // Get assignable items (subscriptions + coursework) matching search
-  const getAssignableItems = () => {
-    const list: {
-      id: string;
-      label: string;
-      details: string;
-      price: number;
-      isCoursework: boolean;
-      isFormation?: boolean;
-      periodMonths?: number;
-    }[] = [];
+  // ---- What can be assigned: one entry per COURS, one option per GROUPE -----
+  // A student is enrolled in a cours (class + module + teacher) through exactly
+  // ONE of its groups. Every group of a cours shares the same tariff, so the
+  // price never depends on which group is picked — only the timing does.
+  interface AssignGroupOption {
+    /** subscription id — this is what gets stored on the student */
+    id: string;
+    sessionId: string;
+    groupName: string;
+    salleName: string;
+    daysLabel: string;
+    time: string;
+    enrolled: number;
+  }
+  interface AssignItem {
+    /** subscription id of the selected (or first) group — the item's own key */
+    id: string;
+    key: string;
+    label: string;
+    moduleName: string;
+    className: string;
+    levelLabel: string;
+    filiereLabel: string;
+    teacherName: string;
+    details: string;
+    price: number;
+    isCoursework: boolean;
+    isFormation?: boolean;
+    isOpen?: boolean;
+    periodMonths?: number;
+    periodLabel?: string;
+    groupOptions: AssignGroupOption[];
+  }
+
+  const enrolledCountFor = (subId: string) =>
+    students.filter((st) => st.subscriptionIds.includes(subId)).length;
+
+  /** Assignable courses + séances libres + stages, filtered by the search box.
+   *  The search matches everything printed on the card: module, class, level,
+   *  filière, teacher, group, salle, day and time. */
+  const getAssignableItems = (): AssignItem[] => {
+    const byCourse = new Map<string, AssignItem>();
 
     subscriptions.forEach((sub) => {
       const s = sessions.find((se) => se.id === sub.sessionId);
@@ -791,37 +1081,124 @@ export function StudentsPage() {
       const t = teachers.find((te) => te.id === s.teacherId);
       const gr = groups.find((g) => g.id === s.groupId);
       const sa = salles.find((sl) => sl.id === s.salleId);
-
-      const label = `${mod?.name} ${cls?.name} ${t?.firstName} ${t?.lastName}`.toLowerCase();
-      if (assignSearch && !label.includes(assignSearch.toLowerCase())) return;
-
+      const fil = cls?.filiereId ? filieres.find((f) => f.id === cls.filiereId)?.name ?? "" : "";
       const isFormation = cls?.type === "formation";
-      list.push({
+      const levelLabel = (cls?.type === "cours" ? cls.coursLevel : cls?.formationLevel) ?? "";
+      const daysLabel = formatDays(s.days);
+
+      const haystack = [
+        mod?.name,
+        cls?.name,
+        levelLabel,
+        fil,
+        cls?.year,
+        t ? `${t.firstName} ${t.lastName}` : "",
+        gr?.name,
+        sa?.name,
+        daysLabel,
+        `${s.startTime}-${s.endTime}`,
+        s.title,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      if (assignSearch && !haystack.includes(assignSearch.toLowerCase())) return;
+
+      const option: AssignGroupOption = {
         id: sub.id,
-        label: `${mod?.name} (${cls?.name})`,
-        details: `Ens: ${t?.firstName} ${t?.lastName} | Gr: ${gr?.name} | Salle: ${sa?.name}`,
+        sessionId: s.id,
+        groupName: gr?.name ?? "-",
+        salleName: sa?.name ?? "-",
+        daysLabel: daysLabel || "—",
+        time: `${s.startTime}-${s.endTime}`,
+        enrolled: enrolledCountFor(sub.id),
+      };
+
+      const key = courseKeyOf(s);
+      const existing = byCourse.get(key);
+      if (existing) {
+        existing.groupOptions.push(option);
+        return;
+      }
+
+      byCourse.set(key, {
+        id: sub.id,
+        key,
+        label: `${mod?.name ?? "Module"} (${cls?.name ?? "Classe"})`,
+        moduleName: mod?.name ?? "Module",
+        className: cls?.name ?? "Classe",
+        levelLabel,
+        filiereLabel: fil,
+        teacherName: t ? `${t.firstName} ${t.lastName}` : "-",
+        details: `Ens: ${t?.firstName ?? ""} ${t?.lastName ?? ""} | Salle: ${sa?.name ?? "-"}`,
         price: isFormation ? sub.levelPrice ?? 0 : sub.pricePerSession,
         isCoursework: false,
         isFormation,
+        isOpen: !!s.isOpen,
         periodMonths: sub.periodMonths,
+        periodLabel: s.isOpen && s.periodStart ? `${formatDateFr(s.periodStart)} → ${formatDateFr(s.periodEnd)}` : "",
+        groupOptions: [option],
       });
     });
 
+    const list = [...byCourse.values()];
+    list.forEach((item) => item.groupOptions.sort((a, b) => a.groupName.localeCompare(b.groupName)));
+    list.sort((a, b) => a.moduleName.localeCompare(b.moduleName));
+
     coursework.forEach((cw) => {
       const t = teachers.find((te) => te.id === cw.teacherId);
-      const label = `${cw.name} ${t?.firstName} ${t?.lastName}`.toLowerCase();
-      if (assignSearch && !label.includes(assignSearch.toLowerCase())) return;
+      const haystack = `${cw.name} ${t?.firstName ?? ""} ${t?.lastName ?? ""}`.toLowerCase();
+      if (assignSearch && !haystack.includes(assignSearch.toLowerCase())) return;
 
       list.push({
         id: cw.id,
+        key: `cw-${cw.id}`,
         label: `Stage: ${cw.name}`,
+        moduleName: cw.name,
+        className: "Stage intensif",
+        levelLabel: "",
+        filiereLabel: "",
+        teacherName: t ? `${t.firstName} ${t.lastName}` : "-",
         details: `Enseignant: ${t ? `${t.firstName} ${t.lastName}` : "-"} | ${cw.dates.length} séances`,
         price: cw.total,
         isCoursework: true,
+        groupOptions: [],
       });
     });
 
     return list;
+  };
+
+  /** Which subscription (i.e. which group) of this cours the student is on. */
+  const selectedGroupOf = (item: AssignItem) =>
+    item.isCoursework
+      ? selectedAssignIds.includes(item.id)
+        ? item.id
+        : undefined
+      : item.groupOptions.find((g) => selectedAssignIds.includes(g.id))?.id;
+
+  /** Enrolling in a cours = picking ONE of its groups. Picking another group
+   *  moves the student instead of enrolling him twice in the same cours. */
+  const pickGroup = (item: AssignItem, groupSubId: string) => {
+    const siblingIds = item.groupOptions.map((g) => g.id);
+    const current = selectedGroupOf(item);
+    const withoutCourse = selectedAssignIds.filter((id) => !siblingIds.includes(id));
+    if (current === groupSubId) {
+      setSelectedAssignIds(withoutCourse);
+      return;
+    }
+    setSelectedAssignIds([...withoutCourse, groupSubId]);
+    if (item.isFormation && !assignStartDates[groupSubId]) {
+      setAssignStartDates({ ...assignStartDates, [groupSubId]: todayIso() });
+    }
+  };
+
+  const toggleCoursework = (item: AssignItem) => {
+    if (selectedAssignIds.includes(item.id)) {
+      setSelectedAssignIds(selectedAssignIds.filter((id) => id !== item.id));
+    } else {
+      setSelectedAssignIds([...selectedAssignIds, item.id]);
+    }
   };
 
   const handlePrintStudent = (stu: Student) => {
@@ -1639,13 +2016,51 @@ export function StudentsPage() {
               <CardBody className="flex flex-col justify-between h-56 relative">
                 {/* Overlay Action Buttons displayed ABOVE the card when three dots are clicked */}
                 {isOverlaid && (
-                  <div className="absolute inset-0 bg-primary-600/95 backdrop-blur-sm rounded-2xl z-20 flex flex-col justify-center p-4 text-white space-y-2">
+                  <div className="absolute inset-0 bg-primary-600/95 backdrop-blur-sm rounded-2xl z-20 flex flex-col justify-start overflow-y-auto p-4 text-white space-y-2">
                     <div className="flex justify-between items-center border-b border-white/20 pb-2 mb-1">
                       <span className="font-bold text-sm truncate">{stu.firstName} {stu.lastName}</span>
                       <button onClick={() => setOverlayStudentId(null)} className="text-xs hover:underline bg-white/10 px-2 py-0.5 rounded">
                         Fermer
                       </button>
                     </div>
+
+                    {/* Envoi WhatsApp — mis en avant : c'est l'action de relance
+                        la plus fréquente sur une fiche en dette. */}
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <button
+                        onClick={() => openWhatsApp(stu, "student")}
+                        disabled={!isSendablePhone(stu.phone)}
+                        title={
+                          isSendablePhone(stu.phone)
+                            ? "Envoyer un message WhatsApp à l'élève"
+                            : "Aucun numéro exploitable pour cet élève"
+                        }
+                        className="flex items-center gap-1.5 justify-center bg-emerald-500/90 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed py-2 rounded-xl font-semibold"
+                      >
+                        <MessageCircle className="h-3.5 w-3.5" /> WhatsApp Élève
+                      </button>
+                      {(() => {
+                        const parent = parents.find((p) => p.id === stu.parentId);
+                        const canSend = isSendablePhone(parent?.phone);
+                        return (
+                          <button
+                            onClick={() => openWhatsApp(stu, "parent")}
+                            disabled={!canSend}
+                            title={
+                              !parent
+                                ? "Aucun parent rattaché à cet élève"
+                                : canSend
+                                  ? `Envoyer un message WhatsApp à ${parent.firstName} ${parent.lastName}`
+                                  : "Le parent rattaché n'a pas de numéro exploitable"
+                            }
+                            className="flex items-center gap-1.5 justify-center bg-emerald-500/90 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed py-2 rounded-xl font-semibold"
+                          >
+                            <MessageCircle className="h-3.5 w-3.5" /> WhatsApp Parent
+                          </button>
+                        );
+                      })()}
+                    </div>
+
                     <div className="grid grid-cols-2 gap-2 text-xs">
                       <button
                         onClick={() => openDetails(stu)}
@@ -1962,7 +2377,10 @@ export function StudentsPage() {
                   detailsTab === "attendance" ? "border-primary text-primary" : "border-transparent text-muted hover:text-ink"
                 }`}
               >
-                <CheckCircle className="h-4 w-4" /> Présences ({attendance.filter((t) => t.studentId === selectedStudent.id).length})
+                <CheckCircle className="h-4 w-4" /> Présences &amp; Absences (
+                {attendance.filter((t) => t.studentId === selectedStudent.id).length +
+                  absencePenalties.filter((p) => p.studentId === selectedStudent.id).length}
+                )
               </button>
             </div>
 
@@ -2157,6 +2575,8 @@ export function StudentsPage() {
                     const sess = sessions.find((se) => se.id === att.sessionId);
                     if (!sess || sess.moduleId !== attModuleFilter) return false;
                   }
+                  if (attKindFilter === "absent" && att.status !== "absent") return false;
+                  if (attKindFilter === "present" && att.status === "absent") return false;
                   return inDateWindow(new Date(att.timestamp));
                 });
                 // Automatic weekly-absence charges, shown alongside real scans so
@@ -2165,8 +2585,15 @@ export function StudentsPage() {
                 const penList = absencePenalties.filter((pen) => {
                   if (pen.studentId !== selectedStudent.id) return false;
                   if (attModuleFilter !== "all" && pen.moduleId !== attModuleFilter) return false;
+                  if (attKindFilter === "present") return false;
                   return inDateWindow(new Date(`${pen.periodEnd}T12:00:00`));
                 });
+                const presentCount = attList.filter((a) => a.status !== "absent").length;
+                const lateCount = attList.filter((a) => a.status === "late").length;
+                const absentTotal = attList.filter((a) => a.status === "absent").length + penList.length;
+                const chargedTotal =
+                  attList.reduce((sum, a) => sum + a.amountDeducted, 0) +
+                  penList.reduce((sum, p) => sum + p.amount, 0);
                 const fmtDay = (d: string) => d.split("-").reverse().join("/");
                 const rows = [
                   ...attList.map((att) => ({ kind: "att" as const, id: att.id, when: new Date(att.timestamp), att })),
@@ -2217,15 +2644,48 @@ export function StudentsPage() {
                         </div>
                       )}
 
-                      <span className="text-[10px] text-muted ms-auto font-mono">
-                        {attList.length} présence(s)
-                        {penList.length > 0 ? ` · ${penList.length} absence(s) facturée(s)` : ""}
-                      </span>
+                      <label className="text-[10px] font-bold text-muted uppercase shrink-0 ms-2">Type :</label>
+                      <div className="flex gap-1">
+                        {([
+                          ["all", "Tout"],
+                          ["present", "Présences"],
+                          ["absent", "Absences"],
+                        ] as const).map(([mode, label]) => (
+                          <Button
+                            key={mode}
+                            size="sm"
+                            variant={attKindFilter === mode ? "primary" : "outline"}
+                            onClick={() => setAttKindFilter(mode)}
+                          >
+                            {label}
+                          </Button>
+                        ))}
+                      </div>
                     </div>
 
-                    <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {/* Compte-rendu du filtre courant */}
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      <div className="rounded-xl border border-success/30 bg-success/5 p-2 text-center">
+                        <span className="block text-[10px] font-semibold text-muted">Présences</span>
+                        <strong className="text-sm text-success">{presentCount}</strong>
+                      </div>
+                      <div className="rounded-xl border border-warning/30 bg-warning/5 p-2 text-center">
+                        <span className="block text-[10px] font-semibold text-muted">Dont retards</span>
+                        <strong className="text-sm text-warning">{lateCount}</strong>
+                      </div>
+                      <div className="rounded-xl border border-danger/30 bg-danger/5 p-2 text-center">
+                        <span className="block text-[10px] font-semibold text-muted">Absences</span>
+                        <strong className="text-sm text-danger">{absentTotal}</strong>
+                      </div>
+                      <div className="rounded-xl border border-line bg-canvas/40 p-2 text-center">
+                        <span className="block text-[10px] font-semibold text-muted">Total débité</span>
+                        <strong className="text-sm text-ink">{chargedTotal} DA</strong>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 max-h-72 overflow-y-auto">
                       {rows.length === 0 ? (
-                        <p className="text-xs text-muted italic">Aucune présence pour ces filtres.</p>
+                        <p className="text-xs text-muted italic">Aucune présence ni absence pour ces filtres.</p>
                       ) : (
                         rows.map((row) => {
                           if (row.kind === "att") {
@@ -2233,20 +2693,50 @@ export function StudentsPage() {
                             const s = sessions.find((se) => se.id === att.sessionId);
                             const modName = s ? modules.find((m) => m.id === s.moduleId)?.name : "Module";
                             const grpName = s ? groups.find((g) => g.id === s.groupId)?.name : undefined;
+                            const salleName = s ? salles.find((sl) => sl.id === s.salleId)?.name : undefined;
+                            const isAbsent = att.status === "absent";
                             return (
-                              <div key={att.id} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
-                                <div>
+                              <div
+                                key={att.id}
+                                className={`flex flex-wrap justify-between items-center gap-2 text-xs p-3 rounded-xl border ${
+                                  isAbsent ? "bg-danger/5 border-danger/30" : "bg-canvas border-line"
+                                }`}
+                              >
+                                <div className="min-w-0">
                                   <strong className="text-ink block">
-                                    Présence: {modName}
+                                    {isAbsent ? "Absence" : "Présence"}: {modName}
                                     {grpName ? <span className="text-muted font-semibold"> — {grpName}</span> : null}
+                                    {att.substituteGroup && (
+                                      <Badge tone="primary" className="ms-1.5 text-[9px] px-1.5 py-0">
+                                        <Repeat className="me-0.5 inline h-2.5 w-2.5" /> Autre groupe
+                                      </Badge>
+                                    )}
                                   </strong>
-                                  <span className="text-[10px] text-muted">{att.timestamp.substring(0, 16).replace("T", " ")}</span>
+                                  <span className="text-[10px] text-muted">
+                                    {att.timestamp.substring(0, 16).replace("T", " ")}
+                                    {s ? ` · ${s.startTime}-${s.endTime}` : ""}
+                                    {salleName ? ` · Salle ${salleName}` : ""}
+                                  </span>
                                 </div>
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-1.5 shrink-0">
                                   <Badge tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}>
                                     {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
                                   </Badge>
                                   <span className="font-bold text-danger text-[10px]">-{att.amountDeducted} DA</span>
+                                  <button
+                                    onClick={() => openEditAtt(att)}
+                                    title="Modifier cette présence"
+                                    className="p-1.5 rounded-lg text-muted hover:bg-primary-50 hover:text-primary transition-colors"
+                                  >
+                                    <Edit className="h-3.5 w-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={() => setDeletingAtt(att)}
+                                    title="Supprimer cette présence (et rembourser)"
+                                    className="p-1.5 rounded-lg text-muted hover:bg-danger/10 hover:text-danger transition-colors"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
                                 </div>
                               </div>
                             );
@@ -2256,8 +2746,8 @@ export function StudentsPage() {
                           const modName = modules.find((m) => m.id === pen.moduleId)?.name ?? "Module";
                           const grpName = s ? groups.find((g) => g.id === s.groupId)?.name : undefined;
                           return (
-                            <div key={pen.id} className="flex justify-between items-center text-xs bg-danger/5 border border-danger/30 p-3 rounded-xl">
-                              <div>
+                            <div key={pen.id} className="flex flex-wrap justify-between items-center gap-2 text-xs bg-danger/5 border border-danger/30 p-3 rounded-xl">
+                              <div className="min-w-0">
                                 <strong className="text-ink block">
                                   Absence facturée: {modName}
                                   {grpName ? <span className="text-muted font-semibold"> — {grpName}</span> : null}
@@ -2267,9 +2757,16 @@ export function StudentsPage() {
                                   {" · "}solde après : <span className={pen.balanceAfter < 0 ? "text-danger font-bold" : ""}>{pen.balanceAfter} DA</span>
                                 </span>
                               </div>
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-1.5 shrink-0">
                                 <Badge tone="danger">Absent (semaine)</Badge>
                                 <span className="font-bold text-danger text-[10px]">-{pen.amount} DA</span>
+                                <button
+                                  onClick={() => setDeletingPen(pen)}
+                                  title="Supprimer cette absence (et rembourser)"
+                                  className="p-1.5 rounded-lg text-muted hover:bg-danger/10 hover:text-danger transition-colors"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
                               </div>
                             </div>
                           );
@@ -2439,6 +2936,164 @@ export function StudentsPage() {
         })()}
       </Modal>
 
+      {/* Correct one presence — the RPC moves the balance by the same delta */}
+      <Modal open={!!editingAtt} onClose={closeAttModals} title="Modifier la présence">
+        {editingAtt && (() => {
+          const s = sessions.find((se) => se.id === editingAtt.sessionId);
+          const modName = s ? modules.find((m) => m.id === s.moduleId)?.name ?? "Module" : "Module";
+          const grpName = s ? groups.find((g) => g.id === s.groupId)?.name ?? "-" : "-";
+          const owner = students.find((st) => st.id === editingAtt.studentId);
+          const delta = Math.max(0, Math.round(attEditAmount || 0)) - editingAtt.amountDeducted;
+          const previewBalance = (owner?.balance ?? 0) - delta;
+          return (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-line bg-canvas p-3 text-xs space-y-0.5">
+                <strong className="block text-ink">
+                  {modName} — {grpName}
+                  {editingAtt.substituteGroup && (
+                    <Badge tone="primary" className="ms-1.5 text-[9px] px-1.5 py-0">Autre groupe</Badge>
+                  )}
+                </strong>
+                <span className="block text-muted">
+                  {owner ? `${owner.firstName} ${owner.lastName} · ` : ""}
+                  {s ? `${formatDays(s.days)} · ${s.startTime}-${s.endTime}` : ""}
+                </span>
+                <span className="block text-muted">
+                  Débit d&apos;origine : {editingAtt.amountDeducted} DA
+                </span>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-muted">Statut</label>
+                <Select
+                  value={attEditStatus}
+                  onChange={(e) => setAttEditStatus(e.target.value as AttendanceStatus)}
+                  className="w-full"
+                >
+                  <option value="present">Présent</option>
+                  <option value="late">En retard</option>
+                  <option value="absent">Absent</option>
+                </Select>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-muted">Date et heure</label>
+                <Input type="datetime-local" value={attEditDate} onChange={(e) => setAttEditDate(e.target.value)} />
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-muted">Montant débité (DA)</label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={attEditAmount}
+                  onChange={(e) => setAttEditAmount(Number(e.target.value))}
+                />
+                <p className="mt-1 text-[10px] text-muted">
+                  La différence est reportée sur le solde de l&apos;élève et tracée dans ses transactions.
+                  Mettez <strong>0</strong> pour une séance offerte.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
+                <span className="font-semibold text-muted">Solde après correction</span>
+                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>Annuler</Button>
+                <Button onClick={handleUpdateAtt} disabled={attBusy || !attEditDate}>
+                  {attBusy ? "Enregistrement…" : "Enregistrer"}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Delete one presence — refunds the séance and clears the teacher due */}
+      <Modal open={!!deletingAtt} onClose={closeAttModals} title="Supprimer la présence">
+        {deletingAtt && (() => {
+          const s = sessions.find((se) => se.id === deletingAtt.sessionId);
+          const modName = s ? modules.find((m) => m.id === s.moduleId)?.name ?? "Module" : "Module";
+          const grpName = s ? groups.find((g) => g.id === s.groupId)?.name ?? "-" : "-";
+          const owner = students.find((st) => st.id === deletingAtt.studentId);
+          const previewBalance = (owner?.balance ?? 0) + deletingAtt.amountDeducted;
+          return (
+            <div className="space-y-4">
+              <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
+                <p className="text-xs leading-relaxed text-ink">
+                  La présence sera supprimée, les {deletingAtt.amountDeducted} DA débités seront remboursés
+                  et la part due à l&apos;enseignant pour cette séance sera annulée.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-line bg-canvas p-3 text-xs space-y-0.5">
+                <strong className="block text-ink">{modName} — {grpName}</strong>
+                <span className="block text-muted">
+                  {owner ? `${owner.firstName} ${owner.lastName} · ` : ""}
+                  {deletingAtt.timestamp.substring(0, 16).replace("T", " ")}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
+                <span className="font-semibold text-muted">Solde après suppression</span>
+                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>Annuler</Button>
+                <Button variant="danger" onClick={handleDeleteAtt} disabled={attBusy}>
+                  {attBusy ? "Suppression…" : "Supprimer"}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Delete one automatic weekly-absence charge */}
+      <Modal open={!!deletingPen} onClose={closeAttModals} title="Supprimer l'absence facturée">
+        {deletingPen && (() => {
+          const modName = modules.find((m) => m.id === deletingPen.moduleId)?.name ?? "Module";
+          const owner = students.find((st) => st.id === deletingPen.studentId);
+          const previewBalance = (owner?.balance ?? 0) + deletingPen.amount;
+          const fmt = (d: string) => d.split("-").reverse().join("/");
+          return (
+            <div className="space-y-4">
+              <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
+                <p className="text-xs leading-relaxed text-ink">
+                  L&apos;absence hebdomadaire sera supprimée, les {deletingPen.amount} DA facturés seront
+                  remboursés et la ligne correspondante disparaîtra de l&apos;historique du solde.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-line bg-canvas p-3 text-xs space-y-0.5">
+                <strong className="block text-ink">{modName}</strong>
+                <span className="block text-muted">
+                  {owner ? `${owner.firstName} ${owner.lastName} · ` : ""}
+                  Semaine du {fmt(deletingPen.periodStart)} au {fmt(deletingPen.periodEnd)}
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
+                <span className="font-semibold text-muted">Solde après suppression</span>
+                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>Annuler</Button>
+                <Button variant="danger" onClick={handleDeletePenalty} disabled={attBusy}>
+                  {attBusy ? "Suppression…" : "Supprimer"}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
       {/* Assign Subscriptions Modal */}
       <Modal open={isAssignOpen} onClose={() => setIsAssignOpen(false)} title="Affecter des abonnements / cours" wide>
         <div className="space-y-4">
@@ -2505,127 +3160,230 @@ export function StudentsPage() {
             </p>
           </div>
 
-          <div className="border border-line rounded-xl max-h-72 overflow-y-auto p-2 bg-canvas/30 space-y-1">
-            {getAssignableItems().map((item) => {
-              const isChecked = selectedAssignIds.includes(item.id);
-              const startDate = assignStartDates[item.id] || todayIso();
-              const expiryDate = item.isFormation ? addMonths(startDate, item.periodMonths ?? 0) : "";
-              const discount = assignDiscounts[item.id];
-              const net = netPriceFor(item.price, discount);
-              const hasDiscount = !!discount && discount.value > 0;
-              return (
-                <div key={item.id}>
-                  <button
-                    onClick={() => {
-                      if (isChecked) {
-                        setSelectedAssignIds(selectedAssignIds.filter((id) => id !== item.id));
-                      } else {
-                        setSelectedAssignIds([...selectedAssignIds, item.id]);
-                        if (item.isFormation && !assignStartDates[item.id]) {
-                          setAssignStartDates({ ...assignStartDates, [item.id]: todayIso() });
-                        }
-                      }
-                    }}
-                    className={`w-full text-start p-2.5 rounded-xl text-xs transition-colors flex justify-between items-center ${
-                      isChecked ? "bg-primary-50 border border-primary/20 text-ink" : "hover:bg-primary-50 text-ink border border-transparent"
+          <div className="border border-line rounded-xl max-h-[26rem] overflow-y-auto p-2 bg-canvas/30 space-y-2">
+            {getAssignableItems().length === 0 ? (
+              <p className="px-2 py-3 text-xs italic text-muted">
+                Aucun cours ou stage ne correspond à cette recherche.
+              </p>
+            ) : (
+              getAssignableItems().map((item) => {
+                const selectedId = selectedGroupOf(item);
+                const isChecked = !!selectedId;
+                // Reductions and formation dates hang off the CHOSEN group.
+                const keyId = selectedId ?? item.id;
+                const startDate = assignStartDates[keyId] || todayIso();
+                const expiryDate = item.isFormation ? addMonths(startDate, item.periodMonths ?? 0) : "";
+                const discount = assignDiscounts[keyId];
+                const net = netPriceFor(item.price, discount);
+                const hasDiscount = !!discount && discount.value > 0;
+                const chosen = item.groupOptions.find((g) => g.id === selectedId);
+
+                return (
+                  <div
+                    key={item.key}
+                    className={`rounded-xl border p-2.5 ${
+                      isChecked ? "border-primary/30 bg-primary-50/60" : "border-line/70 bg-surface"
                     }`}
                   >
-                    <div>
-                      <strong className="block font-bold text-ink">
-                        {item.label}
-                        {item.isFormation && (
-                          <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-primary/15 text-primary">
-                            Formation
-                          </span>
-                        )}
-                        {hasDiscount && (
-                          <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-success/15 text-success">
-                            {discountLabel(discount)}
-                          </span>
-                        )}
-                      </strong>
-                      <span className="text-muted block text-[10px]">{item.details}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-primary font-bold">
-                        {hasDiscount && (
-                          <span className="text-muted font-normal line-through mr-1">{item.price}</span>
-                        )}
-                        {net} DA
-                        {item.isFormation && (
-                          <span className="text-muted font-semibold"> / {item.periodMonths} mois</span>
-                        )}
-                      </span>
-                      <input type="checkbox" checked={isChecked} readOnly className="h-4 w-4 text-primary" />
-                    </div>
-                  </button>
-
-                  {isChecked && (
-                    <div className="mt-1 mb-2 ml-4 mr-1 p-2.5 rounded-xl bg-surface border border-line flex flex-wrap items-end gap-4">
-                      {/* Formation: pick the start date, expiry is derived from the period */}
-                      {item.isFormation && (
-                        <>
-                          <div>
-                            <label className="block text-[10px] font-semibold text-muted mb-1">Date de début *</label>
-                            <Input
-                              type="date"
-                              value={startDate}
-                              onChange={(e) =>
-                                setAssignStartDates({ ...assignStartDates, [item.id]: e.target.value })
-                              }
-                              className="w-40"
-                            />
-                          </div>
-                          <div className="pb-1.5 text-xs">
-                            <span className="block text-[10px] font-semibold text-muted mb-1">
-                              Date d&apos;expiration (calculée)
+                    {/* ---- Course header: everything about the timing ---- */}
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <strong className="block text-xs font-bold text-ink">
+                          {item.moduleName}
+                          {item.isFormation && (
+                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-primary/15 text-primary">
+                              Formation
                             </span>
-                            <strong className="text-primary">{formatDateFr(expiryDate)}</strong>
-                            <span className="text-muted"> · {item.periodMonths} mois</span>
-                          </div>
-                        </>
-                      )}
-
-                      {/* Per-module reduction */}
-                      <div>
-                        <label className="block text-[10px] font-semibold text-muted mb-1">Réduction</label>
-                        <Select
-                          value={discount?.type ?? "percent"}
-                          onChange={(e) => setItemDiscount(item.id, { type: e.target.value as DiscountType })}
-                          className="w-36"
-                        >
-                          <option value="percent">Pourcentage (%)</option>
-                          <option value="amount">Montant fixe (DA)</option>
-                        </Select>
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-semibold text-muted mb-1">
-                          Valeur {(discount?.type ?? "percent") === "percent" ? "(%)" : "(DA)"}
-                        </label>
-                        <Input
-                          type="number"
-                          min={0}
-                          max={(discount?.type ?? "percent") === "percent" ? 100 : undefined}
-                          value={discount?.value || ""}
-                          onChange={(e) => setItemDiscount(item.id, { value: Number(e.target.value) })}
-                          placeholder="0"
-                          className="w-28"
-                        />
-                      </div>
-                      <div className="pb-1.5 text-xs">
-                        <span className="block text-[10px] font-semibold text-muted mb-1">
-                          Tarif après réduction
+                          )}
+                          {item.isOpen && (
+                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-success/15 text-success">
+                              Séance libre
+                            </span>
+                          )}
+                          {item.isCoursework && (
+                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-warning/15 text-warning">
+                              Stage
+                            </span>
+                          )}
+                          {hasDiscount && (
+                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-success/15 text-success">
+                              {discountLabel(discount)}
+                            </span>
+                          )}
+                        </strong>
+                        <span className="mt-0.5 block text-[10px] text-muted">
+                          {item.isCoursework ? (
+                            item.details
+                          ) : (
+                            <>
+                              Classe : <strong className="text-ink">{item.className}</strong>
+                              {item.levelLabel ? ` (${item.levelLabel})` : ""}
+                              {item.filiereLabel ? ` · ${item.filiereLabel}` : ""} · Enseignant :{" "}
+                              <strong className="text-ink">{item.teacherName}</strong>
+                              {item.periodLabel ? ` · ${item.periodLabel}` : ""}
+                            </>
+                          )}
                         </span>
-                        <strong className={hasDiscount ? "text-success" : "text-ink"}>{net} DA</strong>
-                        {hasDiscount && (
-                          <span className="text-muted"> (au lieu de {item.price} DA)</span>
+                      </div>
+                      <div className="shrink-0 text-end">
+                        <span className="text-xs font-bold text-primary">
+                          {hasDiscount && (
+                            <span className="me-1 font-normal text-muted line-through">{item.price}</span>
+                          )}
+                          {net} DA
+                          {item.isFormation && (
+                            <span className="font-semibold text-muted"> / {item.periodMonths} mois</span>
+                          )}
+                        </span>
+                        {!item.isCoursework && (
+                          <span className="block text-[9px] text-muted">
+                            {item.groupOptions.length} groupe{item.groupOptions.length > 1 ? "s" : ""} · même tarif
+                          </span>
                         )}
                       </div>
                     </div>
-                  )}
-                </div>
-              );
-            })}
+
+                    {/* ---- Group picker: the student joins ONE group ---- */}
+                    {item.isCoursework ? (
+                      <button
+                        onClick={() => toggleCoursework(item)}
+                        className={`mt-2 flex w-full items-center justify-between rounded-lg border p-2 text-[11px] transition-colors ${
+                          isChecked
+                            ? "border-primary bg-primary text-white"
+                            : "border-line bg-canvas/40 text-ink hover:bg-primary-50"
+                        }`}
+                      >
+                        <span className="font-bold">{item.label}</span>
+                        <input type="checkbox" checked={isChecked} readOnly className="h-4 w-4" />
+                      </button>
+                    ) : (
+                      <div className="mt-2 space-y-1">
+                        <span className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-muted">
+                          <Users className="h-3 w-3" /> Choisir le groupe de l&apos;étudiant
+                        </span>
+                        {item.groupOptions.map((g) => {
+                          const active = selectedId === g.id;
+                          return (
+                            <button
+                              key={g.id}
+                              onClick={() => pickGroup(item, g.id)}
+                              className={`flex w-full flex-wrap items-center justify-between gap-2 rounded-lg border p-2 text-start text-[11px] transition-colors ${
+                                active
+                                  ? "border-primary bg-primary text-white"
+                                  : "border-line bg-canvas/40 text-ink hover:bg-primary-50"
+                              }`}
+                            >
+                              <span className="font-bold">{g.groupName}</span>
+                              <span
+                                className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 ${
+                                  active ? "text-white/85" : "text-muted"
+                                }`}
+                              >
+                                <span className="flex items-center gap-1">
+                                  <Clock className="h-3 w-3" /> {g.daysLabel} · {g.time}
+                                </span>
+                                <span className="flex items-center gap-1">
+                                  <MapPin className="h-3 w-3" /> {g.salleName}
+                                </span>
+                                <span>{g.enrolled} inscrit(s)</span>
+                              </span>
+                              <input
+                                type="radio"
+                                checked={active}
+                                readOnly
+                                className="h-4 w-4 shrink-0"
+                              />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {isChecked && (
+                      <div className="mt-2 flex flex-wrap items-end gap-4 rounded-xl border border-line bg-surface p-2.5">
+                        {chosen && (
+                          <div className="pb-1.5 text-xs">
+                            <span className="mb-1 block text-[10px] font-semibold text-muted">Groupe affecté</span>
+                            <strong className="text-primary">{chosen.groupName}</strong>
+                            <span className="text-muted">
+                              {" "}
+                              · {chosen.daysLabel} · {chosen.time}
+                            </span>
+                          </div>
+                        )}
+
+                        {/* Formation: pick the start date, expiry is derived from the period */}
+                        {item.isFormation && (
+                          <>
+                            <div>
+                              <label className="block text-[10px] font-semibold text-muted mb-1">Date de début *</label>
+                              <Input
+                                type="date"
+                                value={startDate}
+                                onChange={(e) =>
+                                  setAssignStartDates({ ...assignStartDates, [keyId]: e.target.value })
+                                }
+                                className="w-40"
+                              />
+                            </div>
+                            <div className="pb-1.5 text-xs">
+                              <span className="block text-[10px] font-semibold text-muted mb-1">
+                                Date d&apos;expiration (calculée)
+                              </span>
+                              <strong className="text-primary">{formatDateFr(expiryDate)}</strong>
+                              <span className="text-muted"> · {item.periodMonths} mois</span>
+                            </div>
+                          </>
+                        )}
+
+                        {/* Per-module reduction */}
+                        <div>
+                          <label className="block text-[10px] font-semibold text-muted mb-1">Réduction</label>
+                          <Select
+                            value={discount?.type ?? "percent"}
+                            onChange={(e) => setItemDiscount(keyId, { type: e.target.value as DiscountType })}
+                            className="w-36"
+                          >
+                            <option value="percent">Pourcentage (%)</option>
+                            <option value="amount">Montant fixe (DA)</option>
+                          </Select>
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-semibold text-muted mb-1">
+                            Valeur {(discount?.type ?? "percent") === "percent" ? "(%)" : "(DA)"}
+                          </label>
+                          <Input
+                            type="number"
+                            min={0}
+                            max={(discount?.type ?? "percent") === "percent" ? 100 : undefined}
+                            value={discount?.value || ""}
+                            onChange={(e) => setItemDiscount(keyId, { value: Number(e.target.value) })}
+                            placeholder="0"
+                            className="w-28"
+                          />
+                        </div>
+                        <div className="pb-1.5 text-xs">
+                          <span className="block text-[10px] font-semibold text-muted mb-1">
+                            Tarif après réduction
+                          </span>
+                          <strong className={hasDiscount ? "text-success" : "text-ink"}>{net} DA</strong>
+                          {hasDiscount && (
+                            <span className="text-muted"> (au lieu de {item.price} DA)</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="rounded-xl border border-line bg-canvas/40 p-3 text-[10px] leading-relaxed text-muted">
+            🔁 <strong className="text-ink">Groupe et rattrapage :</strong> l&apos;étudiant est inscrit sur le groupe
+            choisi ci-dessus, mais sa carte est acceptée sur <strong className="text-ink">n&apos;importe quel autre
+            groupe du même cours</strong> (même classe, même module, même enseignant). La présence est alors
+            enregistrée sur le groupe réellement suivi, au tarif de son inscription.
           </div>
 
           {/* Running total of what the student will be charged per séance */}
@@ -2635,9 +3393,17 @@ export function StudentsPage() {
                 Total par séance après réductions ({selectedAssignIds.length} module(s))
               </span>
               <strong className="text-primary text-sm">
-                {getAssignableItems()
-                  .filter((i) => selectedAssignIds.includes(i.id))
-                  .reduce((sum, i) => sum + netPriceFor(i.price, assignDiscounts[i.id]), 0)}{" "}
+                {selectedAssignIds.reduce((sum, id) => {
+                  const sub = subscriptions.find((s) => s.id === id);
+                  if (sub) {
+                    const sess = sessions.find((se) => se.id === sub.sessionId);
+                    const cls = sess ? classes.find((c) => c.id === sess.classId) : undefined;
+                    const base = cls?.type === "formation" ? sub.levelPrice ?? 0 : sub.pricePerSession;
+                    return sum + netPriceFor(base, assignDiscounts[id]);
+                  }
+                  const cw = coursework.find((c) => c.id === id);
+                  return sum + netPriceFor(cw?.total ?? 0, assignDiscounts[id]);
+                }, 0)}{" "}
                 DA
               </strong>
             </div>
@@ -2790,8 +3556,9 @@ export function StudentsPage() {
       >
         <div className="space-y-4">
           <p className="text-xs text-muted">
-            Les étudiants suivants ont un solde presque épuisé (inférieur à 2 séances). 
-            Sélectionnez les destinataires de l'alerte Email et WhatsApp.
+            Les étudiants suivants ont un solde presque épuisé (inférieur à 2 séances).
+            Chaque élève sélectionné reçoit une notification dans l&apos;application et un message
+            WhatsApp personnalisé — envoyé au parent rattaché, ou à l&apos;élève à défaut.
           </p>
 
           {/* Automatic alert settings (Email & WhatsApp toggles) */}
@@ -2891,49 +3658,14 @@ export function StudentsPage() {
               Fermer
             </Button>
             <Button
-              disabled={selectedAlertStudentIds.length === 0}
-              onClick={() => {
-                const nowIso = new Date().toISOString();
-                let alertSentCount = 0;
-
-                selectedAlertStudentIds.forEach((id) => {
-                  const stu = students.find((s) => s.id === id);
-                  if (stu) {
-                    alertSentCount++;
-                    // Push notification to database for the parent/student
-                    push("notifications", {
-                      id: uid("ntf"),
-                      parentId: stu.parentId ?? "",
-                      title: "Alerte de solde faible",
-                      description: `Rappel de paiement: Le solde de ${stu.firstName} ${stu.lastName} est de ${stu.balance} DA. Veuillez recharger rapidement. Accès aux cours refusé sans paiement.`,
-                      date: nowIso,
-                      read: false,
-                      auto: false,
-                    });
-                  }
-                });
-
-                setIsAlertLowBalanceOpen(false);
-
-                // Try to trigger a click-to-send WhatsApp demo for the first selected student if phone exists
-                const firstId = selectedAlertStudentIds[0];
-                const firstStu = students.find((s) => s.id === firstId);
-                
-                addToast({
-                  type: "success",
-                  title: "Alertes Envoyées",
-                  message: `Des messages d'alerte (Email & WhatsApp) ont été envoyés avec succès à ${alertSentCount} élèves et leurs parents.`,
-                });
-
-                if (firstStu && firstStu.phone) {
-                  const text = `Bonjour, le solde de l'élève ${firstStu.firstName} ${firstStu.lastName} est presque épuisé (${firstStu.balance} DA). Merci de régulariser la situation auprès de la réception. Entrée aux cours impossible sans paiement.`;
-                  const url = `https://api.whatsapp.com/send?phone=${firstStu.phone}&text=${encodeURIComponent(text)}`;
-                  window.open(url, "_blank");
-                }
-              }}
+              disabled={selectedAlertStudentIds.length === 0 || sendingAlerts}
+              onClick={handleSendLowBalanceAlerts}
               className="flex items-center gap-2"
             >
-              <Send className="h-4 w-4" /> Envoyer les alertes ({selectedAlertStudentIds.length})
+              <Send className="h-4 w-4" />
+              {sendingAlerts
+                ? "Envoi en cours…"
+                : `Envoyer les alertes (${selectedAlertStudentIds.length})`}
             </Button>
           </div>
         </div>
@@ -3023,6 +3755,16 @@ export function StudentsPage() {
           </div>
         </div>
       </Modal>
+
+      {/* Envoi WhatsApp (élève et/ou parent rattaché) */}
+      {waTarget && (
+        <WhatsAppMessageModal
+          onClose={() => setWaTarget(null)}
+          recipients={waTarget.recipients}
+          students={waTarget.students}
+          defaultRecipientIds={waTarget.defaultRecipientIds}
+        />
+      )}
     </div>
   );
 }

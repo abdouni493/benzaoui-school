@@ -40,6 +40,9 @@ export interface School {
   /** floor date (YYYY-MM-DD): absences are only billed for weeks ending on/after
    *  this day, so enabling the feature never retro-bills old history */
   absencePenaltySince?: string;
+  /** weekday the absence week opens on (0 = sunday … 5 = friday, the default):
+   *  a week runs from that day to the same day of the next week */
+  absenceWeekStartDay?: number;
 }
 
 export type ClassType = "cours" | "formation";
@@ -283,6 +286,9 @@ export interface AttendanceRecord {
   timestamp: string;
   amountDeducted: number;
   status: AttendanceStatus;
+  /** the student attended ANOTHER group of the same course (same class + module)
+   *  than the one he is enrolled in — a "rattrapage" */
+  substituteGroup?: boolean;
 }
 
 export interface UnpaidTeacherSession {

@@ -8,7 +8,7 @@ import { changeOwnPassword } from "@/lib/supabase/createUser";
 import { createClient } from "@/lib/supabase/client";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Input } from "@/components/ui/SearchInput";
+import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
 import {
   Settings,
@@ -27,8 +27,10 @@ import {
   Save,
   Globe,
   Image,
-  Coins
+  Coins,
+  MessageCircle
 } from "lucide-react";
+import { WhatsAppSettingsPanel } from "@/components/whatsapp/WhatsAppSettingsPanel";
 
 export function SettingsPage() {
   const dataStore = useData();
@@ -38,7 +40,7 @@ export function SettingsPage() {
   const [logoUploading, setLogoUploading] = useState(false);
 
   // Tabs navigation state
-  const [activeTab, setActiveTab] = useState<"school" | "security" | "backup">("school");
+  const [activeTab, setActiveTab] = useState<"school" | "security" | "whatsapp" | "backup">("school");
 
   // School Form State
   const [schoolName, setSchoolName] = useState(school?.name || "");
@@ -54,6 +56,7 @@ export function SettingsPage() {
   const [registrationFee, setRegistrationFee] = useState<number>(school?.registrationFee || 0);
   const [absencePenaltyEnabled, setAbsencePenaltyEnabled] = useState<boolean>(school?.absencePenaltyEnabled ?? true);
   const [absencePenaltySince, setAbsencePenaltySince] = useState<string>(school?.absencePenaltySince || "");
+  const [absenceWeekStartDay, setAbsenceWeekStartDay] = useState<number>(school?.absenceWeekStartDay ?? 5);
 
   // `school` loads asynchronously (fetched from Supabase after mount), so
   // the useState initializers above only capture whatever was there at the
@@ -73,6 +76,7 @@ export function SettingsPage() {
     setRegistrationFee(school.registrationFee || 0);
     setAbsencePenaltyEnabled(school.absencePenaltyEnabled ?? true);
     setAbsencePenaltySince(school.absencePenaltySince || "");
+    setAbsenceWeekStartDay(school.absenceWeekStartDay ?? 5);
   }, [school?.id]);
 
   // Saved on its own (not folded into handleSaveSchool) so that, on a project
@@ -82,6 +86,7 @@ export function SettingsPage() {
     updateSchool({
       absencePenaltyEnabled,
       absencePenaltySince: absencePenaltySince || undefined,
+      absenceWeekStartDay,
     });
   };
 
@@ -230,6 +235,18 @@ export function SettingsPage() {
           </button>
 
           <button
+            onClick={() => setActiveTab("whatsapp")}
+            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold text-left transition-all ${
+              activeTab === "whatsapp"
+                ? "bg-primary-50 text-primary border border-primary/20 shadow-sm"
+                : "text-muted hover:text-ink hover:bg-canvas/50 border border-transparent"
+            }`}
+          >
+            <MessageCircle className="h-4.5 w-4.5" />
+            <span>WhatsApp</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab("backup")}
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold text-left transition-all ${
               activeTab === "backup"
@@ -303,9 +320,10 @@ export function SettingsPage() {
                         <div>
                           <label className="block text-xs font-bold text-ink">Facturation automatique des absences</label>
                           <p className="text-[10px] text-muted mt-0.5 leading-relaxed">
-                            Pour chaque module, si l&apos;élève n&apos;a ni scanné sa carte ni été marqué présent
-                            pendant 7 jours, le prix de la séance de ce module est débité de son solde
-                            (la dette est autorisée). Le décompte repart à chaque présence.
+                            La semaine court d&apos;un <strong className="text-ink">vendredi au vendredi suivant</strong>.
+                            Pour chaque module, si l&apos;élève n&apos;a ni scanné sa carte (sur son groupe ou sur
+                            n&apos;importe quel autre groupe du même cours) ni été marqué présent de toute la semaine,
+                            le prix de la séance de ce module est débité de son solde (la dette est autorisée).
                           </p>
                         </div>
                       </div>
@@ -331,6 +349,24 @@ export function SettingsPage() {
                             onChange={(e) => setAbsencePenaltySince(e.target.value)}
                             className="rounded-xl"
                           />
+                        </div>
+                        <div className="sm:w-56">
+                          <label className="block text-[10px] font-semibold text-muted mb-1">
+                            La semaine commence le
+                          </label>
+                          <Select
+                            value={String(absenceWeekStartDay)}
+                            onChange={(e) => setAbsenceWeekStartDay(Number(e.target.value))}
+                            className="rounded-xl"
+                          >
+                            <option value="5">Vendredi (par défaut)</option>
+                            <option value="6">Samedi</option>
+                            <option value="0">Dimanche</option>
+                            <option value="1">Lundi</option>
+                            <option value="2">Mardi</option>
+                            <option value="3">Mercredi</option>
+                            <option value="4">Jeudi</option>
+                          </Select>
                         </div>
                         <Button variant="outline" onClick={handleSaveAbsenceBilling} className="shrink-0">
                           <Save className="h-3.5 w-3.5 me-1.5" /> Enregistrer
@@ -626,7 +662,10 @@ export function SettingsPage() {
             </Card>
           )}
 
-          {/* TAB 3: Backup & Restore */}
+          {/* TAB 3: WhatsApp gateway */}
+          {activeTab === "whatsapp" && <WhatsAppSettingsPanel />}
+
+          {/* TAB 4: Backup & Restore */}
           {activeTab === "backup" && (
             <div className="space-y-6">
               {/* Export panel */}

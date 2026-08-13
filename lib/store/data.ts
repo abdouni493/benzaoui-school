@@ -308,6 +308,7 @@ const attendanceMapper = makeMapper<AttendanceRecord>([
   ["timestamp", "occurred_at"],
   ["amountDeducted", "amount_deducted"],
   ["status", "status"],
+  ["substituteGroup", "substitute_group"],
 ]);
 
 const absencePenaltiesMapper = makeMapper<AbsencePenalty>([
@@ -502,6 +503,7 @@ const schoolMapper = makeMapper<School>([
   ["registrationFee", "registration_fee"],
   ["absencePenaltyEnabled", "absence_penalty_enabled"],
   ["absencePenaltySince", "absence_penalty_since"],
+  ["absenceWeekStartDay", "absence_week_start_day"],
 ]);
 
 /** These entity tables are auth-linked (id === auth.users.id): creation goes
@@ -529,6 +531,13 @@ export interface ScanResult {
   balance?: number;
   /** on absent/cancel: the amount refunded to the student */
   refunded?: number;
+  /** group of the séance the scan was actually matched to */
+  groupName?: string;
+  /** the student is enrolled in ANOTHER group of the same course: he attended
+   *  a sibling group ("rattrapage"), which is allowed and billed normally */
+  otherGroup?: boolean;
+  /** the group he is actually enrolled in (only set when otherGroup) */
+  ownGroupName?: string;
   messageKey: string;
 }
 
@@ -577,6 +586,24 @@ interface DataActions {
     opts?: { date?: string; allowDebt?: boolean; skipTeacherDue?: boolean },
   ) => Promise<ScanResult>;
   cancelAttendance: (attendanceId: string) => Promise<ScanResult>;
+  /** Corrects one presence (status / date-time / amount charged); the balance
+   *  moves by exactly the same delta, server-side. */
+  updateAttendance: (
+    attendanceId: string,
+    fields: { status?: "present" | "late" | "absent"; occurredAt?: string; amount?: number },
+  ) => Promise<ScanResult>;
+  /** Removes one automatic weekly-absence charge and refunds it. */
+  deleteAbsencePenalty: (penaltyId: string) => Promise<ScanResult>;
+  /** Writes ONE tariff for every group of a course (same class + module +
+   *  teacher), creating the missing ones. Returns how many groups were priced. */
+  setSubscriptionPrice: (
+    sessionId: string,
+    price: number,
+    levelPrice?: number,
+    periodMonths?: number,
+  ) => Promise<{ ok: boolean; groups?: number; created?: number; updated?: number }>;
+  /** Deletes the tariff of a whole course (every group). */
+  deleteSubscriptionPrice: (sessionId: string) => Promise<{ ok: boolean; deleted?: number }>;
   /** Bills every module a student has been absent on for a full week (idempotent,
    *  server-side). Returns how many weekly charges were written. */
   processWeeklyAbsences: () => Promise<{ ok: boolean; charged?: number; students?: number }>;
@@ -728,6 +755,71 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  updateAttendance: async (attendanceId, fields) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("update_attendance", {
+      p_attendance_id: attendanceId,
+      p_status: fields.status ?? null,
+      p_occurred_at: fields.occurredAt ?? null,
+      p_amount: fields.amount === undefined ? null : Math.round(fields.amount),
+    });
+    if (error || !data) {
+      console.error("update_attendance failed:", error?.message);
+      return { ok: false, messageKey: "scan.error" };
+    }
+    const res = data as ScanResult;
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  deleteAbsencePenalty: async (penaltyId) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("delete_absence_penalty", {
+      p_penalty_id: penaltyId,
+    });
+    if (error || !data) {
+      console.error("delete_absence_penalty failed:", error?.message);
+      return { ok: false, messageKey: "scan.error" };
+    }
+    const res = data as ScanResult;
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  // One tariff per COURSE, not per group: the RPC writes/updates the
+  // subscription of every sibling timing (same class + module + teacher) in one
+  // transaction, so two groups of the same course can never drift apart.
+  setSubscriptionPrice: async (sessionId, price, levelPrice, periodMonths) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("set_subscription_price", {
+      p_session_id: sessionId,
+      p_price: Math.round(price || 0),
+      p_level_price: levelPrice === undefined ? null : Math.round(levelPrice),
+      p_period_months: periodMonths === undefined ? null : Math.round(periodMonths),
+    });
+    if (error || !data) {
+      console.error("set_subscription_price failed:", error?.message);
+      return { ok: false };
+    }
+    const res = data as { ok: boolean; groups?: number; created?: number; updated?: number };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  deleteSubscriptionPrice: async (sessionId) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("delete_subscription_price", {
+      p_session_id: sessionId,
+    });
+    if (error || !data) {
+      console.error("delete_subscription_price failed:", error?.message);
+      return { ok: false };
+    }
+    const res = data as { ok: boolean; deleted?: number };
     if (res.ok) await get().fetchAll();
     return res;
   },
