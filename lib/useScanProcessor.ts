@@ -7,6 +7,66 @@ import { useToast } from "@/lib/store/toast";
 import { formatDA } from "@/lib/utils";
 import { studentName } from "@/lib/helpers";
 import { speakMessage, speechCaseForScan } from "@/lib/speech";
+import { buildBalanceAlert } from "@/lib/whatsapp/alert";
+import type { Parent, School, Student } from "@/lib/types";
+
+/** Alertes automatiques déjà parties dans cette session applicative, pour ne pas
+ *  renvoyer un WhatsApp si le même scan accepté est traité deux fois (double
+ *  déclenchement de l'événement clavier, remontage React). Clé stable = élève +
+ *  séance + jour ; côté serveur, le cooldown de 30 min du RPC empêche déjà un
+ *  second scan accepté sur le même créneau. */
+const sentAlertKeys = new Set<string>();
+
+/** Envoie l'alerte de solde par WhatsApp via /api/whatsapp/send — le seul chemin
+ *  qui détient la clé OpenWA. Volontairement « fire-and-forget » et sans jamais
+ *  lever d'exception : un échec de la passerelle ne doit casser ni le scan ni la
+ *  transaction déjà écrite. */
+async function sendAutoBalanceAlert(opts: {
+  student: Student;
+  parent?: Parent | null;
+  school?: School | null;
+  lang: "fr" | "ar";
+  low: boolean;
+  dedupKey: string;
+}): Promise<void> {
+  if (sentAlertKeys.has(opts.dedupKey)) return;
+
+  const payload = buildBalanceAlert({
+    student: opts.student,
+    parent: opts.parent,
+    school: opts.school,
+    lang: opts.lang,
+    low: opts.low,
+  });
+  // Aucun numéro exploitable (ni parent ni élève), ou rien à signaler.
+  if (!payload) return;
+
+  // Marqué avant l'attente : deux traitements quasi simultanés du même scan ne
+  // partent qu'une fois. La clé est relâchée en cas d'échec réseau/passerelle,
+  // pour qu'un prochain scan accepté puisse retenter.
+  sentAlertKeys.add(opts.dedupKey);
+
+  try {
+    const response = await fetch("/api/whatsapp/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ recipients: [payload] }),
+    });
+    if (!response.ok) {
+      sentAlertKeys.delete(opts.dedupKey);
+      const info = (await response.json().catch(() => null)) as { error?: string } | null;
+      // Jamais la clé ni le corps complet en clair : juste de quoi diagnostiquer.
+      console.warn(
+        `[whatsapp] alerte automatique non envoyée (${response.status}) : ${info?.error ?? "erreur passerelle"}`,
+      );
+    }
+  } catch (err) {
+    sentAlertKeys.delete(opts.dedupKey);
+    console.warn(
+      `[whatsapp] alerte automatique en échec : ${err instanceof Error ? err.message : "réseau injoignable"}`,
+    );
+  }
+}
 
 /**
  * The single check-in pipeline shared by every entry point — the hardware
@@ -16,7 +76,7 @@ import { speakMessage, speechCaseForScan } from "@/lib/speech";
  * a manually typed code behaves exactly like a card swipe.
  */
 export function useScanProcessor() {
-  const { scanCard, scanWorkerCard, students, subscriptions, push } = useData();
+  const { scanCard, scanWorkerCard, students, subscriptions, parents, school, push } = useData();
   const { language, autoSendWhatsapp, autoSendEmail } = useSettings();
   const { addToast } = useToast();
 
@@ -104,11 +164,12 @@ export function useScanProcessor() {
 
         let autoSentAlert = false;
 
-        // Send automatic alert if low/debt and toggles are active
+        // Alerte automatique de solde (faible ou en dette).
         if ((isLow || isDebt) && (autoSendWhatsapp || autoSendEmail)) {
           autoSentAlert = true;
 
-          // Push parent notification
+          // Notification interne au parent — inchangée : c'est la trace visible
+          // dans l'espace parent, indépendante de l'envoi WhatsApp.
           if (student.parentId) {
             const parentId = student.parentId;
             const newNtf = {
@@ -123,6 +184,25 @@ export function useScanProcessor() {
               auto: true,
             };
             push("notifications", newNtf);
+          }
+
+          // Transport WhatsApp réel — conditionné au seul interrupteur WhatsApp,
+          // et non bloquant : le verdict du scan et son toast s'affichent sans
+          // attendre la passerelle, et un échec d'envoi reste sans effet sur la
+          // présence et le débit déjà écrits. Le parent rattaché est visé en
+          // priorité ; à défaut, l'élève lui-même (résolu dans buildBalanceAlert).
+          if (autoSendWhatsapp) {
+            const parent = student.parentId
+              ? parents.find((p) => p.id === student.parentId)
+              : undefined;
+            void sendAutoBalanceAlert({
+              student,
+              parent,
+              school,
+              lang: language === "ar" ? "ar" : "fr",
+              low: isLow,
+              dedupKey: `${student.id}:${result.sessionId ?? "?"}:${new Date().toLocaleDateString("fr-CA")}`,
+            });
           }
         }
 
@@ -207,7 +287,7 @@ export function useScanProcessor() {
 
       return result;
     },
-    [scanCard, scanWorkerCard, students, subscriptions, language, autoSendWhatsapp, autoSendEmail, addToast, push],
+    [scanCard, scanWorkerCard, students, subscriptions, parents, school, language, autoSendWhatsapp, autoSendEmail, addToast, push],
   );
 
   return processScan;

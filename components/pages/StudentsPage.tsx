@@ -68,7 +68,8 @@ import {
   type WhatsAppStudentContext,
 } from "@/components/whatsapp/WhatsAppMessageModal";
 import { isSendablePhone } from "@/lib/whatsapp/phone";
-import { getTemplate, suggestTemplate } from "@/lib/whatsapp/templates";
+import { suggestTemplate } from "@/lib/whatsapp/templates";
+import { buildBalanceAlert } from "@/lib/whatsapp/alert";
 import type { SendResponse } from "@/lib/whatsapp/types";
 
 /** Libellés des types de ligne du solde (onglet « Transactions »). */
@@ -819,29 +820,20 @@ export function StudentsPage() {
     });
 
     const msgLang = language === "ar" ? "ar" : "fr";
+    // Même résolution destinataire + modèle que l'alerte automatique du scan
+    // (lib/whatsapp/alert) : le parent rattaché s'il est joignable, sinon
+    // l'élève. On force ici le modèle « suggéré » historique pour ne rien
+    // changer au contenu de l'envoi groupé de cette fiche.
     const waRecipients = selected.flatMap((stu) => {
       const parent = parents.find((p) => p.id === stu.parentId);
-      // Le parent est le bon interlocuteur quand il existe ; l'élève prend le
-      // relais s'il n'y en a pas de rattaché.
-      const target = isSendablePhone(parent?.phone)
-        ? { phone: parent!.phone, name: `${parent!.firstName} ${parent!.lastName}`, isParent: true }
-        : isSendablePhone(stu.phone)
-          ? { phone: stu.phone, name: `${stu.firstName} ${stu.lastName}`, isParent: false }
-          : null;
-      if (!target) return [];
-
-      const text = getTemplate(suggestTemplate(stu)).build(
-        {
-          studentName: `${stu.firstName} ${stu.lastName}`,
-          balance: stu.balance,
-          registrationDue: stu.registrationDue,
-          schoolName: school?.name || "L'établissement",
-          schoolPhone: school?.phone,
-          audience: target.isParent ? "parent" : "student",
-        },
-        msgLang,
-      );
-      return [{ phone: target.phone, name: target.name, text }];
+      const payload = buildBalanceAlert({
+        student: stu,
+        parent,
+        school,
+        lang: msgLang,
+        templateId: suggestTemplate(stu),
+      });
+      return payload ? [payload] : [];
     });
 
     if (waRecipients.length === 0) {

@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Tests unitaires (vitest) : outillage de dev, hors périmètre de la build.
+    "tests/**",
   ]),
 ]);
 
