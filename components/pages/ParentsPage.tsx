@@ -9,8 +9,14 @@ import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Trash2, Edit, Eye, Plus, Send, Phone, Search, Users, Check, MoreVertical } from "lucide-react";
+import { Trash2, Edit, Eye, Plus, Send, Phone, Search, Users, Check, MoreVertical, MessageCircle } from "lucide-react";
 import type { Parent, Student } from "@/lib/types";
+import {
+  WhatsAppMessageModal,
+  type WhatsAppRecipient,
+  type WhatsAppStudentContext,
+} from "@/components/whatsapp/WhatsAppMessageModal";
+import { isSendablePhone } from "@/lib/whatsapp/phone";
 
 export function ParentsPage() {
   const { parents, students, push, deleteFrom, updateItem } = useData();
@@ -39,6 +45,12 @@ export function ParentsPage() {
   const [msgDescription, setMsgDescription] = useState("");
 
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+
+  // WhatsApp
+  const [waTarget, setWaTarget] = useState<{
+    recipients: WhatsAppRecipient[];
+    students: WhatsAppStudentContext[];
+  } | null>(null);
 
   // Helpers
   const getParentChildren = (parent: Parent) => {
@@ -196,6 +208,29 @@ export function ParentsPage() {
     setActiveMenuId(null);
   };
 
+  /** Envoi WhatsApp au parent. Les enfants rattachés alimentent les modèles
+   *  d'alerte (dette, solde épuisé) ; l'élève concerné se choisit dans la
+   *  fenêtre quand le parent en a plusieurs. */
+  const openWhatsApp = (p: Parent) => {
+    setWaTarget({
+      recipients: [
+        {
+          id: `parent-${p.id}`,
+          name: `${p.firstName} ${p.lastName}`,
+          phone: p.phone,
+          role: "parent",
+        },
+      ],
+      students: getParentChildren(p).map((c) => ({
+        id: c.id,
+        name: `${c.firstName} ${c.lastName}`,
+        balance: c.balance,
+        registrationDue: c.registrationDue,
+      })),
+    });
+    setActiveMenuId(null);
+  };
+
   const getFilteredStudentsForLinking = () => {
     return students.filter((s) => {
       const fullName = `${s.firstName} ${s.lastName}`.toLowerCase();
@@ -274,10 +309,22 @@ export function ParentsPage() {
                               <Eye className="h-4 w-4" /> Voir Détails
                             </button>
                             <button
+                              onClick={() => openWhatsApp(p)}
+                              disabled={!isSendablePhone(p.phone)}
+                              title={
+                                isSendablePhone(p.phone)
+                                  ? "Envoyer un message WhatsApp à ce parent"
+                                  : "Numéro de téléphone inexploitable"
+                              }
+                              className="flex items-center gap-2 w-full px-4 py-2 text-sm text-emerald-600 hover:bg-emerald-500/10 text-left disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+                            >
+                              <MessageCircle className="h-4 w-4" /> Message WhatsApp
+                            </button>
+                            <button
                               onClick={() => openMessage(p)}
                               className="flex items-center gap-2 w-full px-4 py-2 text-sm text-primary hover:bg-primary-50 text-left"
                             >
-                              <Send className="h-4 w-4" /> Envoyer Message
+                              <Send className="h-4 w-4" /> Notification App
                             </button>
                             <button
                               onClick={() => openEdit(p)}
@@ -514,7 +561,7 @@ export function ParentsPage() {
       </Modal>
 
       {/* Message Send Modal */}
-      <Modal open={isMessageOpen} onClose={() => setIsMessageOpen(false)} title="Envoyer un message au Parent">
+      <Modal open={isMessageOpen} onClose={() => setIsMessageOpen(false)} title="Notification dans l'application">
         <div className="space-y-4">
           <div>
             <label className="block text-xs font-semibold text-muted mb-1">Titre de la notification *</label>
@@ -540,6 +587,15 @@ export function ParentsPage() {
           </div>
         </div>
       </Modal>
+
+      {/* Envoi WhatsApp au parent */}
+      {waTarget && (
+        <WhatsAppMessageModal
+          onClose={() => setWaTarget(null)}
+          recipients={waTarget.recipients}
+          students={waTarget.students}
+        />
+      )}
     </div>
   );
 }
