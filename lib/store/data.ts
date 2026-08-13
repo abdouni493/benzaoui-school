@@ -7,6 +7,7 @@ import type {
   Announcement,
   AttendanceRecord,
   BalanceTransaction,
+  BalanceTxType,
   CashTransaction,
   Coursework,
   Expense,
@@ -531,6 +532,16 @@ export interface ScanResult {
   messageKey: string;
 }
 
+/** Result of a balance-transaction correction (edit / delete). */
+export interface BalanceTxResult {
+  ok: boolean;
+  /** the student's balance once the correction was applied */
+  newBalance?: number;
+  /** a compensating cash entry was written (the row was a "topup") */
+  cashAdjusted?: boolean;
+  error?: string;
+}
+
 export interface TeacherSettlement {
   ok: boolean;
   net?: number;
@@ -603,6 +614,21 @@ interface DataActions {
     settleRegistration?: boolean,
   ) => Promise<void>;
   payDebt: (studentId: string, amount: number) => Promise<void>;
+  /** Corrects one balance_tx row (amount / description / date / type) and
+   *  carries the difference over to the student's balance atomically. */
+  updateBalanceTx: (
+    txId: string,
+    fields: {
+      amount: number;
+      description?: string;
+      date?: string;
+      type?: BalanceTxType;
+      /** a "topup" also hit the caisse: write the compensating cash entry */
+      adjustCash?: boolean;
+    },
+  ) => Promise<BalanceTxResult>;
+  /** Deletes one balance_tx row and undoes its effect on the balance. */
+  deleteBalanceTx: (txId: string, adjustCash?: boolean) => Promise<BalanceTxResult>;
   deleteFrom: <K extends keyof Database>(key: K, id: string) => void;
   push: <K extends keyof Database>(
     key: K,
@@ -845,6 +871,43 @@ export const useData = create<DataStore>((set, get) => ({
       p_amount: amount,
     });
     if (!error) await get().fetchAll();
+  },
+
+  // Editing/deleting a transaction has to move students.balance by exactly the
+  // same amount, so both live in one server-side RPC — a client-side pair of
+  // writes could leave the balance out of sync with its own history.
+  updateBalanceTx: async (txId, fields) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("update_balance_tx", {
+      p_tx_id: txId,
+      p_amount: Math.round(fields.amount),
+      p_description: fields.description ?? null,
+      p_date: fields.date ?? null,
+      p_type: fields.type ?? null,
+      p_adjust_cash: fields.adjustCash ?? true,
+    });
+    if (error || !data) {
+      console.error("update_balance_tx failed:", error?.message);
+      return { ok: false, error: error?.message };
+    }
+    const res = data as BalanceTxResult;
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  deleteBalanceTx: async (txId, adjustCash = true) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("delete_balance_tx", {
+      p_tx_id: txId,
+      p_adjust_cash: adjustCash,
+    });
+    if (error || !data) {
+      console.error("delete_balance_tx failed:", error?.message);
+      return { ok: false, error: error?.message };
+    }
+    const res = data as BalanceTxResult;
+    if (res.ok) await get().fetchAll();
+    return res;
   },
 
   push: (key, item) => {

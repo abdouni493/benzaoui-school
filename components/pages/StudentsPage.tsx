@@ -36,6 +36,7 @@ import type {
   DiscountType,
   Coursework,
   BalanceTransaction,
+  BalanceTxType,
 } from "@/lib/types";
 import {
   addMonths,
@@ -51,6 +52,14 @@ import { printHtmlDocument } from "@/lib/print";
 import { buildStudentPaymentsReport } from "@/lib/reports/studentPayments";
 import { speakMessage, speechCaseForScan } from "@/lib/speech";
 import { useToast } from "@/lib/store/toast";
+
+/** Libellés des types de ligne du solde (onglet « Transactions »). */
+const TX_TYPE_LABELS: Record<BalanceTxType, string> = {
+  topup: "Versement / Recharge",
+  deduction: "Débit (séance, absence…)",
+  debt_payment: "Règlement de dette",
+  registration: "Frais d'inscription",
+};
 
 export function StudentsPage() {
   const {
@@ -75,6 +84,8 @@ export function StudentsPage() {
     updateItem,
     addBalance,
     payDebt,
+    updateBalanceTx,
+    deleteBalanceTx,
     scanCard,
     setStudentPassword,
   } = useData();
@@ -166,6 +177,16 @@ export function StudentsPage() {
   const [attMonth, setAttMonth] = useState("");
   const [attStart, setAttStart] = useState("");
   const [attEnd, setAttEnd] = useState("");
+
+  // Correcting one line of the transaction history (edit / delete)
+  const [editingTx, setEditingTx] = useState<BalanceTransaction | null>(null);
+  const [deletingTx, setDeletingTx] = useState<BalanceTransaction | null>(null);
+  const [txAmount, setTxAmount] = useState<number>(0);
+  const [txDescription, setTxDescription] = useState("");
+  const [txDate, setTxDate] = useState("");
+  const [txType, setTxType] = useState<BalanceTxType>("topup");
+  const [txAdjustCash, setTxAdjustCash] = useState(true);
+  const [txBusy, setTxBusy] = useState(false);
 
   // The selected student is a snapshot: re-sync it after every store refresh
   // (scan, topup, fetchAll) so the detail view never shows stale data.
@@ -442,6 +463,72 @@ export function StudentsPage() {
         description: "Frais d'inscription réglés",
       });
     }
+  };
+
+  // ---- Correcting one transaction of the student's history -------------------
+  // The list renders `tx.date` raw, so the edit box works on the very same
+  // string (what the row shows is what you edit).
+  const txDateToInput = (iso: string) => iso.substring(0, 16);
+  const txInputToIso = (value: string) => (value.length === 16 ? `${value}:00.000Z` : new Date(value).toISOString());
+
+  const openEditTx = (tx: BalanceTransaction) => {
+    setEditingTx(tx);
+    setTxAmount(tx.amount);
+    setTxDescription(tx.description);
+    setTxDate(txDateToInput(tx.date));
+    setTxType(tx.type);
+    setTxAdjustCash(true);
+  };
+
+  const openDeleteTx = (tx: BalanceTransaction) => {
+    setDeletingTx(tx);
+    setTxAdjustCash(true);
+  };
+
+  const closeTxModals = () => {
+    setEditingTx(null);
+    setDeletingTx(null);
+    setTxBusy(false);
+  };
+
+  const handleUpdateTx = async () => {
+    if (!editingTx || !txDate) return;
+    setTxBusy(true);
+    const res = await updateBalanceTx(editingTx.id, {
+      amount: Math.round(txAmount),
+      description: txDescription,
+      date: txInputToIso(txDate),
+      type: txType,
+      adjustCash: txAdjustCash,
+    });
+    setTxBusy(false);
+    if (!res.ok) {
+      addToast({ type: "danger", title: "Modification impossible", message: res.error ?? "La transaction n'a pas pu être modifiée." });
+      return;
+    }
+    addToast({
+      type: "success",
+      title: "Transaction modifiée",
+      message: `Nouveau solde: ${res.newBalance} DA${res.cashAdjusted ? " — caisse corrigée." : ""}`,
+    });
+    closeTxModals();
+  };
+
+  const handleDeleteTx = async () => {
+    if (!deletingTx) return;
+    setTxBusy(true);
+    const res = await deleteBalanceTx(deletingTx.id, txAdjustCash);
+    setTxBusy(false);
+    if (!res.ok) {
+      addToast({ type: "danger", title: "Suppression impossible", message: res.error ?? "La transaction n'a pas pu être supprimée." });
+      return;
+    }
+    addToast({
+      type: "success",
+      title: "Transaction supprimée",
+      message: `Nouveau solde: ${res.newBalance} DA${res.cashAdjusted ? " — caisse corrigée." : ""}`,
+    });
+    closeTxModals();
   };
 
   const handleScanCard = async () => {
@@ -2009,20 +2096,39 @@ export function StudentsPage() {
                           return (
                             <div
                               key={tx.id}
-                              className={`flex justify-between items-center text-xs p-3 rounded-xl border ${
+                              className={`flex justify-between items-center gap-2 text-xs p-3 rounded-xl border ${
                                 isAbsence ? "bg-warning/5 border-warning/40" : "bg-canvas border-line"
                               }`}
                             >
-                              <div>
+                              <div className="min-w-0">
                                 <strong className="text-ink block flex items-center gap-1.5">
                                   {isAbsence && <Badge tone="warning">Absence</Badge>}
                                   {tx.description}
                                 </strong>
-                                <span className="text-[10px] text-muted">{tx.date.substring(0, 16).replace("T", " ")}</span>
+                                <span className="text-[10px] text-muted">
+                                  {tx.date.substring(0, 16).replace("T", " ")} · {TX_TYPE_LABELS[tx.type]}
+                                </span>
                               </div>
-                              <strong className={tx.amount > 0 ? "text-success font-bold" : "text-danger font-bold"}>
-                                {tx.amount > 0 ? `+${tx.amount}` : tx.amount} DA
-                              </strong>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <strong className={tx.amount > 0 ? "text-success font-bold" : "text-danger font-bold"}>
+                                  {tx.amount > 0 ? `+${tx.amount}` : tx.amount} DA
+                                </strong>
+                                {/* Correction manuelle d'une ligne (montant saisi de travers, doublon…) */}
+                                <button
+                                  onClick={() => openEditTx(tx)}
+                                  title="Modifier cette transaction"
+                                  className="p-1.5 rounded-lg text-muted hover:bg-primary-50 hover:text-primary transition-colors"
+                                >
+                                  <Edit className="h-3.5 w-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => openDeleteTx(tx)}
+                                  title="Supprimer cette transaction"
+                                  className="p-1.5 rounded-lg text-muted hover:bg-danger/10 hover:text-danger transition-colors"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             </div>
                           );
                         })
@@ -2180,6 +2286,157 @@ export function StudentsPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      {/* Edit one line of the balance history — the RPC moves students.balance
+          by the same delta, so history and balance can never drift apart. */}
+      <Modal open={!!editingTx} onClose={closeTxModals} title="Modifier la transaction">
+        {editingTx && (() => {
+          const owner = students.find((s) => s.id === editingTx.studentId);
+          const previewBalance = (owner?.balance ?? 0) - editingTx.amount + Math.round(txAmount || 0);
+          const delta = Math.round(txAmount || 0) - editingTx.amount;
+          return (
+            <div className="space-y-4">
+              <div className="bg-canvas border border-line rounded-xl p-3 text-xs space-y-0.5">
+                <strong className="text-ink block">
+                  {owner ? `${owner.firstName} ${owner.lastName}` : "Étudiant"}
+                </strong>
+                <span className="text-muted block">
+                  Ligne d&apos;origine : {editingTx.amount > 0 ? `+${editingTx.amount}` : editingTx.amount} DA ·{" "}
+                  {editingTx.date.substring(0, 16).replace("T", " ")}
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1">Type</label>
+                <Select value={txType} onChange={(e) => setTxType(e.target.value as BalanceTxType)} className="w-full">
+                  {(Object.keys(TX_TYPE_LABELS) as BalanceTxType[]).map((t) => (
+                    <option key={t} value={t}>{TX_TYPE_LABELS[t]}</option>
+                  ))}
+                </Select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1">Montant (DA)</label>
+                <Input
+                  type="number"
+                  value={txAmount}
+                  onChange={(e) => setTxAmount(Number(e.target.value))}
+                />
+                <p className="text-[10px] text-muted mt-1">
+                  Montant signé : <strong>positif</strong> pour un versement/crédit, <strong>négatif</strong> pour un débit.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1">Description</label>
+                <Input value={txDescription} onChange={(e) => setTxDescription(e.target.value)} />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1">Date</label>
+                <Input type="datetime-local" value={txDate} onChange={(e) => setTxDate(e.target.value)} />
+              </div>
+
+              {editingTx.type === "topup" && (
+                <label className="flex items-center justify-between p-3 bg-canvas border border-line rounded-xl cursor-pointer">
+                  <span className="text-xs font-bold text-ink">
+                    Corriger aussi la caisse
+                    <span className="block text-[10px] font-normal text-muted">
+                      Écrit une écriture de correction de {delta > 0 ? `+${delta}` : delta} DA dans la caisse
+                      (le versement d&apos;origine y avait été enregistré).
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={txAdjustCash}
+                    onChange={(e) => setTxAdjustCash(e.target.checked)}
+                    className="h-5 w-5 shrink-0"
+                  />
+                </label>
+              )}
+
+              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
+                <span className="font-semibold text-muted">Solde après correction</span>
+                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={closeTxModals} disabled={txBusy}>
+                  Annuler
+                </Button>
+                <Button onClick={handleUpdateTx} disabled={txBusy || !txDate}>
+                  {txBusy ? "Enregistrement…" : "Enregistrer"}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Delete one line of the balance history */}
+      <Modal open={!!deletingTx} onClose={closeTxModals} title="Supprimer la transaction">
+        {deletingTx && (() => {
+          const owner = students.find((s) => s.id === deletingTx.studentId);
+          const previewBalance = (owner?.balance ?? 0) - deletingTx.amount;
+          return (
+            <div className="space-y-4">
+              <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
+                <AlertTriangle className="h-4 w-4 text-danger shrink-0 mt-0.5" />
+                <p className="text-xs text-ink leading-relaxed">
+                  Cette transaction sera définitivement supprimée et son effet sur le solde annulé.
+                  {deletingTx.type === "deduction" && (
+                    <span className="block mt-1 text-muted">
+                      La présence liée (onglet « Présences ») n&apos;est pas supprimée pour autant.
+                    </span>
+                  )}
+                </p>
+              </div>
+
+              <div className="bg-canvas border border-line rounded-xl p-3 text-xs space-y-0.5">
+                <strong className="text-ink block">{deletingTx.description}</strong>
+                <span className="text-muted block">
+                  {owner ? `${owner.firstName} ${owner.lastName} · ` : ""}
+                  {deletingTx.date.substring(0, 16).replace("T", " ")} · {TX_TYPE_LABELS[deletingTx.type]}
+                </span>
+                <strong className={deletingTx.amount > 0 ? "text-success" : "text-danger"}>
+                  {deletingTx.amount > 0 ? `+${deletingTx.amount}` : deletingTx.amount} DA
+                </strong>
+              </div>
+
+              {deletingTx.type === "topup" && (
+                <label className="flex items-center justify-between p-3 bg-canvas border border-line rounded-xl cursor-pointer">
+                  <span className="text-xs font-bold text-ink">
+                    Corriger aussi la caisse
+                    <span className="block text-[10px] font-normal text-muted">
+                      Écrit une écriture d&apos;annulation de {-deletingTx.amount} DA dans la caisse.
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={txAdjustCash}
+                    onChange={(e) => setTxAdjustCash(e.target.checked)}
+                    className="h-5 w-5 shrink-0"
+                  />
+                </label>
+              )}
+
+              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
+                <span className="font-semibold text-muted">Solde après suppression</span>
+                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="outline" onClick={closeTxModals} disabled={txBusy}>
+                  Annuler
+                </Button>
+                <Button variant="danger" onClick={handleDeleteTx} disabled={txBusy}>
+                  {txBusy ? "Suppression…" : "Supprimer"}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
 
       {/* Assign Subscriptions Modal */}
