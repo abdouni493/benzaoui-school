@@ -917,8 +917,17 @@ export function AttendancePage() {
                                 {h.status === "present" ? "Présent" : "En Retard"}
                               </Badge>
                             </td>
-                            <td className="p-4 font-bold text-danger font-mono">
-                              -{formatDA(h.amountDeducted)}
+                            <td className="p-4 font-mono font-bold text-danger">
+                              {h.freePeriodId ? (
+                                <span className="inline-flex flex-col gap-0.5">
+                                  <span className="text-success">Offert</span>
+                                  <span className="font-sans text-[10px] font-semibold text-muted">
+                                    Période gratuite ({formatDA(h.waivedAmount ?? 0)})
+                                  </span>
+                                </span>
+                              ) : (
+                                <>-{formatDA(h.amountDeducted)}</>
+                              )}
                             </td>
                             <td className="p-4 text-center">
                               <button

@@ -13,6 +13,8 @@ import type {
   Expense,
   ExpenseCategory,
   Filiere,
+  FreePeriod,
+  FreePeriodStat,
   Group,
   IndependentSession,
   Module,
@@ -49,6 +51,7 @@ export interface Database {
   workerShifts: WorkerShift[];
   sessions: ScheduleSession[];
   subscriptions: Subscription[];
+  freePeriods: FreePeriod[];
   students: Student[];
   studentCredentials: StudentCredential[];
   moduleAbsenceRules: ModuleAbsenceRule[];
@@ -98,6 +101,7 @@ function emptyDatabase(): Database {
     workerShifts: [],
     sessions: [],
     subscriptions: [],
+    freePeriods: [],
     students: [],
     studentCredentials: [],
     moduleAbsenceRules: [],
@@ -291,6 +295,19 @@ const subscriptionsMapper = makeMapper<Subscription>([
   ["periodMonths", "period_months"],
 ]);
 
+const freePeriodsMapper = makeMapper<FreePeriod>([
+  ["id", "id"],
+  ["name", "name"],
+  ["description", "description"],
+  ["startDate", "start_date"],
+  ["endDate", "end_date"],
+  ["allClasses", "all_classes"],
+  ["classIds", "class_ids"],
+  ["payTeachers", "pay_teachers"],
+  ["active", "active"],
+  ["createdAt", "created_at"],
+]);
+
 const balanceTxMapper = makeMapper<BalanceTransaction>([
   ["id", "id"],
   ["studentId", "student_id"],
@@ -309,6 +326,8 @@ const attendanceMapper = makeMapper<AttendanceRecord>([
   ["amountDeducted", "amount_deducted"],
   ["status", "status"],
   ["substituteGroup", "substitute_group"],
+  ["freePeriodId", "free_period_id"],
+  ["waivedAmount", "waived_amount"],
 ]);
 
 const absencePenaltiesMapper = makeMapper<AbsencePenalty>([
@@ -436,6 +455,7 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
   moduleAbsenceRules: { table: "module_absence_rules", select: "*", ...moduleAbsenceRulesMapper },
   sessions: { table: "sessions", select: "*", ...sessionsMapper },
   subscriptions: { table: "subscriptions", select: "*", ...subscriptionsMapper },
+  freePeriods: { table: "free_periods", select: "*", ...freePeriodsMapper },
   students: {
     table: "students",
     // `(*)` instead of explicit columns so the fetch keeps working before the
@@ -538,6 +558,12 @@ export interface ScanResult {
   otherGroup?: boolean;
   /** the group he is actually enrolled in (only set when otherGroup) */
   ownGroupName?: string;
+  /** a "période gratuite" covered the séance: presence written, balance intact */
+  free?: boolean;
+  /** label of that free period */
+  freePeriodName?: string;
+  /** what the free period offered on this scan (the price NOT charged) */
+  waived?: number;
   messageKey: string;
 }
 
@@ -604,6 +630,10 @@ interface DataActions {
   ) => Promise<{ ok: boolean; groups?: number; created?: number; updated?: number }>;
   /** Deletes the tariff of a whole course (every group). */
   deleteSubscriptionPrice: (sessionId: string) => Promise<{ ok: boolean; deleted?: number }>;
+  /** Cost of every "période gratuite" (presences, students, total offered),
+   *  aggregated server-side so the totals never depend on how many attendance
+   *  rows the browser managed to load. */
+  fetchFreePeriodStats: () => Promise<FreePeriodStat[]>;
   /** Bills every module a student has been absent on for a full week (idempotent,
    *  server-side). Returns how many weekly charges were written. */
   processWeeklyAbsences: () => Promise<{ ok: boolean; charged?: number; students?: number }>;
@@ -822,6 +852,18 @@ export const useData = create<DataStore>((set, get) => ({
     const res = data as { ok: boolean; deleted?: number };
     if (res.ok) await get().fetchAll();
     return res;
+  },
+
+  fetchFreePeriodStats: async () => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("free_period_stats", {
+      p_free_period_id: null,
+    });
+    if (error || !data) {
+      // Migration not applied yet, or caller is not staff — no totals to show.
+      return [];
+    }
+    return data as FreePeriodStat[];
   },
 
   // Automatic weekly-absence billing lives entirely in the process_weekly_absences

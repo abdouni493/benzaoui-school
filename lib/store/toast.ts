@@ -11,6 +11,10 @@ export interface Toast {
   cost?: number;
   newBalance?: number;
   autoSentAlert?: boolean;
+  /** séance offered by a "période gratuite": the price that was NOT charged */
+  waived?: number;
+  /** name of that free period */
+  freePeriodName?: string;
 }
 
 interface ToastState {

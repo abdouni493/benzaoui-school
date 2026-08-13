@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { useToast, type Toast } from "@/lib/store/toast";
-import { X, CheckCircle, AlertTriangle, Info, Bell } from "lucide-react";
+import { X, CheckCircle, AlertTriangle, Info, Bell, Gift } from "lucide-react";
 import { formatDA } from "@/lib/utils";
 import { preloadSpeech } from "@/lib/speech";
 import { useScanProcessor } from "@/lib/useScanProcessor";
@@ -148,6 +148,12 @@ function ToastCard({ toast, onClose }: { toast: Toast; onClose: () => void }) {
                 <strong className="text-danger font-semibold">-{formatDA(toast.cost)}</strong>
               </div>
             )}
+            {toast.waived !== undefined && toast.waived > 0 && (
+              <div className="flex justify-between">
+                <span className="text-muted">Offert:</span>
+                <strong className="text-success font-semibold">{formatDA(toast.waived)}</strong>
+              </div>
+            )}
             {toast.newBalance !== undefined && (
               <div className="flex justify-between">
                 <span className="text-muted">Nouveau Solde:</span>
@@ -156,6 +162,13 @@ function ToastCard({ toast, onClose }: { toast: Toast; onClose: () => void }) {
                 </span>
               </div>
             )}
+          </div>
+        )}
+
+        {toast.freePeriodName && (
+          <div className="mt-1 flex items-center gap-1.5 rounded-lg border border-success/20 bg-success/10 px-2 py-1 text-[10px] font-semibold text-success">
+            <Gift className="h-3 w-3" />
+            Période gratuite : {toast.freePeriodName}
           </div>
         )}
 

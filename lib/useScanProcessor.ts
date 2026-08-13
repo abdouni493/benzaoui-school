@@ -135,6 +135,12 @@ export function useScanProcessor() {
           : undefined;
         const isLate = result.messageKey === "scan.successLate";
         const isAlready = result.messageKey === "scan.alreadyPresent";
+        // Période gratuite: the presence is written exactly as usual, only the
+        // deduction is skipped — so reception sees what was offered, not a bug.
+        const isFreePeriod = !!result.free;
+        const freeNote = isFreePeriod
+          ? ` PÉRIODE GRATUITE${result.freePeriodName ? ` « ${result.freePeriodName} »` : ""} : séance offerte, aucun débit sur le solde.`
+          : "";
         const substitution = result.otherGroup
           ? ` Rattrapage : présence enregistrée sur le groupe ${result.groupName ?? "suivi"}${
               result.ownGroupName ? ` (inscrit en ${result.ownGroupName})` : ""
@@ -148,20 +154,24 @@ export function useScanProcessor() {
             ? "Déjà pointé — aucun débit"
             : isDebt
               ? "Présence enregistrée — SOLDE EN DETTE"
-              : isLate
-                ? "Présence en Retard"
-                : result.otherGroup
-                  ? "Présence Enregistrée — Rattrapage"
-                  : "Présence Enregistrée",
+              : isFreePeriod
+                ? "Présence Enregistrée — GRATUIT"
+                : isLate
+                  ? "Présence en Retard"
+                  : result.otherGroup
+                    ? "Présence Enregistrée — Rattrapage"
+                    : "Présence Enregistrée",
           message: isAlready
             ? `L'élève a déjà pointé pour ${sessionInfo ?? "cette séance"} aujourd'hui.${substitution}`
             : isDebt
               ? `${sessionInfo ? `Séance ${sessionInfo}. ` : ""}Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée.${substitution}`
-              : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.${substitution}`,
+              : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.${substitution}${freeNote}`,
           studentName: studentName(student),
           cost: result.cost,
           newBalance: result.newBalance,
           autoSentAlert,
+          waived: result.waived,
+          freePeriodName: isFreePeriod ? result.freePeriodName ?? "période en cours" : undefined,
         });
       } else {
         // Show failure toast — surface the exact reason so reception sees why

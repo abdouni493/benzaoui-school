@@ -206,6 +206,40 @@ export interface SubscriptionDiscount {
   value: number;
 }
 
+/**
+ * "Période gratuite": a date window during which attending is offered. The card
+ * is scanned and the presence is written exactly as usual, but the séance price
+ * is NEVER taken off the student's balance — it is stored on the presence
+ * (`waivedAmount`) so the school can see what the period cost it.
+ */
+export interface FreePeriod {
+  id: string;
+  /** short label shown on the card, e.g. "Semaine portes ouvertes" */
+  name: string;
+  description: string;
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  /** covers every class (the default); otherwise only `classIds` */
+  allClasses: boolean;
+  classIds: string[];
+  /** teachers still earn their percentage on an offered séance */
+  payTeachers: boolean;
+  /** suspends the period without losing its history */
+  active: boolean;
+  createdAt?: string;
+}
+
+/** Server-side totals of one free period (never truncated by a row limit). */
+export interface FreePeriodStat {
+  id: string;
+  /** presences recorded during the period */
+  presences: number;
+  /** distinct students who benefited from it */
+  students: number;
+  /** what those presences would have cost the students = cost of the period */
+  waived: number;
+}
+
 /** Weekly-absence billing switch for a single module. */
 export interface ModuleAbsenceRule {
   moduleId: string;
@@ -289,6 +323,10 @@ export interface AttendanceRecord {
   /** the student attended ANOTHER group of the same course (same class + module)
    *  than the one he is enrolled in — a "rattrapage" */
   substituteGroup?: boolean;
+  /** the séance was offered by this free period (nothing was deducted) */
+  freePeriodId?: string;
+  /** the price the free period waived — 0 on every ordinary presence */
+  waivedAmount?: number;
 }
 
 export interface UnpaidTeacherSession {
