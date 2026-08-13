@@ -1,0 +1,16 @@
+# Caddy = terminaison TLS publique devant OpenWA (déploiement VPS).
+#
+# Le domaine est injecté par docker-compose.prod.yml via la variable
+# d'environnement OPENWA_DOMAIN (ex. wa.mon-ecole.dz). Caddy obtient et
+# renouvelle automatiquement un certificat Let's Encrypt pour ce domaine
+# (il faut que le domaine pointe vers le serveur et que les ports 80/443
+# soient ouverts).
+#
+# OpenWA n'est JAMAIS exposé directement : seul Caddy est public, et il relaie
+# vers le conteneur openwa sur le réseau interne du compose. L'API reste
+# protégée par la clé opérateur (en-tête X-API-Key).
+
+{$OPENWA_DOMAIN} {
+	encode gzip
+	reverse_proxy openwa:2785
+}
