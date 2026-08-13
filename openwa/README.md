@@ -69,8 +69,11 @@ Redémarrer `npm run dev`. Les boutons WhatsApp des fiches élèves et parents s
 
 ## Déploiement en production
 
-> 📘 **Procédure pas-à-pas complète (VPS + Caddy TLS + variables Vercel) : [DEPLOY.md](DEPLOY.md).**
-> Les fichiers prêts à l'emploi sont `docker-compose.prod.yml` et `Caddyfile`.
+> 📘 **Deux chemins pour le site en ligne (Vercel) :**
+> - **Gratuit, sans VPS** (tunnel depuis le PC de l'école) : [FREE-TUNNEL.md](FREE-TUNNEL.md)
+>   (`docker-compose.tunnel.yml`) — le site marche tant que ce PC est allumé.
+> - **Toujours actif (VPS + Caddy TLS)** : [DEPLOY.md](DEPLOY.md)
+>   (`docker-compose.prod.yml` + `Caddyfile`).
 
 L'application est déployée sur Vercel, qui est **serverless** : OpenWA ne peut pas y tourner.
 Il faut l'héberger ailleurs et le rendre joignable par Vercel :
