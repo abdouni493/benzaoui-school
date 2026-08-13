@@ -34,7 +34,8 @@ export async function GET() {
     return NextResponse.json<SessionStatePayload>({
       configured: true,
       status: session.status,
-      phoneNumber: session.phoneNumber ?? null,
+      // `phone` arrive en chiffres bruts (ex. "213555123456") une fois le compte lié.
+      phoneNumber: session.phone ? `+${session.phone}` : null,
       qrCode,
       lastError: session.lastError ?? null,
     });

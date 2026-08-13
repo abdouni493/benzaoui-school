@@ -107,7 +107,10 @@ export interface SessionInfo {
   id: string;
   name: string;
   status: SessionStatus;
-  phoneNumber?: string | null;
+  /** numéro lié, en chiffres bruts — renseigné une fois le QR code scanné */
+  phone?: string | null;
+  /** nom d'affichage WhatsApp du compte lié */
+  pushName?: string | null;
   lastError?: string | null;
 }
 
