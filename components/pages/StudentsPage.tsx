@@ -68,7 +68,6 @@ import {
   type WhatsAppStudentContext,
 } from "@/components/whatsapp/WhatsAppMessageModal";
 import { isSendablePhone } from "@/lib/whatsapp/phone";
-import { suggestTemplate } from "@/lib/whatsapp/templates";
 import { buildBalanceAlert } from "@/lib/whatsapp/alert";
 import type { SendResponse } from "@/lib/whatsapp/types";
 
@@ -826,8 +825,9 @@ export function StudentsPage() {
     const msgLang = language === "ar" ? "ar" : "fr";
     // Même résolution destinataire + modèle que l'alerte automatique du scan
     // (lib/whatsapp/alert) : le parent rattaché s'il est joignable, sinon
-    // l'élève. On force ici le modèle « suggéré » historique pour ne rien
-    // changer au contenu de l'envoi groupé de cette fiche.
+    // l'élève. `low: true` — ce bouton EST l'alerte « solde faible », donc un
+    // solde positif encore faible part en modèle « solde bientôt épuisé » plutôt
+    // qu'en message libre : un message proactif exige un modèle approuvé par Meta.
     const waRecipients = selected.flatMap((stu) => {
       const parent = parents.find((p) => p.id === stu.parentId);
       const payload = buildBalanceAlert({
@@ -835,7 +835,7 @@ export function StudentsPage() {
         parent,
         school,
         lang: msgLang,
-        templateId: suggestTemplate(stu),
+        low: true,
       });
       return payload ? [payload] : [];
     });

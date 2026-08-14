@@ -11,14 +11,17 @@ import { useToast } from "@/lib/store/toast";
 import { normalizePhone } from "@/lib/whatsapp/phone";
 import {
   MAX_MESSAGE_LENGTH,
+  META_TEMPLATE_CONFIG,
   WHATSAPP_TEMPLATES,
   getTemplate,
+  isAlertTemplate,
   suggestTemplate,
   type MessageLanguage,
+  type TemplateContext,
   type WhatsAppAudience,
   type WhatsAppTemplateId,
 } from "@/lib/whatsapp/templates";
-import type { SendResponse, SendResult } from "@/lib/whatsapp/types";
+import type { OutgoingMessage, SendResponse, SendResult } from "@/lib/whatsapp/types";
 import { AlertTriangle, Check, MessageCircle, Send, X } from "lucide-react";
 
 export interface WhatsAppRecipient {
@@ -157,21 +160,60 @@ export function WhatsAppMessageModal({
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
+  /** Contexte de l'élève sélectionné, pour construire les variables du modèle
+   *  Meta (nom, montant, école). L'audience ne change que l'aperçu, pas les
+   *  variables — un modèle approuvé porte sa propre formule d'adresse. */
+  const templateContext = (): TemplateContext => {
+    const student = students.find((s) => s.id === studentId) ?? null;
+    return {
+      studentName: student?.name ?? "",
+      balance: student?.balance ?? 0,
+      registrationDue: student?.registrationDue,
+      schoolName: school?.name || "L'établissement",
+      schoolPhone: school?.phone,
+      audience: audienceFor(recipients, selectedIds, students.length > 0),
+    };
+  };
+
+  /** Message à envoyer : modèle Meta approuvé pour une alerte, texte libre pour
+   *  « Message libre » (soumis à la fenêtre de service client de 24 h). */
+  const buildOutgoing = (): OutgoingMessage => {
+    if (isAlertTemplate(templateId)) {
+      return {
+        kind: "template",
+        templateId,
+        variables: META_TEMPLATE_CONFIG[templateId].buildVariables(templateContext()),
+        language: lang,
+      };
+    }
+    return { kind: "text", text: text.trim() };
+  };
+
+  const stripId = (id: string) => id.replace(/^(student|parent)-/, "");
+
   const handleSend = async () => {
     const chosen = sendable.filter((r) => selectedIds.includes(r.id) && r.normalized);
-    if (chosen.length === 0 || !text.trim()) return;
+    if (chosen.length === 0) return;
+    // Le message libre exige un texte ; un modèle porte son propre contenu.
+    if (!isAlertTemplate(templateId) && !text.trim()) return;
 
     setSending(true);
     setError(null);
     setResults(null);
 
     try {
+      const message = buildOutgoing();
       const response = await fetch("/api/whatsapp/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          recipients: chosen.map((r) => ({ phone: r.phone, name: r.name })),
-          text: text.trim(),
+          message,
+          recipients: chosen.map((r) => ({
+            phone: r.phone,
+            name: r.name,
+            studentId: r.role === "student" ? stripId(r.id) : studentId || undefined,
+            parentId: r.role === "parent" ? stripId(r.id) : undefined,
+          })),
         }),
       });
 
@@ -206,7 +248,10 @@ export function WhatsAppMessageModal({
   };
 
   const selectedCount = selectedIds.length;
-  const tooLong = text.length > MAX_MESSAGE_LENGTH;
+  const isTemplate = isAlertTemplate(templateId);
+  // La limite de longueur ne concerne que le message libre ; un modèle porte
+  // son propre contenu approuvé par Meta.
+  const tooLong = !isTemplate && text.length > MAX_MESSAGE_LENGTH;
 
   return (
     <Modal open onClose={onClose} title="Envoyer un message WhatsApp" wide>
@@ -326,17 +371,24 @@ export function WhatsAppMessageModal({
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={8}
+            readOnly={isTemplate}
             dir={lang === "ar" ? "rtl" : "ltr"}
             placeholder="Saisissez votre message..."
-            className="w-full rounded-xl border border-line bg-surface p-3 text-sm text-ink outline-none focus:border-primary"
+            className={`w-full rounded-xl border border-line p-3 text-sm text-ink outline-none focus:border-primary ${
+              isTemplate ? "bg-canvas/40 cursor-default" : "bg-surface"
+            }`}
           />
-          <div className="mt-1 flex justify-between text-[10px]">
+          <div className="mt-1 flex justify-between gap-3 text-[10px]">
             <span className="text-muted">
-              Le message part du numéro WhatsApp de l&apos;établissement.
+              {isTemplate
+                ? "Alerte envoyée via un modèle WhatsApp approuvé par Meta. Ce texte est un aperçu ; le contenu exact est défini par le modèle approuvé."
+                : "Message libre : possible uniquement si la famille a écrit à l'école dans les dernières 24 h (fenêtre de service client)."}
             </span>
-            <span className={tooLong ? "font-bold text-danger" : "text-muted"}>
-              {text.length} / {MAX_MESSAGE_LENGTH}
-            </span>
+            {!isTemplate && (
+              <span className={tooLong ? "shrink-0 font-bold text-danger" : "shrink-0 text-muted"}>
+                {text.length} / {MAX_MESSAGE_LENGTH}
+              </span>
+            )}
           </div>
         </div>
 
@@ -382,7 +434,7 @@ export function WhatsAppMessageModal({
             </Button>
             <Button
               onClick={handleSend}
-              disabled={sending || selectedCount === 0 || !text.trim() || tooLong}
+              disabled={sending || selectedCount === 0 || (!isTemplate && !text.trim()) || tooLong}
               className="flex items-center gap-2"
             >
               <Send className="h-4 w-4" />

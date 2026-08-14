@@ -14,7 +14,7 @@ describe("toInternational — normalisation des numéros algériens", () => {
     expect(toInternational("213555123456")).toBe("213555123456");
   });
 
-  it("préfixe composé 00", () => {
+  it("préfixe composé 00 (international)", () => {
     expect(toInternational("00213555123456")).toBe("213555123456");
   });
 
@@ -26,12 +26,14 @@ describe("toInternational — normalisation des numéros algériens", () => {
     expect(toInternational("555123456")).toBe("213555123456");
   });
 
-  it("espaces intercalés", () => {
+  it("espaces et ponctuation intercalés", () => {
     expect(toInternational("0555 12 34 56")).toBe("213555123456");
+    expect(toInternational("(0555) 12-34-56")).toBe("213555123456");
   });
 
-  it("numéro étranger plausible conservé tel quel", () => {
+  it("numéro international étranger plausible conservé tel quel", () => {
     expect(toInternational("33612345678")).toBe("33612345678");
+    expect(toInternational("+33 6 12 34 56 78")).toBe("33612345678");
   });
 
   it("numéro malformé (trop court) → null", () => {
@@ -52,12 +54,13 @@ describe("toInternational — normalisation des numéros algériens", () => {
   });
 });
 
-describe("normalizePhone — chatId + affichage", () => {
-  it("produit chatId et affichage pour un local algérien", () => {
+describe("normalizePhone — MSISDN Meta (chiffres, sans @c.us) + affichage", () => {
+  it("produit le MSISDN et l'affichage pour un local algérien", () => {
     const n = normalizePhone("0555123456");
     expect(n).not.toBeNull();
+    // Meta attend le numéro en chiffres bruts, PAS un identifiant "@c.us".
     expect(n!.msisdn).toBe("213555123456");
-    expect(n!.chatId).toBe("213555123456@c.us");
+    expect(n!.msisdn).not.toContain("@c.us");
     expect(n!.display).toBe("+213 555 123 456");
   });
 
@@ -68,6 +71,7 @@ describe("normalizePhone — chatId + affichage", () => {
 
   it("numéro étranger : affichage brut avec +", () => {
     const n = normalizePhone("33612345678");
+    expect(n!.msisdn).toBe("33612345678");
     expect(n!.display).toBe("+33612345678");
   });
 });

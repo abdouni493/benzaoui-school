@@ -1,118 +1,90 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Image from "next/image";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
-import type { Tone } from "@/components/ui/Badge";
-import { AlertTriangle, MessageCircle, Power, RefreshCw } from "lucide-react";
-import type { SessionStatePayload } from "@/lib/whatsapp/types";
+import { AlertTriangle, CheckCircle2, MessageCircle, RefreshCw, ShieldCheck } from "lucide-react";
+import type { WhatsAppConfigState } from "@/lib/whatsapp/types";
 
-const STATUS_LABELS: Record<string, { label: string; tone: Tone }> = {
-  created: { label: "Créée — jamais démarrée", tone: "neutral" },
-  initializing: { label: "Initialisation…", tone: "warning" },
-  qr_ready: { label: "En attente du scan du QR code", tone: "warning" },
-  authenticating: { label: "Authentification…", tone: "warning" },
-  ready: { label: "Connectée", tone: "success" },
-  disconnected: { label: "Déconnectée", tone: "danger" },
-  action_required: { label: "Action requise", tone: "danger" },
-  failed: { label: "En échec", tone: "danger" },
+/** Libellés des modèles d'alerte, pour signaler ceux qui restent à configurer. */
+const TEMPLATE_LABELS: Record<string, string> = {
+  debt: "Alerte de dette",
+  balance_empty: "Solde épuisé",
+  balance_low: "Solde bientôt épuisé",
+  registration: "Frais d'inscription",
 };
+const ALERT_TEMPLATE_IDS = ["debt", "balance_empty", "balance_low", "registration"] as const;
 
-/** Statuts encore en mouvement : le QR expire au bout de quelques dizaines de
- *  secondes et bascule à `ready` dès le scan, donc on continue de relire. */
-const TRANSIENT_STATUSES = ["qr_ready", "initializing", "authenticating"];
-const POLL_INTERVAL_MS = 5_000;
+type FetchOutcome = { ok: true; state: WhatsAppConfigState } | { ok: false; error: string };
 
-type FetchOutcome =
-  | { ok: true; state: SessionStatePayload }
-  | { ok: false; error: string };
-
-async function fetchSessionState(): Promise<FetchOutcome> {
+async function fetchConfigState(): Promise<FetchOutcome> {
   try {
-    const response = await fetch("/api/whatsapp/session", { cache: "no-store" });
+    const response = await fetch("/api/whatsapp/status", { cache: "no-store" });
     const payload = await response.json();
     if (!response.ok) {
-      return { ok: false, error: payload?.error ?? "Impossible de lire l'état de la passerelle." };
+      return { ok: false, error: payload?.error ?? "Impossible de lire l'état de la configuration." };
     }
-    return { ok: true, state: payload as SessionStatePayload };
+    return { ok: true, state: payload as WhatsAppConfigState };
   } catch {
     return { ok: false, error: "Impossible de joindre le serveur." };
   }
 }
 
 export function WhatsAppSettingsPanel() {
-  const [state, setState] = useState<SessionStatePayload | null>(null);
+  const [state, setState] = useState<WhatsAppConfigState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [starting, setStarting] = useState(false);
-  /** Incrémenté pour forcer une relecture (bouton « Actualiser », démarrage). */
   const [reloadToken, setReloadToken] = useState(0);
 
-  // Lecture initiale puis relances tant que la session n'est pas stabilisée.
-  // Le drapeau `cancelled` évite d'écrire dans un composant démonté si
-  // l'utilisateur quitte l'onglet pendant une requête.
   useEffect(() => {
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-
-    const tick = async () => {
-      const outcome = await fetchSessionState();
+    // `loading` démarre à true (état initial) ; on ne le repositionne pas
+    // synchronement ici — une actualisation remplace simplement les données.
+    void fetchConfigState().then((outcome) => {
       if (cancelled) return;
-
       if (outcome.ok) {
         setState(outcome.state);
         setError(null);
-        if (TRANSIENT_STATUSES.includes(outcome.state.status ?? "")) {
-          timer = setTimeout(() => void tick(), POLL_INTERVAL_MS);
-        }
       } else {
         setError(outcome.error);
         setState(null);
       }
       setLoading(false);
-    };
-
-    void tick();
-
+    });
     return () => {
       cancelled = true;
-      if (timer) clearTimeout(timer);
     };
   }, [reloadToken]);
 
-  const handleStart = async () => {
-    setStarting(true);
-    setError(null);
-    try {
-      const response = await fetch("/api/whatsapp/session", { method: "POST" });
-      const payload = await response.json();
-      if (!response.ok) setError(payload?.error ?? "Le démarrage a échoué.");
-    } catch {
-      setError("Impossible de joindre le serveur.");
-    } finally {
-      setStarting(false);
-      setReloadToken((n) => n + 1);
-    }
-  };
-
-  const status = state?.status ? STATUS_LABELS[state.status] : null;
+  const missingTemplates = state
+    ? ALERT_TEMPLATE_IDS.filter((id) => !state.configuredTemplates.includes(id))
+    : [];
 
   return (
     <Card className="border border-line rounded-2xl card-shadow">
       <CardBody className="space-y-6 p-6">
-        <div>
-          <h3 className="flex items-center gap-2 text-sm font-bold text-ink">
-            <MessageCircle className="h-5 w-5 text-primary" /> Passerelle WhatsApp
-          </h3>
-          <p className="mt-1 text-xs text-muted">
-            Numéro WhatsApp utilisé pour envoyer les alertes de solde aux élèves et aux parents.
-          </p>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-bold text-ink">
+              <MessageCircle className="h-5 w-5 text-primary" /> WhatsApp Cloud API (Meta)
+            </h3>
+            <p className="mt-1 text-xs text-muted">
+              Numéro WhatsApp officiel de l&apos;école, utilisé pour les alertes de solde aux élèves
+              et aux parents via l&apos;API Cloud de Meta.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            onClick={() => setReloadToken((n) => n + 1)}
+            className="flex shrink-0 items-center gap-2"
+          >
+            <RefreshCw className="h-4 w-4" /> Actualiser
+          </Button>
         </div>
 
         {loading ? (
-          <p className="text-xs text-muted">Lecture de l&apos;état de la passerelle…</p>
+          <p className="text-xs text-muted">Lecture de l&apos;état de la configuration…</p>
         ) : (
           <>
             {error && (
@@ -125,15 +97,15 @@ export function WhatsAppSettingsPanel() {
             {state && !state.configured && (
               <div className="space-y-2 rounded-xl border border-warning/30 bg-warning/10 p-4 text-xs text-ink">
                 <strong className="flex items-center gap-2 text-warning">
-                  <AlertTriangle className="h-4 w-4" /> Passerelle non configurée
+                  <AlertTriangle className="h-4 w-4" /> WhatsApp non configuré
                 </strong>
                 <p className="text-muted">
-                  Renseigner <code className="text-ink">OPENWA_BASE_URL</code>,{" "}
-                  <code className="text-ink">OPENWA_API_KEY</code> et{" "}
-                  <code className="text-ink">OPENWA_SESSION_ID</code> dans{" "}
-                  <code className="text-ink">.env.local</code>, puis redémarrer l&apos;application.
-                  La procédure complète (démarrage du service, création de la clé et de la session)
-                  est décrite dans <code className="text-ink">openwa/README.md</code>.
+                  Renseigner côté serveur (fichier <code className="text-ink">.env.local</code> ou
+                  variables d&apos;environnement Vercel) au minimum{" "}
+                  <code className="text-ink">WHATSAPP_ACCESS_TOKEN</code> et{" "}
+                  <code className="text-ink">WHATSAPP_PHONE_NUMBER_ID</code>, puis redémarrer
+                  l&apos;application. La procédure complète (compte Meta, jeton, webhook, modèles)
+                  est décrite dans le <code className="text-ink">README</code>.
                 </p>
               </div>
             )}
@@ -143,81 +115,99 @@ export function WhatsAppSettingsPanel() {
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-canvas/30 p-4">
                   <div className="space-y-1">
                     <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">
-                      État de la session
+                      Connexion à Meta
                     </span>
-                    <Badge tone={status?.tone ?? "neutral"}>
-                      {status?.label ?? state.status ?? "Inconnu"}
+                    <Badge tone={state.connected ? "success" : "danger"}>
+                      {state.connected ? "Connectée" : "Non connectée"}
                     </Badge>
                     {state.phoneNumber && (
                       <span className="block pt-1 text-xs text-ink">
-                        Numéro lié : <strong>{state.phoneNumber}</strong>
+                        Numéro : <strong>{state.phoneNumber}</strong>
+                        {state.verifiedName ? ` — ${state.verifiedName}` : ""}
                       </span>
                     )}
                   </div>
-
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      onClick={() => setReloadToken((n) => n + 1)}
-                      className="flex items-center gap-2"
-                    >
-                      <RefreshCw className="h-4 w-4" /> Actualiser
-                    </Button>
-                    {state.status !== "ready" && (
-                      <Button onClick={handleStart} disabled={starting} className="flex items-center gap-2">
-                        <Power className="h-4 w-4" />
-                        {starting ? "Démarrage…" : "Démarrer la session"}
-                      </Button>
-                    )}
-                  </div>
+                  <ShieldCheck
+                    className={`h-8 w-8 ${state.connected ? "text-success" : "text-muted/40"}`}
+                  />
                 </div>
 
-                {state.lastError && (
+                {state.error && !state.connected && (
                   <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
-                    Dernière erreur signalée par la passerelle : {state.lastError}
+                    {state.error}
                   </div>
                 )}
 
-                {state.qrCode && (
-                  <div className="flex flex-col items-center gap-3 rounded-xl border border-line bg-surface p-5">
-                    <p className="text-center text-xs text-muted">
-                      Ouvrir WhatsApp sur le téléphone de l&apos;école →{" "}
-                      <strong className="text-ink">Appareils liés</strong> →{" "}
-                      <strong className="text-ink">Lier un appareil</strong>, puis scanner ce code.
+                <dl className="grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                  <InfoRow label="Phone Number ID" value={state.phoneNumberIdMasked ?? "—"} />
+                  <InfoRow label="Business Account ID" value={state.businessAccountIdMasked ?? "—"} />
+                  <InfoRow label="Version API Graph" value={state.apiVersion || "—"} />
+                  <InfoRow
+                    label="Webhook"
+                    value={state.webhookConfigured ? "Jeton configuré" : "Non configuré"}
+                    tone={state.webhookConfigured ? "success" : "warning"}
+                  />
+                </dl>
+
+                <div className="rounded-xl border border-line bg-canvas/30 p-4">
+                  <span className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Modèles d&apos;alerte approuvés
+                  </span>
+                  {missingTemplates.length === 0 ? (
+                    <p className="flex items-center gap-2 text-xs text-success">
+                      <CheckCircle2 className="h-4 w-4" /> Les quatre modèles d&apos;alerte sont
+                      configurés.
                     </p>
-                    <Image
-                      src={state.qrCode}
-                      alt="QR code de connexion WhatsApp"
-                      width={256}
-                      height={256}
-                      unoptimized
-                      className="rounded-xl border border-line bg-white p-2"
-                    />
-                    <span className="text-[10px] text-muted">
-                      Le code se régénère automatiquement toutes les quelques secondes.
-                    </span>
-                  </div>
-                )}
-
-                {state.status === "ready" && (
-                  <p className="rounded-xl border border-success/30 bg-success/10 p-3 text-xs text-success">
-                    La passerelle est opérationnelle : les boutons WhatsApp des fiches élèves et
-                    parents envoient depuis ce numéro.
-                  </p>
-                )}
+                  ) : (
+                    <div className="space-y-1.5">
+                      <p className="text-xs text-muted">
+                        Ces modèles n&apos;ont pas de nom Meta configuré : les alertes correspondantes
+                        échoueront tant que le nom du modèle approuvé n&apos;est pas renseigné.
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {missingTemplates.map((id) => (
+                          <Badge key={id} tone="warning" className="text-[10px]">
+                            {TEMPLATE_LABELS[id] ?? id}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             )}
 
             <div className="rounded-xl border border-line bg-canvas/30 p-4 text-[11px] leading-relaxed text-muted">
               <strong className="mb-1 block text-ink">À savoir</strong>
-              WhatsApp n&apos;autorise pas officiellement les clients automatisés : utiliser un
-              numéro dédié à l&apos;école, éviter les envois en rafale, et privilégier les alertes
-              aux familles déjà inscrites. Un envoi confirmé signifie « accepté par la passerelle »,
-              pas « lu par le destinataire ».
+              Les identifiants (jeton d&apos;accès, App Secret, jeton du webhook) sont configurés
+              uniquement côté serveur et ne sont jamais exposés ici. Les alertes proactives partent
+              en <strong>modèles approuvés par Meta</strong> ; un message libre n&apos;est possible
+              que si la famille a écrit à l&apos;école dans les dernières 24 h. Un envoi accepté
+              signifie « pris en charge par Meta », pas « lu » : le statut réel (remis/lu) remonte
+              ensuite via le webhook.
             </div>
           </>
         )}
       </CardBody>
     </Card>
+  );
+}
+
+function InfoRow({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "success" | "warning";
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-surface px-3 py-2">
+      <dt className="text-[10px] font-bold uppercase tracking-wider text-muted">{label}</dt>
+      <dd className={`font-mono text-xs ${tone === "warning" ? "text-warning" : tone === "success" ? "text-success" : "text-ink"}`}>
+        {value}
+      </dd>
+    </div>
   );
 }

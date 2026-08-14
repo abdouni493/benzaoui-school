@@ -1,8 +1,18 @@
-/** Modèles de messages WhatsApp proposés dans la fenêtre d'envoi.
+/** Modèles de messages WhatsApp.
  *
- *  Chaque modèle est décliné en français et en arabe : beaucoup de parents
- *  lisent plus volontiers l'arabe, et le message part sur leur téléphone, pas
- *  dans l'interface — la langue de l'application n'impose donc rien ici. */
+ *  Deux usages, portés par le même identifiant local :
+ *   1. Un APERÇU lisible (français / arabe) affiché dans la fenêtre d'envoi et
+ *      journalisé — c'est ce que `build()` produit.
+ *   2. Un ENVOI RÉEL via l'API Cloud de Meta. Les messages d'entreprise
+ *      proactifs (dette, solde épuisé/faible, inscription) partent en tant que
+ *      MODÈLES APPROUVÉS par Meta : on n'envoie pas le texte libre ci-dessous,
+ *      mais le nom du modèle approuvé + ses variables ordonnées ({{1}}, {{2}}…).
+ *
+ *  Ce fichier reste pur (aucun `server-only`, aucune lecture d'`env`) pour être
+ *  importable côté navigateur : la fenêtre d'envoi y construit l'aperçu et la
+ *  liste des variables. La CORRESPONDANCE identifiant local → nom de modèle
+ *  approuvé par Meta est résolue côté serveur (voir lib/whatsapp/client.ts), à
+ *  partir de variables d'environnement — jamais en dur, jamais dans le bundle. */
 
 export type WhatsAppTemplateId =
   | "debt"
@@ -11,8 +21,12 @@ export type WhatsAppTemplateId =
   | "registration"
   | "custom";
 
-/** À qui l'on parle : cela change la formule d'adresse. `mixed` couvre l'envoi
- *  simultané à l'élève et à son parent, où aucune des deux ne convient. */
+/** Modèles proactifs qui exigent un modèle approuvé par Meta (tout sauf le
+ *  message libre, qui ne part qu'en fenêtre de service client). */
+export type AlertTemplateId = Exclude<WhatsAppTemplateId, "custom">;
+
+/** À qui l'on parle : cela change la formule d'adresse de l'aperçu. `mixed`
+ *  couvre l'envoi simultané à l'élève et à son parent. */
 export type WhatsAppAudience = "student" | "parent" | "mixed";
 
 export type MessageLanguage = "fr" | "ar";
@@ -36,7 +50,29 @@ export interface TemplateDefinition {
   build: (ctx: TemplateContext, lang: MessageLanguage) => string;
 }
 
+/** Métadonnées d'un modèle d'alerte pour l'envoi Meta.
+ *  `envKey` nomme la variable d'environnement qui porte le nom EXACT du modèle
+ *  approuvé côté Meta (ex. WHATSAPP_TEMPLATE_BALANCE_DEBT=solde_dette). */
+export interface MetaTemplateConfig {
+  envKey: string;
+  /** catégorie Meta du modèle — les alertes de compte sont « UTILITY ». */
+  category: "UTILITY" | "MARKETING" | "AUTHENTICATION";
+  /** construit les paramètres ordonnés du corps ({{1}}, {{2}}, {{3}}). L'ordre
+   *  DOIT correspondre au modèle soumis à Meta (voir README, section modèles). */
+  buildVariables: (ctx: TemplateContext) => string[];
+}
+
 const money = (amount: number) => `${Math.round(amount).toLocaleString("fr-FR")} DA`;
+
+/** Montant destiné à une VARIABLE de modèle Meta. Meta rejette les tabulations,
+ *  les sauts de ligne et les espaces multiples dans un paramètre : on groupe
+ *  donc les milliers avec des espaces simples ordinaires, sans locale exotique. */
+export function formatAmountVar(amount: number): string {
+  const grouped = Math.round(Math.abs(amount))
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  return `${grouped} DA`;
+}
 
 /** Formule d'adresse selon le destinataire. Le corps des modèles nomme toujours
  *  l'élève, donc la variante `mixed` peut rester neutre sans perdre en clarté. */
@@ -151,11 +187,51 @@ export const WHATSAPP_TEMPLATES: TemplateDefinition[] = [
   {
     id: "custom",
     labelFr: "Message libre",
-    hintFr: "Rédiger entièrement le message.",
+    hintFr: "Rédiger entièrement le message (fenêtre de service client requise).",
     // Uniquement la formule d'adresse : le reste est saisi par l'utilisateur.
     build: (ctx, lang) => `${opening(ctx, lang)}\n\n`,
   },
 ];
+
+/** Correspondance identifiant local → configuration du modèle Meta. Le nom
+ *  approuvé n'est PAS ici : il est lu côté serveur via `envKey`. Les variables,
+ *  elles, ne sont pas sensibles et se construisent partout (aperçu compris). */
+export const META_TEMPLATE_CONFIG: Record<AlertTemplateId, MetaTemplateConfig> = {
+  debt: {
+    envKey: "WHATSAPP_TEMPLATE_BALANCE_DEBT",
+    category: "UTILITY",
+    buildVariables: (ctx) => [
+      ctx.studentName,
+      formatAmountVar(Math.abs(Math.min(ctx.balance, 0))),
+      ctx.schoolName,
+    ],
+  },
+  balance_empty: {
+    envKey: "WHATSAPP_TEMPLATE_BALANCE_EMPTY",
+    category: "UTILITY",
+    buildVariables: (ctx) => [ctx.studentName, formatAmountVar(ctx.balance), ctx.schoolName],
+  },
+  balance_low: {
+    envKey: "WHATSAPP_TEMPLATE_BALANCE_LOW",
+    category: "UTILITY",
+    buildVariables: (ctx) => [ctx.studentName, formatAmountVar(ctx.balance), ctx.schoolName],
+  },
+  registration: {
+    envKey: "WHATSAPP_TEMPLATE_REGISTRATION_DUE",
+    category: "UTILITY",
+    buildVariables: (ctx) => [
+      ctx.studentName,
+      formatAmountVar(ctx.registrationDue ?? 0),
+      ctx.schoolName,
+    ],
+  },
+};
+
+/** `true` si l'identifiant correspond à un modèle d'alerte (envoi via modèle
+ *  Meta), par opposition au message libre. */
+export function isAlertTemplate(id: WhatsAppTemplateId): id is AlertTemplateId {
+  return id !== "custom";
+}
 
 export function getTemplate(id: WhatsAppTemplateId): TemplateDefinition {
   return WHATSAPP_TEMPLATES.find((t) => t.id === id) ?? WHATSAPP_TEMPLATES[0];
@@ -172,5 +248,7 @@ export function suggestTemplate(ctx: {
   return "custom";
 }
 
-/** Limite imposée par OpenWA sur `send-text` (`@MaxLength(4096)`). */
+/** Longueur maximale d'un corps de message texte (Meta plafonne `text.body` à
+ *  4096 caractères). Ne concerne que le message libre : les modèles ont leurs
+ *  propres limites, validées à l'approbation. */
 export const MAX_MESSAGE_LENGTH = 4096;

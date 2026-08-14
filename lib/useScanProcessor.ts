@@ -18,9 +18,10 @@ import type { Parent, School, Student } from "@/lib/types";
 const sentAlertKeys = new Set<string>();
 
 /** Envoie l'alerte de solde par WhatsApp via /api/whatsapp/send — le seul chemin
- *  qui détient la clé OpenWA. Volontairement « fire-and-forget » et sans jamais
- *  lever d'exception : un échec de la passerelle ne doit casser ni le scan ni la
- *  transaction déjà écrite. */
+ *  qui détient le jeton d'accès Meta. L'alerte part en MODÈLE approuvé (message
+ *  proactif), construit par buildBalanceAlert. Volontairement « fire-and-forget »
+ *  et sans jamais lever d'exception : un échec côté Meta ne doit casser ni le
+ *  scan ni la transaction déjà écrite. */
 async function sendAutoBalanceAlert(opts: {
   student: Student;
   parent?: Parent | null;

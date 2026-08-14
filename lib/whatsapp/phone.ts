@@ -1,8 +1,11 @@
-/** Normalisation des numéros vers l'identifiant de discussion WhatsApp.
+/** Normalisation des numéros vers le MSISDN international attendu par Meta.
  *
  *  Les numéros saisis dans l'application n'ont aucun format imposé : on croise
- *  du "+213 555 12 34 56", du "0555123456", du "213555123456". WhatsApp, lui,
- *  n'accepte qu'un `<indicatif><numéro>@c.us` en chiffres bruts. */
+ *  du "+213 555 12 34 56", du "0555123456", du "213555123456". L'API WhatsApp
+ *  Cloud de Meta attend, elle, le numéro en chiffres bruts avec indicatif pays
+ *  et SANS "+" (ex. "213555123456") — c'est ce MSISDN qui part dans le champ
+ *  `to` de l'appel Graph. Aucun identifiant de discussion "@c.us" ici : c'était
+ *  une spécificité de l'ancienne passerelle WhatsApp Web, Meta n'en veut pas. */
 
 /** Indicatif appliqué à un numéro saisi en format national (Algérie par défaut). */
 export const DEFAULT_COUNTRY_CODE = "213";
@@ -11,10 +14,9 @@ export const DEFAULT_COUNTRY_CODE = "213";
 const DZ_NATIONAL_LENGTH = 9;
 
 export interface NormalizedPhone {
-  /** chiffres uniquement, indicatif pays inclus — ex. "213555123456" */
+  /** chiffres uniquement, indicatif pays inclus, sans "+" — ex. "213555123456".
+   *  C'est la valeur envoyée à Meta dans le champ `to`. */
   msisdn: string;
-  /** identifiant de discussion attendu par OpenWA — ex. "213555123456@c.us" */
-  chatId: string;
   /** rendu lisible pour l'interface — ex. "+213 555 123 456" */
   display: string;
 }
@@ -67,12 +69,11 @@ export function normalizePhone(
 
   return {
     msisdn,
-    chatId: `${msisdn}@c.us`,
     display: formatDisplay(msisdn, countryCode),
   };
 }
 
-/** `true` si le numéro peut être converti en identifiant WhatsApp. */
+/** `true` si le numéro peut être converti en MSISDN international. */
 export function isSendablePhone(
   raw: string | null | undefined,
   countryCode: string = DEFAULT_COUNTRY_CODE,

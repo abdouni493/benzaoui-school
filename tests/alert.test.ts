@@ -33,14 +33,22 @@ describe("buildBalanceAlert — résolution du destinataire", () => {
     phone: "0555111222",
   };
 
-  it("privilégie le parent joignable (adresse « parent »)", () => {
+  it("privilégie le parent joignable et vise un modèle Meta", () => {
     const parent = { firstName: "Karim", lastName: "Meziane", phone: "0661333444" };
     const out = buildBalanceAlert({ student, parent, school, lang: "fr", low: false });
     expect(out).not.toBeNull();
     expect(out!.phone).toBe("0661333444");
     expect(out!.name).toBe("Karim Meziane");
-    expect(out!.text).toContain("cher parent");
-    expect(out!.text).toContain("Yacine Meziane");
+    // Message proactif : un MODÈLE approuvé, jamais du texte libre.
+    expect(out!.message.kind).toBe("template");
+    if (out!.message.kind === "template") {
+      expect(out!.message.templateId).toBe("debt");
+      expect(out!.message.language).toBe("fr");
+      // {{1}} = nom élève, {{2}} = montant, {{3}} = école
+      expect(out!.message.variables[0]).toBe("Yacine Meziane");
+      expect(out!.message.variables[1]).toContain("200");
+      expect(out!.message.variables[2]).toBe("École Benzaoui");
+    }
   });
 
   it("bascule sur l'élève si le parent n'a pas de numéro exploitable", () => {
@@ -57,35 +65,38 @@ describe("buildBalanceAlert — résolution du destinataire", () => {
   });
 });
 
-describe("buildBalanceAlert — contenu du message", () => {
-  it("solde faible positif → modèle balance_low (pas un simple bonjour)", () => {
+describe("buildBalanceAlert — modèle et aperçu", () => {
+  it("solde faible positif → modèle balance_low", () => {
     const out = buildBalanceAlert({
       student: { firstName: "Sara", lastName: "Bakhti", balance: 700, phone: "0555000111" },
       lang: "fr",
       low: true,
     });
-    expect(out!.text).toContain("épuisement");
-    expect(out!.text).toContain("Sara Bakhti");
+    expect(out!.message.kind).toBe("template");
+    if (out!.message.kind === "template") expect(out!.message.templateId).toBe("balance_low");
+    // L'aperçu lisible reste construit pour le journal / l'affichage.
+    expect(out!.previewText).toContain("épuisement");
+    expect(out!.previewText).toContain("Sara Bakhti");
   });
 
-  it("dette → mentionne le montant dû et le nom de l'école", () => {
+  it("dette → l'aperçu mentionne le montant dû et le nom de l'école", () => {
     const out = buildBalanceAlert({
       student: { firstName: "Sara", lastName: "Bakhti", balance: -1500, phone: "0555000111" },
       school,
       lang: "fr",
     });
-    expect(out!.text).toContain("dette");
-    expect(out!.text).toContain("École Benzaoui");
+    expect(out!.previewText).toContain("dette");
+    expect(out!.previewText).toContain("École Benzaoui");
   });
 
-  it("langue arabe : le corps est en arabe", () => {
+  it("langue arabe : variables + aperçu, code langue « ar »", () => {
     const out = buildBalanceAlert({
       student: { firstName: "Sara", lastName: "Bakhti", balance: -1500, phone: "0555000111" },
       school,
       lang: "ar",
     });
-    // Présence de caractères arabes.
-    expect(/[؀-ۿ]/.test(out!.text)).toBe(true);
+    if (out!.message.kind === "template") expect(out!.message.language).toBe("ar");
+    expect(/[؀-ۿ]/.test(out!.previewText)).toBe(true);
   });
 
   it("situation saine sans modèle explicite → null (aucun envoi)", () => {
@@ -96,14 +107,14 @@ describe("buildBalanceAlert — contenu du message", () => {
     expect(out).toBeNull();
   });
 
-  it("modèle explicite forcé (parité avec l'envoi groupé de la fiche élève)", () => {
+  it("modèle « custom » forcé → message texte libre (aperçu = formule d'adresse)", () => {
     const out = buildBalanceAlert({
       student: { firstName: "Sara", lastName: "Bakhti", balance: 9000, phone: "0555000111" },
       lang: "fr",
       templateId: "custom",
     });
-    // Le modèle « custom » ne produit que la formule d'adresse.
     expect(out).not.toBeNull();
-    expect(out!.text.trim()).toBe("Bonjour Sara Bakhti,");
+    expect(out!.message.kind).toBe("text");
+    if (out!.message.kind === "text") expect(out!.message.text.trim()).toBe("Bonjour Sara Bakhti,");
   });
 });
