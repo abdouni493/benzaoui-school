@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useData, uid } from "@/lib/store/data";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -8,10 +8,24 @@ import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Check, Clock, X, AlertTriangle, Calendar, UserCheck, Search, Printer, Trash2 } from "lucide-react";
-import type { ScheduleSession, AttendanceStatus, Student, Day } from "@/lib/types";
+import {
+  Check,
+  Clock,
+  X,
+  AlertTriangle,
+  Calendar,
+  UserCheck,
+  Search,
+  Printer,
+  Trash2,
+  ChevronLeft,
+  ChevronRight,
+  Gift,
+} from "lucide-react";
+import type { ScheduleSession, AttendanceStatus, Student, Day, FreePeriod } from "@/lib/types";
 import { useToast } from "@/lib/store/toast";
 import { formatDA } from "@/lib/utils";
+import { formatDateFr, netPriceFor } from "@/lib/helpers";
 import { printHtmlDocument } from "@/lib/print";
 
 // Human-readable reasons when the server refuses/annotates a manual marking.
@@ -36,6 +50,7 @@ export function AttendancePage() {
     teachers,
     salles,
     attendance,
+    freePeriods,
     school,
     push,
     markAttendance,
@@ -57,6 +72,13 @@ export function AttendancePage() {
   // séances scheduled on that weekday exist on the sheet.
   const todayStr = time.toLocaleDateString("fr-CA"); // YYYY-MM-DD, local
   const [sheetDate, setSheetDate] = useState<string>(() => new Date().toLocaleDateString("fr-CA"));
+
+  // Month shown by the calendar picker (1st of the month, local).
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
+  const [showCalendar, setShowCalendar] = useState(true);
 
   // Filtered session selection (for Roll Call sheet)
   const [activeSessionId, setActiveSessionId] = useState<string>("");
@@ -102,11 +124,88 @@ export function AttendancePage() {
     return h * 60 + m;
   };
 
-  // Sessions scheduled on the sheet date's weekday — nothing else is shown.
+  /** YYYY-MM-DD of a Date, in local time (never UTC-shifted). */
+  const isoOf = (d: Date) => d.toLocaleDateString("fr-CA");
+
+  /** Move the sheet by N days — the "jour précédent / suivant" arrows. */
+  const shiftSheetDate = (days: number) => {
+    const d = new Date(`${sheetDate}T12:00:00`);
+    d.setDate(d.getDate() + days);
+    const next = isoOf(d);
+    setSheetDate(next);
+    setCalendarMonth(new Date(d.getFullYear(), d.getMonth(), 1));
+  };
+
+  const goToDate = (iso: string) => {
+    setSheetDate(iso);
+    const d = new Date(`${iso}T12:00:00`);
+    setCalendarMonth(new Date(d.getFullYear(), d.getMonth(), 1));
+  };
+
+  /** Séances that really exist on a given day: scheduled on that weekday and,
+   *  for a "séance libre", inside its date period. */
+  const sessionsOn = (iso: string): ScheduleSession[] => {
+    const day = getDayName(new Date(`${iso}T12:00:00`));
+    return sessions
+      .filter((s) => s.days.includes(day as Day))
+      .filter((s) => !s.periodStart || s.periodStart <= iso)
+      .filter((s) => !s.periodEnd || s.periodEnd >= iso)
+      .sort((a, b) => a.startTime.localeCompare(b.startTime));
+  };
+
+  // Sessions of the selected day — nothing else is shown on the sheet.
   const sheetDay = getDayName(new Date(`${sheetDate}T12:00:00`));
-  const sheetSessions = sessions
-    .filter((s) => s.days.includes(sheetDay as Day))
-    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const sheetSessions = sessionsOn(sheetDate);
+
+  // Presences recorded on the selected day (roll-call counters + calendar dots).
+  const attendanceOn = (iso: string) =>
+    attendance.filter((a) => new Date(a.timestamp).toLocaleDateString("fr-CA") === iso);
+  const sheetAttendance = attendanceOn(sheetDate);
+
+  /** The enrollment the student attends this séance under: his own one on that
+   *  timing, else the one on a sibling group of the same cours (rattrapage).
+   *  Mirrors exactly what the mark_attendance RPC prices. */
+  const enrollmentFor = (stu: Student, ses: ScheduleSession) => {
+    const own = subscriptions.find(
+      (su) => su.sessionId === ses.id && stu.subscriptionIds.includes(su.id),
+    );
+    if (own) return own;
+    return subscriptions.find((su) => {
+      if (!stu.subscriptionIds.includes(su.id)) return false;
+      const enr = sessions.find((s) => s.id === su.sessionId);
+      return !!enr && enr.moduleId === ses.moduleId && enr.classId === ses.classId;
+    });
+  };
+
+  /** Net séance price for that student (his reduction included). */
+  const priceFor = (stu: Student, ses: ScheduleSession) => {
+    const sub = enrollmentFor(stu, ses);
+    if (!sub) return subscriptions.find((su) => su.sessionId === ses.id)?.pricePerSession ?? 0;
+    return netPriceFor(sub.pricePerSession, stu.subscriptionDiscounts?.[sub.id]);
+  };
+
+  /** Start date of the enrollment when billing has NOT opened yet on the sheet
+   *  date — the séance is then recorded but never charged. */
+  const pendingStartFor = (stu: Student, ses: ScheduleSession): string | undefined => {
+    const sub = enrollmentFor(stu, ses);
+    const start = sub ? stu.subscriptionDates?.[sub.id]?.startDate : undefined;
+    return start && start > sheetDate ? start : undefined;
+  };
+
+  /** Free period covering that séance on the sheet date (séance offerte). */
+  const freePeriodFor = (ses: ScheduleSession): FreePeriod | undefined => {
+    const classIds = [ses.classId, ...(ses.classIds ?? [])];
+    return freePeriods.find(
+      (fp) =>
+        fp.active &&
+        fp.startDate <= sheetDate &&
+        fp.endDate >= sheetDate &&
+        (fp.allClasses || fp.classIds.some((id) => classIds.includes(id))),
+    );
+  };
+
+  // A sheet in the future can be consulted, but nothing can be marked on it.
+  const isFutureSheet = sheetDate > todayStr;
 
   // Live state of a séance relative to "now" (only meaningful on today's sheet)
   const sessionLiveState = (s: ScheduleSession): "upcoming" | "open" | "running" | "finished" | null => {
@@ -131,7 +230,9 @@ export function AttendancePage() {
     }
   }, [sheetSessions, activeSessionId]);
 
-  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  // Always a séance of the day being displayed: switching the date can never
+  // leave the roll-call on a timing that is not scheduled that day.
+  const activeSession = sheetSessions.find((s) => s.id === activeSessionId);
 
   // Students on this séance: the ones enrolled in it, PLUS the ones of another
   // group of the same cours who came to this one (rattrapage) — their badge is
@@ -159,6 +260,42 @@ export function AttendancePage() {
     const subIds = subscriptions.filter((su) => su.sessionId === sesId).map((su) => su.id);
     return !stu.subscriptionIds.some((id) => subIds.includes(id));
   };
+
+  // ---- Where the selected day stands ----------------------------------------
+  const sheetSessionIds = new Set(sheetSessions.map((s) => s.id));
+  const sheetMarks = sheetAttendance.filter((a) => sheetSessionIds.has(a.sessionId));
+  const sheetExpected = sheetSessions.reduce((n, s) => n + getSessionStudents(s.id).length, 0);
+  const sheetDeducted = sheetMarks.reduce((n, a) => n + a.amountDeducted, 0);
+
+  // ---- Calendar picker -------------------------------------------------------
+  // One presence counter per day, computed once: the calendar marks the days
+  // that already have a roll-call so past séances are easy to find.
+  const presencesByDate = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const a of attendance) {
+      const key = new Date(a.timestamp).toLocaleDateString("fr-CA");
+      map[key] = (map[key] ?? 0) + 1;
+    }
+    return map;
+  }, [attendance]);
+
+  const monthLabel = calendarMonth.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+
+  /** Cells of the displayed month, padded so the 1st falls on its weekday. */
+  const calendarCells: (string | null)[] = (() => {
+    const year = calendarMonth.getFullYear();
+    const month = calendarMonth.getMonth();
+    const lead = new Date(year, month, 1).getDay(); // 0 = dimanche
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const cells: (string | null)[] = Array.from({ length: lead }, () => null);
+    for (let d = 1; d <= daysInMonth; d += 1) cells.push(isoOf(new Date(year, month, d)));
+    return cells;
+  })();
+
+  const shiftMonth = (months: number) =>
+    setCalendarMonth(
+      new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + months, 1),
+    );
 
   // Find attendance record for a student in a session on the sheet date
   // (local calendar day — students are ABSENT by default until a record exists)
@@ -558,50 +695,206 @@ export function AttendancePage() {
 
       {activeTab === "sheet" ? (
         <div className="space-y-4">
-          {/* Sheet date — only the séances scheduled on that weekday exist here */}
-          <div className="bg-surface border border-line p-4 rounded-2xl flex flex-col sm:flex-row sm:items-end gap-3">
-            <div>
-              <label className="text-[10px] uppercase font-bold text-muted block mb-1">Date de la feuille</label>
-              <Input
-                type="date"
-                value={sheetDate}
-                onChange={(e) => e.target.value && setSheetDate(e.target.value)}
-                className="w-44"
-              />
-            </div>
-            <div className="flex items-center gap-2 pb-1">
-              <Badge tone="primary">{getDayLabel(sheetDay)}</Badge>
-              {sheetDate !== todayStr && (
-                <Button size="sm" variant="outline" onClick={() => setSheetDate(todayStr)}>
-                  Revenir à aujourd'hui
+          {/* Sheet date — pick ANY day (past or future) from the date field, the
+              day arrows or the calendar; only the séances of that day exist here */}
+          <div className="bg-surface border border-line p-4 rounded-2xl space-y-3">
+            <div className="flex flex-col gap-3 lg:flex-row lg:items-end">
+              <div>
+                <label className="text-[10px] uppercase font-bold text-muted block mb-1">Date de la feuille</label>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-10 w-10 shrink-0"
+                    onClick={() => shiftSheetDate(-1)}
+                    title="Jour précédent"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  <Input
+                    type="date"
+                    value={sheetDate}
+                    onChange={(e) => e.target.value && goToDate(e.target.value)}
+                    className="w-44"
+                  />
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    className="h-10 w-10 shrink-0"
+                    onClick={() => shiftSheetDate(1)}
+                    title="Jour suivant"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 pb-1">
+                <Badge tone="primary">
+                  {getDayLabel(sheetDay)} {formatDateFr(sheetDate)}
+                </Badge>
+                {sheetDate !== todayStr && (
+                  <Button size="sm" variant="outline" onClick={() => goToDate(todayStr)}>
+                    Revenir à aujourd&apos;hui
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant={showCalendar ? "secondary" : "outline"}
+                  onClick={() => setShowCalendar((v) => !v)}
+                >
+                  <Calendar className="h-3.5 w-3.5" />
+                  {showCalendar ? "Masquer le calendrier" : "Calendrier"}
                 </Button>
-              )}
+              </div>
+
+              {/* Where the day stands: séances, pointages, absents, montant */}
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:ml-auto">
+                <div className="rounded-xl border border-line bg-canvas/40 px-3 py-1.5 text-center">
+                  <span className="block text-[9px] uppercase font-bold text-muted">Séances</span>
+                  <strong className="text-sm text-ink">{sheetSessions.length}</strong>
+                </div>
+                <div className="rounded-xl border border-line bg-canvas/40 px-3 py-1.5 text-center">
+                  <span className="block text-[9px] uppercase font-bold text-muted">Pointés</span>
+                  <strong className="text-sm text-success">{sheetMarks.length}</strong>
+                </div>
+                <div className="rounded-xl border border-line bg-canvas/40 px-3 py-1.5 text-center">
+                  <span className="block text-[9px] uppercase font-bold text-muted">Absents</span>
+                  <strong className="text-sm text-danger">
+                    {Math.max(0, sheetExpected - sheetMarks.length)}
+                  </strong>
+                </div>
+                <div className="rounded-xl border border-line bg-canvas/40 px-3 py-1.5 text-center">
+                  <span className="block text-[9px] uppercase font-bold text-muted">Déduit</span>
+                  <strong className="text-sm text-ink">{formatDA(sheetDeducted)}</strong>
+                </div>
+              </div>
             </div>
-            <p className="text-[11px] text-muted sm:ml-auto pb-1 sm:text-right">
+
+            <p className="text-[11px] text-muted">
               Seules les séances programmées le <strong>{getDayLabel(sheetDay).toLowerCase()}</strong> sont affichées.
-              Tous les élèves sont <strong>absents par défaut</strong> tant qu'ils n'ont pas scanné leur carte ou été
-              marqués présents.
+              Tous les élèves sont <strong>absents par défaut</strong> tant qu&apos;ils n&apos;ont pas scanné leur carte
+              ou été marqués présents. Vous pouvez <strong>revenir sur un jour passé</strong> et corriger les présences
+              et absences : chaque correction débite ou rembourse le solde en conséquence.
             </p>
+
+            {isFutureSheet && (
+              <div className="flex items-center gap-2 rounded-xl border border-warning/20 bg-warning/10 p-2.5 text-[11px] text-warning">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span>
+                  Journée à venir : la feuille est consultable, mais les présences ne peuvent pas encore être
+                  enregistrées.
+                </span>
+              </div>
+            )}
           </div>
 
-        {sheetSessions.length === 0 ? (
-          <Card className="p-8 text-center bg-canvas/30 border border-line">
-            <AlertTriangle className="h-10 w-10 text-warning mx-auto mb-2" />
-            <h3 className="font-bold text-ink">Aucun cours ce jour-là</h3>
-            <p className="text-xs text-muted mt-1">
-              Aucun emploi du temps n'est configuré pour le {getDayLabel(sheetDay).toLowerCase()}.
-            </p>
-          </Card>
-        ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left panel: séances scheduled on the sheet date */}
+            {/* Left panel: calendar + the séances of the selected day */}
             <div className="space-y-3">
-              <h3 className="text-sm font-bold text-ink mb-2">Séances du {getDayLabel(sheetDay).toLowerCase()}</h3>
+              {showCalendar && (
+                <Card className="bg-surface border border-line p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <button
+                      onClick={() => shiftMonth(-1)}
+                      className="rounded-lg p-1.5 text-muted transition-colors hover:bg-primary-50 hover:text-ink"
+                      title="Mois précédent"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <strong className="text-xs font-bold capitalize text-ink">{monthLabel}</strong>
+                    <button
+                      onClick={() => shiftMonth(1)}
+                      className="rounded-lg p-1.5 text-muted transition-colors hover:bg-primary-50 hover:text-ink"
+                      title="Mois suivant"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-7 gap-1 text-center text-[9px] font-bold uppercase text-muted">
+                    {["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"].map((d) => (
+                      <span key={d}>{d}</span>
+                    ))}
+                  </div>
+
+                  <div className="mt-1 grid grid-cols-7 gap-1">
+                    {calendarCells.map((iso, idx) => {
+                      if (!iso) return <span key={`pad-${idx}`} />;
+                      const dayNumber = Number(iso.slice(8));
+                      const count = sessionsOn(iso).length;
+                      const marked = presencesByDate[iso] ?? 0;
+                      const isSelected = iso === sheetDate;
+                      const isToday = iso === todayStr;
+                      const isFuture = iso > todayStr;
+
+                      return (
+                        <button
+                          key={iso}
+                          onClick={() => setSheetDate(iso)}
+                          title={`${count} séance(s) · ${marked} pointage(s)`}
+                          className={`relative flex h-9 flex-col items-center justify-center rounded-lg border text-[11px] font-semibold transition-colors ${
+                            isSelected
+                              ? "border-transparent bg-gradient-primary text-white card-shadow"
+                              : count > 0
+                                ? "border-line bg-canvas/40 text-ink hover:bg-primary-50"
+                                : "border-transparent text-muted hover:bg-primary-50/50"
+                          } ${isToday && !isSelected ? "ring-1 ring-primary" : ""} ${
+                            isFuture && !isSelected ? "opacity-60" : ""
+                          }`}
+                        >
+                          {dayNumber}
+                          <span className="mt-0.5 flex h-1 items-center gap-0.5">
+                            {count > 0 && (
+                              <span
+                                className={`h-1 w-1 rounded-full ${isSelected ? "bg-white/70" : "bg-primary/50"}`}
+                              />
+                            )}
+                            {marked > 0 && (
+                              <span
+                                className={`h-1 w-1 rounded-full ${isSelected ? "bg-white" : "bg-success"}`}
+                              />
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line pt-2 text-[9px] text-muted">
+                    <span className="flex items-center gap-1">
+                      <span className="h-1.5 w-1.5 rounded-full bg-primary/50" /> séances programmées
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="h-1.5 w-1.5 rounded-full bg-success" /> présences enregistrées
+                    </span>
+                  </div>
+                </Card>
+              )}
+
+              <h3 className="text-sm font-bold text-ink mb-2">
+                Séances du {getDayLabel(sheetDay).toLowerCase()} {formatDateFr(sheetDate)}
+              </h3>
+
+              {sheetSessions.length === 0 && (
+                <Card className="border border-line bg-canvas/30 p-6 text-center">
+                  <AlertTriangle className="mx-auto mb-2 h-8 w-8 text-warning" />
+                  <h4 className="text-sm font-bold text-ink">Aucun cours ce jour-là</h4>
+                  <p className="mt-1 text-[11px] text-muted">
+                    Aucune séance n&apos;est programmée le {getDayLabel(sheetDay).toLowerCase()}{" "}
+                    {formatDateFr(sheetDate)}. Choisissez un autre jour dans le calendrier.
+                  </p>
+                </Card>
+              )}
+
               {sheetSessions.map((s) => {
                 const isActive = activeSessionId === s.id;
                 const cl = classes.find((c) => c.id === s.classId);
                 const isTeacherAbs = absentTeachers[s.id] || false;
                 const live = sessionLiveState(s);
+                // Roll-call state of THAT séance on the selected day
+                const roster = getSessionStudents(s.id).length;
+                const marked = sheetAttendance.filter((a) => a.sessionId === s.id).length;
 
                 return (
                   <button
@@ -634,6 +927,23 @@ export function AttendancePage() {
                         Salle: {salles.find((sl) => sl.id === s.salleId)?.name}
                       </span>
                       <strong className="font-mono">{s.startTime} - {s.endTime}</strong>
+                    </div>
+
+                    <div
+                      className={`flex items-center justify-between text-[10px] ${
+                        isActive ? "text-white/85" : "text-muted"
+                      }`}
+                    >
+                      <span>
+                        Pointés : <strong className={isActive ? "text-white" : "text-success"}>{marked}</strong> /{" "}
+                        {roster}
+                      </span>
+                      <span>
+                        Absents :{" "}
+                        <strong className={isActive ? "text-white" : "text-danger"}>
+                          {Math.max(0, roster - marked)}
+                        </strong>
+                      </span>
                     </div>
                   </button>
                 );
@@ -690,6 +1000,9 @@ export function AttendancePage() {
                             const attToday = getStudentSheetAttendance(stu.id, activeSession.id);
                             const isFree = stu.isFree;
                             const inDebt = stu.balance < 0;
+                            // Enrollment not started yet on that day: the séance
+                            // is recorded but never taken off the balance.
+                            const pendingStart = pendingStartFor(stu, activeSession);
 
                             return (
                               <div
@@ -703,6 +1016,11 @@ export function AttendancePage() {
                                     {inDebt && <Badge tone="danger" className="text-[8px] py-0">DETTE</Badge>}{" "}
                                     {isVisitingStudent(stu, activeSession.id) && (
                                       <Badge tone="primary" className="text-[8px] py-0">Rattrapage — autre groupe</Badge>
+                                    )}{" "}
+                                    {pendingStart && (
+                                      <Badge tone="success" className="text-[8px] py-0">
+                                        Débute le {formatDateFr(pendingStart)} — séance offerte
+                                      </Badge>
                                     )}
                                   </strong>
                                   <span className="text-[10px] text-muted">
@@ -726,15 +1044,27 @@ export function AttendancePage() {
                                           {" "}— <strong className="text-danger">-{formatDA(attToday.amountDeducted)}</strong> déduits
                                         </>
                                       )}
+                                      {(attToday.preStart || attToday.freePeriodId) && (
+                                        <>
+                                          {" "}—{" "}
+                                          <strong className="text-success">
+                                            offert{attToday.preStart ? " (avant le début)" : " (période gratuite)"}
+                                          </strong>
+                                          {(attToday.waivedAmount ?? 0) > 0 && ` · ${formatDA(attToday.waivedAmount ?? 0)}`}
+                                        </>
+                                      )}
                                     </span>
                                   )}
                                 </div>
 
-                                {/* Attendance selectors — absent is the default state */}
+                                {/* Attendance selectors — absent is the default
+                                    state, and a future day can't be marked */}
                                 <div className="flex items-center gap-1.5 self-end sm:self-center">
                                   <button
                                     onClick={() => requestMark(stu, "present")}
-                                    className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all ${
+                                    disabled={isFutureSheet}
+                                    title={isFutureSheet ? "Journée à venir — pointage impossible" : undefined}
+                                    className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       attToday?.status === "present"
                                         ? "bg-success text-white shadow-sm"
                                         : "bg-surface border border-line text-muted hover:text-ink"
@@ -744,7 +1074,9 @@ export function AttendancePage() {
                                   </button>
                                   <button
                                     onClick={() => requestMark(stu, "late")}
-                                    className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all ${
+                                    disabled={isFutureSheet}
+                                    title={isFutureSheet ? "Journée à venir — pointage impossible" : undefined}
+                                    className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       attToday?.status === "late"
                                         ? "bg-warning text-white shadow-sm"
                                         : "bg-surface border border-line text-muted hover:text-ink"
@@ -754,7 +1086,9 @@ export function AttendancePage() {
                                   </button>
                                   <button
                                     onClick={() => requestMark(stu, "absent")}
-                                    className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all ${
+                                    disabled={isFutureSheet}
+                                    title={isFutureSheet ? "Journée à venir — pointage impossible" : undefined}
+                                    className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       !attToday
                                         ? "bg-danger text-white shadow-sm"
                                         : "bg-surface border border-line text-muted hover:text-ink"
@@ -772,11 +1106,18 @@ export function AttendancePage() {
                   </CardBody>
                 </Card>
               ) : (
-                <p className="text-xs text-muted italic">Veuillez sélectionner un emploi du temps à gauche.</p>
+                <Card className="border border-line bg-canvas/30 p-8 text-center">
+                  <Calendar className="mx-auto mb-2 h-10 w-10 text-muted" />
+                  <h3 className="text-sm font-bold text-ink">Aucune séance sélectionnée</h3>
+                  <p className="mt-1 text-xs text-muted">
+                    {sheetSessions.length === 0
+                      ? "Aucune séance ce jour-là — choisissez une autre date dans le calendrier pour retrouver ses séances et leurs élèves."
+                      : "Sélectionnez une séance à gauche pour afficher la liste des élèves et pointer les présences."}
+                  </p>
+                </Card>
               )}
             </div>
           </div>
-        )}
         </div>
       ) : (
         // History tab view
@@ -918,11 +1259,12 @@ export function AttendancePage() {
                               </Badge>
                             </td>
                             <td className="p-4 font-mono font-bold text-danger">
-                              {h.freePeriodId ? (
+                              {h.freePeriodId || h.preStart ? (
                                 <span className="inline-flex flex-col gap-0.5">
                                   <span className="text-success">Offert</span>
                                   <span className="font-sans text-[10px] font-semibold text-muted">
-                                    Période gratuite ({formatDA(h.waivedAmount ?? 0)})
+                                    {h.preStart ? "Avant le début de l'abonnement" : "Période gratuite"} (
+                                    {formatDA(h.waivedAmount ?? 0)})
                                   </span>
                                 </span>
                               ) : (
@@ -963,12 +1305,14 @@ export function AttendancePage() {
         {confirmMark && activeSession && (() => {
           const stu = confirmMark.student;
           const existing = getStudentSheetAttendance(stu.id, activeSession.id);
-          const sub =
-            subscriptions.find(
-              (su) => su.sessionId === activeSession.id && stu.subscriptionIds.includes(su.id)
-            ) ?? subscriptions.find((su) => su.sessionId === activeSession.id);
-          const price = sub?.pricePerSession ?? 0;
-          const cost = stu.isFree ? 0 : price;
+          // Same price the server will charge: his own tariff, reduction
+          // included. Nothing is charged when the séance is offered — élève
+          // gratuit, période gratuite, or enrollment not started yet.
+          const price = priceFor(stu, activeSession);
+          const pendingStart = pendingStartFor(stu, activeSession);
+          const freePeriod = freePeriodFor(activeSession);
+          const offered = !!pendingStart || !!freePeriod;
+          const cost = stu.isFree || offered ? 0 : price;
           const after = stu.balance - cost;
           const inDebt = cost > 0 && stu.balance < 0;
           const goesDebt = cost > 0 && stu.balance >= 0 && after < 0;
@@ -1048,6 +1392,12 @@ export function AttendancePage() {
                     {cost > 0 ? `-${formatDA(cost)}` : "0 DA"}
                   </strong>
                 </div>
+                {offered && price > 0 && (
+                  <div className="flex justify-between">
+                    <span className="text-muted">Montant offert</span>
+                    <strong className="text-success">{formatDA(price)}</strong>
+                  </div>
+                )}
                 <div className="flex justify-between">
                   <span className="text-muted">Solde actuel</span>
                   <strong className={stu.balance < 0 ? "text-danger" : "text-ink"}>{formatDA(stu.balance)}</strong>
@@ -1061,6 +1411,25 @@ export function AttendancePage() {
               {stu.isFree && (
                 <div className="bg-success/10 border border-success/20 rounded-xl p-3 text-xs text-success flex items-center gap-2">
                   <Check className="h-4 w-4 shrink-0" /> Élève gratuit — aucune déduction ne sera effectuée.
+                </div>
+              )}
+              {pendingStart && (
+                <div className="bg-success/10 border border-success/20 rounded-xl p-3 text-xs text-success flex items-start gap-2">
+                  <Gift className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div>
+                    <strong>Abonnement pas encore commencé</strong> (début le {formatDateFr(pendingStart)}) : la
+                    présence est enregistrée normalement, mais <strong>rien n&apos;est retiré du solde</strong>. La
+                    facturation démarrera à la date de début, modifiable depuis « Affecter des abonnements ».
+                  </div>
+                </div>
+              )}
+              {freePeriod && (
+                <div className="bg-success/10 border border-success/20 rounded-xl p-3 text-xs text-success flex items-start gap-2">
+                  <Gift className="h-4 w-4 shrink-0 mt-0.5" />
+                  <div>
+                    <strong>Période gratuite{freePeriod.name ? ` « ${freePeriod.name} »` : ""}</strong> : séance
+                    offerte ce jour-là, aucun montant n&apos;est débité du solde.
+                  </div>
                 </div>
               )}
               {inDebt && (

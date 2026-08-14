@@ -176,7 +176,10 @@ export function StudentsPage() {
   // Form: Assign subscription/coursework
   const [assignSearch, setAssignSearch] = useState("");
   const [selectedAssignIds, setSelectedAssignIds] = useState<string[]>([]); // subscription or coursework ids
-  const [assignStartDates, setAssignStartDates] = useState<Record<string, string>>({}); // formation sub id -> start date
+  // Enrollment dates, kept per subscription id for EVERY module (cours and
+  // formations): the day the student was registered, and the day billing opens.
+  const [assignSubDates, setAssignSubDates] = useState<Record<string, string>>({}); // sub id -> date d'inscription
+  const [assignStartDates, setAssignStartDates] = useState<Record<string, string>>({}); // sub id -> date de début
   // Per-module reduction: subscription id -> { type, value }
   const [assignDiscounts, setAssignDiscounts] = useState<Record<string, SubscriptionDiscount>>({});
   // "Réduction groupée": one reduction applied at once to every ticked module
@@ -722,6 +725,7 @@ export function StudentsPage() {
     setPayAmount(0);
     setSelectedAssignIds([]);
     setAssignStartDates({});
+    setAssignSubDates({});
     setAssignDiscounts({});
     setBulkDiscountType("percent");
     setBulkDiscountValue(0);
@@ -888,12 +892,17 @@ export function StudentsPage() {
   const openAssign = (stu: Student) => {
     setSelectedStudent(stu);
     setSelectedAssignIds(stu.subscriptionIds);
-    const dates: Record<string, string> = {};
+    // Reopen on the dates already recorded, so the modal doubles as the edit
+    // screen for them (an empty date falls back to today at save time).
+    const starts: Record<string, string> = {};
+    const subscribed: Record<string, string> = {};
     for (const subId of stu.subscriptionIds) {
-      const start = stu.subscriptionDates?.[subId]?.startDate;
-      if (start) dates[subId] = start;
+      const dates = stu.subscriptionDates?.[subId];
+      if (dates?.startDate) starts[subId] = dates.startDate;
+      if (dates?.subscribedAt) subscribed[subId] = dates.subscribedAt;
     }
-    setAssignStartDates(dates);
+    setAssignStartDates(starts);
+    setAssignSubDates(subscribed);
     setAssignDiscounts({ ...(stu.subscriptionDiscounts ?? {}) });
     setBulkDiscountType("percent");
     setBulkDiscountValue(0);
@@ -991,16 +1000,21 @@ export function StudentsPage() {
         ? school?.registrationFee || 0
         : 0;
 
-    // Formation enrollments: start date chosen by the user, expiry derived
-    // from the formation's period.
+    // Enrollment dates for EVERY module: the registration day (informative) and
+    // the day billing opens — a séance attended before it is recorded but never
+    // charged. Formations additionally get an expiry derived from their period.
     const subscriptionDates: Record<string, SubscriptionDates> = {};
     for (const subId of selectedAssignIds) {
-      const formationSub = getFormationSub(subId);
-      if (!formationSub) continue;
+      // Stages ("coursework") are not subscriptions — they carry no dates.
+      if (!subscriptions.some((s) => s.id === subId)) continue;
       const startDate = assignStartDates[subId] || todayIso();
+      const formationSub = getFormationSub(subId);
       subscriptionDates[subId] = {
+        subscribedAt: assignSubDates[subId] || todayIso(),
         startDate,
-        expiryDate: addMonths(startDate, formationSub.periodMonths ?? 0),
+        expiryDate: formationSub
+          ? addMonths(startDate, formationSub.periodMonths ?? 0)
+          : undefined,
       };
     }
 
@@ -1180,9 +1194,19 @@ export function StudentsPage() {
       return;
     }
     setSelectedAssignIds([...withoutCourse, groupSubId]);
-    if (item.isFormation && !assignStartDates[groupSubId]) {
-      setAssignStartDates({ ...assignStartDates, [groupSubId]: todayIso() });
-    }
+    // A newly ticked module starts today by default; moving the student to
+    // another group of the same cours keeps the dates already chosen. Both stay
+    // editable right under the group picker.
+    setAssignStartDates({
+      ...assignStartDates,
+      [groupSubId]:
+        assignStartDates[groupSubId] ?? (current ? assignStartDates[current] : undefined) ?? todayIso(),
+    });
+    setAssignSubDates({
+      ...assignSubDates,
+      [groupSubId]:
+        assignSubDates[groupSubId] ?? (current ? assignSubDates[current] : undefined) ?? todayIso(),
+    });
   };
 
   const toggleCoursework = (item: AssignItem) => {
@@ -2434,6 +2458,21 @@ export function StudentsPage() {
                                   ? `Formation · Prix du niveau: ${formationSub.levelPrice ?? 0} DA · ${formationSub.periodMonths ?? 0} mois`
                                   : `Tarif: ${sub?.pricePerSession} DA / séance`}
                             </span>
+                            {!isCw && (
+                              <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted">
+                                <span>
+                                  Inscrit le <strong className="text-ink">{formatDateFr(dates?.subscribedAt)}</strong>
+                                </span>
+                                <span>
+                                  · Début <strong className="text-ink">{formatDateFr(dates?.startDate)}</strong>
+                                </span>
+                                {dates?.startDate && daysUntil(dates.startDate) > 0 && (
+                                  <Badge tone="success" className="text-[9px] px-1.5 py-0">
+                                    Pas encore commencé — séances offertes
+                                  </Badge>
+                                )}
+                              </span>
+                            )}
                             {formationSub && dates?.expiryDate && days !== null && (
                               <span className="flex items-center gap-1.5 mt-0.5 text-[10px] text-muted">
                                 Du {formatDateFr(dates.startDate)} au {formatDateFr(dates.expiryDate)}
@@ -2714,7 +2753,20 @@ export function StudentsPage() {
                                   <Badge tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}>
                                     {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
                                   </Badge>
-                                  <span className="font-bold text-danger text-[10px]">-{att.amountDeducted} DA</span>
+                                  {att.preStart || att.freePeriodId ? (
+                                    <span
+                                      className="text-[10px] font-bold text-success"
+                                      title={
+                                        att.preStart
+                                          ? "Séance offerte : abonnement pas encore commencé"
+                                          : "Séance offerte : période gratuite"
+                                      }
+                                    >
+                                      Offert ({att.waivedAmount ?? 0} DA)
+                                    </span>
+                                  ) : (
+                                    <span className="font-bold text-danger text-[10px]">-{att.amountDeducted} DA</span>
+                                  )}
                                   <button
                                     onClick={() => openEditAtt(att)}
                                     title="Modifier cette présence"
@@ -3161,10 +3213,14 @@ export function StudentsPage() {
               getAssignableItems().map((item) => {
                 const selectedId = selectedGroupOf(item);
                 const isChecked = !!selectedId;
-                // Reductions and formation dates hang off the CHOSEN group.
+                // Reductions and enrollment dates hang off the CHOSEN group.
                 const keyId = selectedId ?? item.id;
                 const startDate = assignStartDates[keyId] || todayIso();
+                const subDate = assignSubDates[keyId] || todayIso();
                 const expiryDate = item.isFormation ? addMonths(startDate, item.periodMonths ?? 0) : "";
+                // Billing has not opened yet: séances attended until then are
+                // recorded but never taken off the balance.
+                const startsLater = daysUntil(startDate) > 0;
                 const discount = assignDiscounts[keyId];
                 const net = netPriceFor(item.price, discount);
                 const hasDiscount = !!discount && discount.value > 0;
@@ -3304,11 +3360,27 @@ export function StudentsPage() {
                           </div>
                         )}
 
-                        {/* Formation: pick the start date, expiry is derived from the period */}
-                        {item.isFormation && (
+                        {/* Enrollment dates — every module, cours or formation.
+                            Both stay editable: reopening this modal reloads them. */}
+                        {!item.isCoursework && (
                           <>
                             <div>
-                              <label className="block text-[10px] font-semibold text-muted mb-1">Date de début *</label>
+                              <label className="block text-[10px] font-semibold text-muted mb-1">
+                                Date d&apos;inscription
+                              </label>
+                              <Input
+                                type="date"
+                                value={subDate}
+                                onChange={(e) =>
+                                  setAssignSubDates({ ...assignSubDates, [keyId]: e.target.value })
+                                }
+                                className="w-40"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[10px] font-semibold text-muted mb-1">
+                                Date de début *
+                              </label>
                               <Input
                                 type="date"
                                 value={startDate}
@@ -3317,14 +3389,21 @@ export function StudentsPage() {
                                 }
                                 className="w-40"
                               />
+                              {startsLater && (
+                                <span className="mt-1 block text-[9px] font-semibold text-success">
+                                  Séances offertes jusqu&apos;au {formatDateFr(startDate)}
+                                </span>
+                              )}
                             </div>
-                            <div className="pb-1.5 text-xs">
-                              <span className="block text-[10px] font-semibold text-muted mb-1">
-                                Date d&apos;expiration (calculée)
-                              </span>
-                              <strong className="text-primary">{formatDateFr(expiryDate)}</strong>
-                              <span className="text-muted"> · {item.periodMonths} mois</span>
-                            </div>
+                            {item.isFormation && (
+                              <div className="pb-1.5 text-xs">
+                                <span className="block text-[10px] font-semibold text-muted mb-1">
+                                  Date d&apos;expiration (calculée)
+                                </span>
+                                <strong className="text-primary">{formatDateFr(expiryDate)}</strong>
+                                <span className="text-muted"> · {item.periodMonths} mois</span>
+                              </div>
+                            )}
                           </>
                         )}
 
@@ -3369,6 +3448,15 @@ export function StudentsPage() {
                 );
               })
             )}
+          </div>
+
+          <div className="rounded-xl border border-line bg-canvas/40 p-3 text-[10px] leading-relaxed text-muted">
+            📅 <strong className="text-ink">Dates d&apos;inscription :</strong> la{" "}
+            <strong className="text-ink">date d&apos;inscription</strong> est le jour où l&apos;élève est enregistré
+            sur le module (information de suivi). La <strong className="text-ink">date de début</strong> est le jour
+            où la facturation commence : tant qu&apos;elle n&apos;est pas atteinte, la carte est acceptée, la présence
+            est enregistrée mais <strong className="text-ink">aucun montant n&apos;est retiré du solde</strong>. Les
+            deux dates restent modifiables ici à tout moment.
           </div>
 
           <div className="rounded-xl border border-line bg-canvas/40 p-3 text-[10px] leading-relaxed text-muted">

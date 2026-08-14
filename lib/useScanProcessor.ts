@@ -221,6 +221,15 @@ export function useScanProcessor() {
         const freeNote = isFreePeriod
           ? ` PÉRIODE GRATUITE${result.freePeriodName ? ` « ${result.freePeriodName} »` : ""} : séance offerte, aucun débit sur le solde.`
           : "";
+        // Inscription enregistrée avec une date de début future : la présence
+        // est écrite exactement comme d'habitude, mais le solde n'est PAS touché
+        // tant que l'abonnement n'a pas commencé.
+        const isPreStart = !!result.preStart;
+        const preStartNote = isPreStart
+          ? ` ABONNEMENT PAS ENCORE COMMENCÉ${
+              result.enrollmentStart ? ` (début le ${result.enrollmentStart.split("-").reverse().join("/")})` : ""
+            } : séance offerte, aucun débit sur le solde.`
+          : "";
         const substitution = result.otherGroup
           ? ` Rattrapage : présence enregistrée sur le groupe ${result.groupName ?? "suivi"}${
               result.ownGroupName ? ` (inscrit en ${result.ownGroupName})` : ""
@@ -236,16 +245,18 @@ export function useScanProcessor() {
               ? "Présence enregistrée — SOLDE EN DETTE"
               : isFreePeriod
                 ? "Présence Enregistrée — GRATUIT"
-                : isLate
-                  ? "Présence en Retard"
-                  : result.otherGroup
-                    ? "Présence Enregistrée — Rattrapage"
-                    : "Présence Enregistrée",
+                : isPreStart
+                  ? "Présence Enregistrée — AVANT LE DÉBUT (aucun débit)"
+                  : isLate
+                    ? "Présence en Retard"
+                    : result.otherGroup
+                      ? "Présence Enregistrée — Rattrapage"
+                      : "Présence Enregistrée",
           message: isAlready
             ? `L'élève a déjà pointé pour ${sessionInfo ?? "cette séance"} aujourd'hui.${substitution}`
             : isDebt
               ? `${sessionInfo ? `Séance ${sessionInfo}. ` : ""}Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée.${substitution}`
-              : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.${substitution}${freeNote}`,
+              : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.${substitution}${freeNote}${preStartNote}`,
           studentName: studentName(student),
           cost: result.cost,
           newBalance: result.newBalance,

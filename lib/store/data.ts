@@ -327,6 +327,7 @@ const attendanceMapper = makeMapper<AttendanceRecord>([
   ["status", "status"],
   ["substituteGroup", "substitute_group"],
   ["freePeriodId", "free_period_id"],
+  ["preStart", "pre_start"],
   ["waivedAmount", "waived_amount"],
 ]);
 
@@ -466,10 +467,14 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
       subscriptionIds: (row.student_subscriptions ?? []).map((r: any) => r.subscription_id), // eslint-disable-line @typescript-eslint/no-explicit-any
       subscriptionDates: Object.fromEntries(
         (row.student_subscriptions ?? [])
-          .filter((r: any) => r.start_date || r.expiry_date) // eslint-disable-line @typescript-eslint/no-explicit-any
+          .filter((r: any) => r.subscribed_at || r.start_date || r.expiry_date) // eslint-disable-line @typescript-eslint/no-explicit-any
           .map((r: any) => [ // eslint-disable-line @typescript-eslint/no-explicit-any
             r.subscription_id,
-            { startDate: r.start_date ?? undefined, expiryDate: r.expiry_date ?? undefined },
+            {
+              subscribedAt: r.subscribed_at ?? undefined,
+              startDate: r.start_date ?? undefined,
+              expiryDate: r.expiry_date ?? undefined,
+            },
           ]),
       ),
       subscriptionDiscounts: Object.fromEntries(
@@ -562,7 +567,13 @@ export interface ScanResult {
   free?: boolean;
   /** label of that free period */
   freePeriodName?: string;
-  /** what the free period offered on this scan (the price NOT charged) */
+  /** the séance happened BEFORE the enrollment's start date: presence written,
+   *  balance strictly untouched */
+  preStart?: boolean;
+  /** that start date (YYYY-MM-DD), only set when preStart */
+  enrollmentStart?: string;
+  /** what was offered on this scan — free period or pre-start séance (the
+   *  price NOT charged) */
   waived?: number;
   messageKey: string;
 }
@@ -1077,7 +1088,9 @@ export const useData = create<DataStore>((set, get) => ({
       // the id list (e.g. unsubscribing from one module).
       const dates = fields.subscriptionDates ?? previous?.subscriptionDates ?? {};
       const discounts = fields.subscriptionDiscounts ?? previous?.subscriptionDiscounts ?? {};
-      const hasDates = ids.some((sid) => dates[sid]?.startDate || dates[sid]?.expiryDate);
+      const hasDates = ids.some(
+        (sid) => dates[sid]?.subscribedAt || dates[sid]?.startDate || dates[sid]?.expiryDate,
+      );
       const hasDiscounts = ids.some((sid) => (discounts[sid]?.value ?? 0) > 0);
       supabase
         .from("student_subscriptions")
@@ -1093,6 +1106,7 @@ export const useData = create<DataStore>((set, get) => ({
                   // cours-only enrollments still work before the migrations.
                   const row: Record<string, unknown> = { student_id: id, subscription_id };
                   if (hasDates) {
+                    row.subscribed_at = dates[subscription_id]?.subscribedAt ?? null;
                     row.start_date = dates[subscription_id]?.startDate ?? null;
                     row.expiry_date = dates[subscription_id]?.expiryDate ?? null;
                   }

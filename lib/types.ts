@@ -192,8 +192,18 @@ export interface Subscription {
   periodMonths?: number;
 }
 
-/** Per-student enrollment window for a formation subscription (YYYY-MM-DD). */
+/**
+ * Per-student enrollment dates (YYYY-MM-DD), kept for EVERY enrollment —
+ * cours and formations alike:
+ *  - `subscribedAt`: the day reception registered the student on that module
+ *    (purely informative, it never drives a price),
+ *  - `startDate`: the day billing starts. A séance attended BEFORE it is
+ *    recorded as usual but never charged (see `AttendanceRecord.preStart`),
+ *  - `expiryDate`: end of the enrollment — only formations get one, derived
+ *    from the level's duration. Past it, the card is refused.
+ */
 export interface SubscriptionDates {
+  subscribedAt?: string;
   startDate?: string;
   expiryDate?: string;
 }
@@ -325,7 +335,11 @@ export interface AttendanceRecord {
   substituteGroup?: boolean;
   /** the séance was offered by this free period (nothing was deducted) */
   freePeriodId?: string;
-  /** the price the free period waived — 0 on every ordinary presence */
+  /** the séance happened BEFORE the enrollment's start date: presence kept,
+   *  balance untouched (the price sits in `waivedAmount`) */
+  preStart?: boolean;
+  /** the price that was NOT charged (free period or pre-start séance) — 0 on
+   *  every ordinary presence */
   waivedAmount?: number;
 }
 
