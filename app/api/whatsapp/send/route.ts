@@ -8,7 +8,7 @@ import {
   sendTemplateMessage,
   sendTextMessage,
 } from "@/lib/whatsapp/client";
-import { isWithinServiceWindow, logOutgoingMessage } from "@/lib/whatsapp/log";
+import { logOutgoingMessage } from "@/lib/whatsapp/log";
 import { normalizePhone } from "@/lib/whatsapp/phone";
 import { MAX_MESSAGE_LENGTH, isAlertTemplate } from "@/lib/whatsapp/templates";
 import type { OutgoingMessage, SendResult } from "@/lib/whatsapp/types";
@@ -153,9 +153,12 @@ export async function POST(request: Request) {
   }
 }
 
-/** Envoie un message unique. Un texte libre n'est tenté que si la fenêtre de
- *  service client est ouverte — sinon on lève une erreur explicite, sans appeler
- *  Meta pour rien. Les modèles approuvés partent toujours (message proactif). */
+/** Envoie un message unique. Les modèles approuvés partent toujours (message
+ *  proactif). Pour un texte libre, c'est Meta qui arbitre la fenêtre de service
+ *  client de 24 h : on tente l'envoi et, hors fenêtre, Meta répond 131047,
+ *  traduit par le client en une erreur claire. On ne bloque plus localement sur
+ *  notre propre suivi des messages entrants, qui peut être incomplet tant que le
+ *  webhook n'alimente pas whatsapp_contacts. */
 async function sendOne(to: string, message: OutgoingMessage): Promise<{ messageId: string }> {
   if (message.kind === "template") {
     return sendTemplateMessage(to, {
@@ -163,14 +166,6 @@ async function sendOne(to: string, message: OutgoingMessage): Promise<{ messageI
       variables: message.variables,
       language: message.language,
     });
-  }
-
-  const open = await isWithinServiceWindow(to);
-  if (!open) {
-    throw new WhatsAppError(
-      "Message libre impossible : la famille n'a pas écrit à l'école dans les dernières 24 h (fenêtre de service client fermée). Utiliser un modèle d'alerte approuvé.",
-      422,
-    );
   }
   return sendTextMessage(to, message.text);
 }
