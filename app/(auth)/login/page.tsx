@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/SearchInput";
-import { Modal } from "@/components/ui/Modal";
 import { ThemeToggle } from "@/components/controls/ThemeToggle";
 import { LanguageSwitcher } from "@/components/controls/LanguageSwitcher";
 import { useTranslation } from "@/lib/i18n/useTranslation";
@@ -30,7 +29,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
 
   const handleManual = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -146,110 +144,7 @@ export default function LoginPage() {
             {loading ? "..." : t("auth.signIn")}
           </Button>
         </form>
-
-        <button
-          onClick={() => setCreateOpen(true)}
-          className="mt-6 w-full text-center text-sm font-medium text-primary hover:underline"
-        >
-          {t("auth.createAdmin")}
-        </button>
       </motion.div>
-
-      <CreateAdminModal open={createOpen} onClose={() => setCreateOpen(false)} />
     </div>
-  );
-}
-
-function CreateAdminModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { t } = useTranslation();
-  const router = useRouter();
-  const login = useSession((s) => s.login);
-  const updateSchool = useData((s) => s.updateSchool);
-
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [school, setSchool] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const handleCreate = async () => {
-    if (loading) return;
-    if (!name.trim() || !email.trim() || password.length < 6) {
-      setError("Nom, email et mot de passe (6 caractères min.) requis.");
-      return;
-    }
-    setLoading(true);
-    setError("");
-
-    const res = await fetch("/api/admin/users", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ role: "admin", email: email.trim(), password, fullName: name.trim() }),
-    });
-    const body = await res.json();
-
-    if (!res.ok) {
-      setLoading(false);
-      setError(body.error ?? "Impossible de créer le compte.");
-      return;
-    }
-
-    if (school.trim()) updateSchool({ name: school.trim() });
-
-    const supabase = createClient();
-    const { data, error: signInError } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    });
-
-    if (signInError || !data.user) {
-      setLoading(false);
-      setError("Compte créé, mais la connexion automatique a échoué. Connectez-vous manuellement.");
-      return;
-    }
-
-    login({
-      id: data.user.id,
-      name: name.trim(),
-      username: data.user.email ?? "",
-      email: data.user.email ?? "",
-      role: "admin",
-      entityId: data.user.id,
-    });
-    onClose();
-    // Keep `loading` true until the redirect unmounts the modal.
-    router.replace(roleHome("admin"));
-  };
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title={t("auth.createAdmin")}
-      footer={
-        <>
-          <Button variant="outline" onClick={onClose}>
-            {t("common.cancel")}
-          </Button>
-          <Button onClick={handleCreate} disabled={loading}>
-            {loading ? "..." : t("auth.createAccount")}
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-3">
-        <Input placeholder={t("auth.fullName")} value={name} onChange={(e) => setName(e.target.value)} />
-        <Input type="email" placeholder={t("auth.email")} value={email} onChange={(e) => setEmail(e.target.value)} />
-        <Input
-          type="password"
-          placeholder={t("auth.password")}
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        <Input placeholder={t("auth.schoolName")} value={school} onChange={(e) => setSchool(e.target.value)} />
-        {error && <p className="text-sm font-medium text-danger">{error}</p>}
-      </div>
-    </Modal>
   );
 }
