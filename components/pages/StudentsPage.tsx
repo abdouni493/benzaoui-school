@@ -28,13 +28,14 @@ import {
   Send,
   AlertTriangle,
   MessageCircle,
-  Clock,
   Repeat,
 } from "lucide-react";
 import type {
   AbsencePenalty,
   AttendanceRecord,
   AttendanceStatus,
+  CoursLevel,
+  SchoolClass,
   Student,
   Subscription,
   SubscriptionDates,
@@ -46,13 +47,18 @@ import type {
 } from "@/lib/types";
 import {
   addMonths,
+  classCascadeLabel,
   courseKeyOf,
   daysUntil,
   formatDateFr,
   formatDays,
+  matchesAllWords,
   netPriceFor,
   todayIso,
+  COURS_LEVELS,
+  COURS_LEVEL_LABELS,
   EXPIRY_WARNING_DAYS,
+  YEAR_ORDER,
 } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 import { printHtmlDocument } from "@/lib/print";
@@ -159,11 +165,17 @@ export function StudentsPage() {
   const [initialTopup, setInitialTopup] = useState<number>(0);
   const [initialTopupDesc, setInitialTopupDesc] = useState("Premier versement");
 
-  // Form: inscriptions taken at creation time — search a class, then pick one
-  // or several of its créneaux (the picked groups are kept in the shared
-  // `selectedAssignIds` / dates / reductions state used by the "Affecter" modal).
+  // Form: inscriptions taken at creation time. Reception walks down niveau →
+  // année → filière, then ticks the créneaux of that combination (the picked
+  // groups are kept in the shared `selectedAssignIds` / dates / reductions
+  // state used by the "Affecter" modal). The search box short-circuits the
+  // three steps by matching "niveau + année + filière" in one go.
   const [createClassSearch, setCreateClassSearch] = useState("");
-  const [createClassId, setCreateClassId] = useState("");
+  const [createLevel, setCreateLevel] = useState<"" | CoursLevel | "formation">("");
+  /** année of the picked niveau — or, on the formations branch, their level. */
+  const [createYear, setCreateYear] = useState("");
+  /** filière id, or "none" for the classes that carry no filière. */
+  const [createFiliereId, setCreateFiliereId] = useState("");
 
   // Form: Topup
   const [topupAmount, setTopupAmount] = useState<number>(0);
@@ -806,7 +818,9 @@ export function StudentsPage() {
     setInitialTopup(0);
     setInitialTopupDesc("Premier versement");
     setCreateClassSearch("");
-    setCreateClassId("");
+    setCreateLevel("");
+    setCreateYear("");
+    setCreateFiliereId("");
   };
 
   const openEdit = (stu: Student) => {
@@ -1130,18 +1144,18 @@ export function StudentsPage() {
    *  - `search` (default: the "Affecter" search box) matches everything printed
    *    on the card: module, class, level, filière, teacher, group, salle, day
    *    and time.
-   *  - `classId` restricts the list to the timings of ONE class — that is what
-   *    the creation screen uses once a class has been picked. Stages are then
-   *    left out: they belong to no class.
+   *  - `classIds` restricts the list to the timings of those classes — that is
+   *    what the creation screen uses once niveau/année/filière are picked.
+   *    Stages are then left out: they belong to no class.
    */
-  const getAssignableItems = (opts: { search?: string; classId?: string } = {}): AssignItem[] => {
+  const getAssignableItems = (opts: { search?: string; classIds?: string[] } = {}): AssignItem[] => {
     const search = (opts.search ?? assignSearch).trim().toLowerCase();
     const byCourse = new Map<string, AssignItem>();
 
     subscriptions.forEach((sub) => {
       const s = sessions.find((se) => se.id === sub.sessionId);
       if (!s) return;
-      if (opts.classId && !sessionCoversClass(s, opts.classId)) return;
+      if (opts.classIds && !opts.classIds.some((cid) => sessionCoversClass(s, cid))) return;
       const cls = classes.find((c) => c.id === s.classId);
       const mod = modules.find((m) => m.id === s.moduleId);
       const t = teachers.find((te) => te.id === s.teacherId);
@@ -1212,7 +1226,7 @@ export function StudentsPage() {
     list.sort((a, b) => a.moduleName.localeCompare(b.moduleName));
 
     // Stages belong to no class, so they never show up in a class-scoped list.
-    if (opts.classId) return list;
+    if (opts.classIds) return list;
 
     coursework.forEach((cw) => {
       const t = teachers.find((te) => te.id === cw.teacherId);
@@ -1299,35 +1313,130 @@ export function StudentsPage() {
   const createRegistrationFee =
     selectedAssignIds.length > 0 && !isFree ? school?.registrationFee || 0 : 0;
 
-  // ---- Creation screen: search a class, then pick its créneaux --------------
-  /** Classes matching the creation-screen search box, with a count of the
-   *  timings that are actually assignable (i.e. priced) on each one. */
-  const getSearchableClasses = () => {
-    const search = createClassSearch.trim().toLowerCase();
-    return classes
-      .map((cls) => {
-        const fil = cls.filiereId ? filieres.find((f) => f.id === cls.filiereId)?.name ?? "" : "";
-        const levelLabel = (cls.type === "cours" ? cls.coursLevel : cls.formationLevel) ?? "";
-        const timings = subscriptions.filter((sub) => {
-          const s = sessions.find((se) => se.id === sub.sessionId);
-          return !!s && sessionCoversClass(s, cls.id);
-        }).length;
-        return {
-          id: cls.id,
-          name: cls.name,
-          levelLabel,
-          filiereLabel: fil,
-          year: cls.year ?? "",
-          isFormation: cls.type === "formation",
-          timings,
-          haystack: [cls.name, levelLabel, fil, cls.year, cls.type, cls.description]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase(),
-        };
-      })
-      .filter((c) => !search || c.haystack.includes(search))
-      .sort((a, b) => a.name.localeCompare(b.name));
+  // ---- Creation screen: niveau → année → filière, then the créneaux ---------
+  // Reception picks the student's schooling the way it is spoken about: the
+  // level first (primaire / moyen / lycée), then the year of that level, then
+  // the filière. Every timing created on that combination is then listed. The
+  // search box above short-circuits the three steps: "lycée 2eme sciences"
+  // jumps straight to the same list.
+
+  /** Name of one filière, "Sans filière" for classes that carry none. */
+  const filiereLabelOf = (filiereId?: string) =>
+    filiereId ? filieres.find((f) => f.id === filiereId)?.name ?? "Filière inconnue" : "Sans filière";
+
+  /** "Lycée · 2eme Année · Sciences" — what the direct search matches on. */
+  const classFullLabel = (cls: SchoolClass) =>
+    classCascadeLabel(cls, cls.filiereId ? filiereLabelOf(cls.filiereId) : "");
+
+  /** How many priced créneaux one class actually offers. A class with none
+   *  cannot be enrolled on, so every step advertises the count it leads to. */
+  const timingCountOf = (classId: string) =>
+    subscriptions.filter((sub) => {
+      const s = sessions.find((se) => se.id === sub.sessionId);
+      return !!s && sessionCoversClass(s, classId);
+    }).length;
+
+  const timingCountFor = (list: SchoolClass[]) =>
+    list.reduce((sum, cls) => sum + timingCountOf(cls.id), 0);
+
+  /** Classes of the level currently picked (formations are their own branch). */
+  const createLevelClasses = () =>
+    createLevel === "formation"
+      ? classes.filter((c) => c.type === "formation")
+      : classes.filter((c) => c.type === "cours" && c.coursLevel === createLevel);
+
+  /** Step 1 options — only the levels the school actually has classes for. */
+  const createLevelOptions = () => {
+    const options = COURS_LEVELS.map((level) => ({
+      value: level as "" | CoursLevel | "formation",
+      label: COURS_LEVEL_LABELS[level],
+      classes: classes.filter((c) => c.type === "cours" && c.coursLevel === level),
+    }));
+    const formations = classes.filter((c) => c.type === "formation");
+    if (formations.length > 0) {
+      options.push({ value: "formation", label: "Formations", classes: formations });
+    }
+    return options
+      .filter((o) => o.classes.length > 0)
+      .map((o) => ({ value: o.value, label: o.label, count: timingCountFor(o.classes) }));
+  };
+
+  /** Groups the classes of the picked level by their second axis: the année —
+   *  or, on the formations branch, their level (A1, B2…), which `createYear`
+   *  holds all the same. */
+  const createYearOptions = () => {
+    const byKey = new Map<string, SchoolClass[]>();
+    for (const cls of createLevelClasses()) {
+      const key = (createLevel === "formation" ? cls.formationLevel : cls.year) ?? "";
+      if (!key) continue;
+      byKey.set(key, [...(byKey.get(key) ?? []), cls]);
+    }
+    return [...byKey.entries()]
+      .map(([value, list]) => ({
+        value,
+        label: createLevel === "formation" ? `Niveau ${value}` : `${value} Année`,
+        count: timingCountFor(list),
+      }))
+      .sort((a, b) => {
+        const ia = YEAR_ORDER.indexOf(a.value);
+        const ib = YEAR_ORDER.indexOf(b.value);
+        if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+        return a.value.localeCompare(b.value);
+      });
+  };
+
+  /** Step 3 options: the filières taught on the picked level + année. */
+  const createFiliereOptions = () => {
+    const byKey = new Map<string, SchoolClass[]>();
+    for (const cls of createLevelClasses()) {
+      if ((cls.year ?? "") !== createYear) continue;
+      const key = cls.filiereId || "none";
+      byKey.set(key, [...(byKey.get(key) ?? []), cls]);
+    }
+    return [...byKey.entries()]
+      .map(([value, list]) => ({
+        value,
+        label: value === "none" ? "Sans filière" : filiereLabelOf(value),
+        count: timingCountFor(list),
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  };
+
+  /**
+   * The classes whose créneaux the creation screen must list: the ones matching
+   * the direct search when it carries text, otherwise the ones matching the
+   * niveau → année → filière cascade. Several classes can share a combination,
+   * so this always returns a list.
+   */
+  const createMatchedClasses = (): SchoolClass[] => {
+    const query = createClassSearch.trim();
+    if (query) {
+      // Every word must match, in any order: "2eme lycee sciences" works too.
+      return classes.filter((cls) =>
+        matchesAllWords(`${classFullLabel(cls)} ${cls.name} ${cls.description ?? ""}`, query),
+      );
+    }
+    if (!createLevel || !createYear) return [];
+    if (createLevel === "formation") {
+      return createLevelClasses().filter((c) => (c.formationLevel ?? "") === createYear);
+    }
+    if (!createFiliereId) return [];
+    return createLevelClasses().filter(
+      (c) =>
+        (c.year ?? "") === createYear &&
+        (createFiliereId === "none" ? !c.filiereId : c.filiereId === createFiliereId),
+    );
+  };
+
+  /** Going back up the cascade clears every step below it. */
+  const pickCreateLevel = (level: "" | CoursLevel | "formation") => {
+    setCreateLevel(level);
+    setCreateYear("");
+    setCreateFiliereId("");
+  };
+  const pickCreateYear = (year: string) => {
+    setCreateYear(year);
+    setCreateFiliereId("");
   };
 
   const handlePrintStudent = (stu: Student) => {
@@ -2469,7 +2578,7 @@ export function StudentsPage() {
           </p>
         </div>
 
-        {/* ---- 2. Inscriptions: chercher la classe, puis ses créneaux -------- */}
+        {/* ---- 2. Inscriptions: niveau → année → filière, puis les créneaux -- */}
         <div className="mt-4 rounded-xl border border-primary/25 bg-primary-50/40 p-3 space-y-3">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-primary">
@@ -2478,106 +2587,187 @@ export function StudentsPage() {
             <span className="text-[10px] text-muted">Facultatif</span>
           </div>
 
-          {/* Class search */}
+          {/* Direct search: "lycee 2eme sciences" lands on the same créneaux
+              as walking the three steps below, in any word order. */}
           <div>
             <label className="block text-[10px] font-semibold text-muted mb-1">
-              Rechercher la classe de l&apos;étudiant
+              Recherche directe : niveau + année + filière
             </label>
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
               <Input
                 value={createClassSearch}
                 onChange={(e) => setCreateClassSearch(e.target.value)}
-                placeholder="Rechercher par classe, niveau, filière, année..."
-                className="pl-9"
+                placeholder="Ex: lycee 2eme sciences"
+                className="pl-9 pr-20"
               />
+              {createClassSearch && (
+                <button
+                  onClick={() => setCreateClassSearch("")}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-primary hover:underline"
+                >
+                  Effacer
+                </button>
+              )}
             </div>
           </div>
 
-          <div className="max-h-40 overflow-y-auto rounded-xl border border-line bg-canvas/30 p-2 space-y-1.5">
-            {getSearchableClasses().length === 0 ? (
-              <p className="px-1 py-2 text-xs italic text-muted">Aucune classe ne correspond à cette recherche.</p>
-            ) : (
-              getSearchableClasses().map((cls) => {
-                const active = createClassId === cls.id;
-                return (
-                  <button
-                    key={cls.id}
-                    onClick={() => setCreateClassId(active ? "" : cls.id)}
-                    className={`flex w-full flex-wrap items-center justify-between gap-2 rounded-lg border p-2 text-start text-[11px] transition-colors ${
-                      active
-                        ? "border-primary bg-primary text-white"
-                        : "border-line bg-surface text-ink hover:bg-primary-50"
-                    }`}
-                  >
-                    <span className="font-bold">
-                      {cls.name}
-                      {cls.isFormation && (
-                        <span
-                          className={`ml-1.5 rounded px-1.5 py-0.5 text-[9px] font-bold ${
-                            active ? "bg-white/20 text-white" : "bg-primary/15 text-primary"
+          {/* Steps 1→3, hidden while the search box drives the list itself. */}
+          {!createClassSearch.trim() && (
+            <div className="space-y-2.5">
+              <div>
+                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                  1. Niveau scolaire
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {createLevelOptions().length === 0 ? (
+                    <p className="text-xs italic text-muted">Aucune classe enregistrée dans l&apos;école.</p>
+                  ) : (
+                    createLevelOptions().map((opt) => {
+                      const active = createLevel === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          onClick={() => pickCreateLevel(active ? "" : opt.value)}
+                          className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                            active
+                              ? "border-primary bg-primary text-white"
+                              : "border-line bg-surface text-ink hover:bg-primary-50"
                           }`}
                         >
-                          Formation
-                        </span>
-                      )}
-                    </span>
-                    <span
-                      className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 ${
-                        active ? "text-white/85" : "text-muted"
-                      }`}
-                    >
-                      {cls.levelLabel && <span>{cls.levelLabel}</span>}
-                      {cls.filiereLabel && <span>{cls.filiereLabel}</span>}
-                      {cls.year && <span>{cls.year}</span>}
-                      <span className="flex items-center gap-1">
-                        <Clock className="h-3 w-3" /> {cls.timings} créneau(x)
-                      </span>
-                    </span>
-                  </button>
-                );
-              })
-            )}
-          </div>
-
-          {/* Timings of the picked class */}
-          {createClassId && (
-            <div className="space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                  Créneaux de{" "}
-                  <strong className="text-ink">
-                    {classes.find((c) => c.id === createClassId)?.name ?? "la classe"}
-                  </strong>{" "}
-                  — cochez ceux de l&apos;étudiant
-                </span>
-                <button
-                  onClick={() => setCreateClassId("")}
-                  className="text-[10px] font-bold text-primary hover:underline"
-                >
-                  Changer de classe
-                </button>
+                          {opt.label}
+                          <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
+                            {opt.count} créneau{opt.count > 1 ? "x" : ""}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
               </div>
 
-              <EnrollmentCards
-                items={getAssignableItems({ classId: createClassId, search: "" })}
-                selectedIds={selectedAssignIds}
-                subDates={assignSubDates}
-                startDates={assignStartDates}
-                discounts={assignDiscounts}
-                onPickGroup={pickGroup}
-                onToggleCoursework={toggleCoursework}
-                onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
-                onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
-                onDiscountChange={setItemDiscount}
-                emptyLabel="Aucun créneau tarifé pour cette classe — définissez d'abord son tarif dans « Abonnements »."
-                className="max-h-72"
-              />
+              {createLevel && (
+                <div>
+                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                    2. {createLevel === "formation" ? "Niveau de formation" : "Année"}
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {createYearOptions().length === 0 ? (
+                      <p className="text-xs italic text-muted">Aucune classe pour ce niveau.</p>
+                    ) : (
+                      createYearOptions().map((opt) => {
+                        const active = createYear === opt.value;
+                        return (
+                          <button
+                            key={opt.value}
+                            onClick={() => pickCreateYear(active ? "" : opt.value)}
+                            className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                              active
+                                ? "border-primary bg-primary text-white"
+                                : "border-line bg-surface text-ink hover:bg-primary-50"
+                            }`}
+                          >
+                            {opt.label}
+                            <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
+                              {opt.count} créneau{opt.count > 1 ? "x" : ""}
+                            </span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Formations carry no filière — their level is the last step. */}
+              {createLevel && createLevel !== "formation" && createYear && (
+                <div>
+                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                    3. Filière
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {createFiliereOptions().length === 0 ? (
+                      <p className="text-xs italic text-muted">Aucune classe pour cette année.</p>
+                    ) : (
+                      createFiliereOptions().map((opt) => {
+                        const active = createFiliereId === opt.value;
+                        return (
+                          <button
+                            key={opt.value}
+                            onClick={() => setCreateFiliereId(active ? "" : opt.value)}
+                            className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                              active
+                                ? "border-primary bg-primary text-white"
+                                : "border-line bg-surface text-ink hover:bg-primary-50"
+                            }`}
+                          >
+                            {opt.label}
+                            <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
+                              {opt.count} créneau{opt.count > 1 ? "x" : ""}
+                            </span>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Recap: the selection survives changing class, so a student can be
-              enrolled on several classes in one pass. */}
+          {/* Every créneau created on the matched niveau + année + filière */}
+          {(() => {
+            const matched = createMatchedClasses();
+            const searching = !!createClassSearch.trim();
+            // Nothing picked yet and nothing typed: the steps above speak for
+            // themselves, there is no empty list to show.
+            if (matched.length === 0 && !searching) return null;
+
+            if (matched.length === 0) {
+              return (
+                <p className="rounded-xl border border-line bg-canvas/30 px-3 py-2.5 text-xs italic text-muted">
+                  Aucune classe ne correspond à «&nbsp;{createClassSearch.trim()}&nbsp;». Essayez «&nbsp;niveau
+                  année filière&nbsp;», par exemple «&nbsp;lycee 2eme sciences&nbsp;».
+                </p>
+              );
+            }
+
+            return (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Créneaux de{" "}
+                    <strong className="text-ink">
+                      {matched.slice(0, 3).map((c) => classFullLabel(c)).join(" / ")}
+                      {matched.length > 3 ? ` +${matched.length - 3} autre(s)` : ""}
+                    </strong>{" "}
+                    — cochez ceux de l&apos;étudiant
+                  </span>
+                  <span className="text-[10px] text-muted">
+                    {matched.reduce((sum, c) => sum + timingCountOf(c.id), 0)} créneau(x)
+                  </span>
+                </div>
+
+                <EnrollmentCards
+                  items={getAssignableItems({ classIds: matched.map((c) => c.id), search: "" })}
+                  selectedIds={selectedAssignIds}
+                  subDates={assignSubDates}
+                  startDates={assignStartDates}
+                  discounts={assignDiscounts}
+                  onPickGroup={pickGroup}
+                  onToggleCoursework={toggleCoursework}
+                  onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
+                  onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
+                  onDiscountChange={setItemDiscount}
+                  emptyLabel="Aucun créneau tarifé ici — définissez d'abord son tarif dans « Abonnements »."
+                  className="max-h-72"
+                />
+              </div>
+            );
+          })()}
+
+          {/* Recap: the selection survives changing niveau/année/filière, so a
+              student can be enrolled across several classes in one pass. */}
           {selectedAssignIds.length > 0 && (
             <div className="rounded-xl border border-line bg-surface p-2.5 space-y-2">
               <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">

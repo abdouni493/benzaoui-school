@@ -1,6 +1,7 @@
 import type { Database } from "@/lib/store/data";
 import { DAYS } from "@/lib/types";
 import type {
+  CoursLevel,
   Day,
   ScheduleSession,
   SchoolClass,
@@ -50,6 +51,62 @@ export function classLabel(db: Database, cls: SchoolClass): string {
 
 export function classOf(db: Database, id: string): SchoolClass | undefined {
   return db.classes.find((c) => c.id === id);
+}
+
+// ---- Niveau / année / filière ------------------------------------------------
+/** Niveaux scolaires, dans l'ordre où la scolarité se déroule. */
+export const COURS_LEVELS: CoursLevel[] = ["primaire", "moyen", "lycee"];
+export const COURS_LEVEL_LABELS: Record<CoursLevel, string> = {
+  primaire: "Primaire",
+  moyen: "Moyen",
+  lycee: "Lycée",
+};
+/** Années, dans l'ordre — les classes n'en stockent que le libellé brut. */
+export const YEAR_ORDER = ["1er", "2eme", "3eme", "4eme", "5eme"];
+
+/**
+ * How a class is spoken about at the desk: "Lycée · 2eme Année · Sciences".
+ * Formations have neither année nor filière, so they show their level instead.
+ * `filiereName` is passed in (empty when the class carries none) so this stays
+ * a pure function of the class itself.
+ */
+export function classCascadeLabel(cls: SchoolClass, filiereName = ""): string {
+  if (cls.type === "formation") {
+    return ["Formation", cls.formationLevel, cls.name].filter(Boolean).join(" · ");
+  }
+  return [
+    cls.coursLevel ? COURS_LEVEL_LABELS[cls.coursLevel] : "",
+    cls.year ? `${cls.year} Année` : "",
+    filiereName,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Accent- and case-insensitive text, so "lycee" matches "Lycée". NFD splits an
+ *  accented letter into letter + combining mark, and the marks (U+0300 to
+ *  U+036F) are then dropped. */
+export function normalizeSearchText(value: string): string {
+  return [...value.normalize("NFD")]
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      return code < 0x0300 || code > 0x036f;
+    })
+    .join("")
+    .toLowerCase();
+}
+
+/**
+ * Every word of the query must appear somewhere in `text`, in any order and
+ * ignoring accents — so "2eme lycee sciences" finds "Lycée · 2eme Année ·
+ * Sciences" just as well as "lycee 2eme sciences" does. An empty query matches
+ * everything.
+ */
+export function matchesAllWords(text: string, query: string): boolean {
+  const words = normalizeSearchText(query).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true;
+  const haystack = normalizeSearchText(text);
+  return words.every((word) => haystack.includes(word));
 }
 
 /** Identity of a "cours": one class + one module + one teacher, taught to
