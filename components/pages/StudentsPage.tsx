@@ -29,8 +29,6 @@ import {
   AlertTriangle,
   MessageCircle,
   Clock,
-  MapPin,
-  Users,
   Repeat,
 } from "lucide-react";
 import type {
@@ -50,7 +48,6 @@ import {
   addMonths,
   courseKeyOf,
   daysUntil,
-  discountLabel,
   formatDateFr,
   formatDays,
   netPriceFor,
@@ -70,6 +67,12 @@ import {
 import { isSendablePhone } from "@/lib/whatsapp/phone";
 import { buildBalanceAlert } from "@/lib/whatsapp/alert";
 import type { SendResponse } from "@/lib/whatsapp/types";
+import {
+  EnrollmentCards,
+  selectedGroupIn,
+  type AssignGroupOption,
+  type AssignItem,
+} from "@/components/students/EnrollmentPicker";
 
 /** Libellés des types de ligne du solde (onglet « Transactions »). */
 const TX_TYPE_LABELS: Record<BalanceTxType, string> = {
@@ -149,6 +152,18 @@ export function StudentsPage() {
   const [isFree, setIsFree] = useState(false);
   const [isEmailDirty, setIsEmailDirty] = useState(false);
   const [isPasswordDirty, setIsPasswordDirty] = useState(false);
+
+  // Form: first top-up written straight from the creation screen. It goes
+  // through the very same `add_student_balance` RPC as the "Recharge" button,
+  // so it lands in the student's transaction history and in the caisse.
+  const [initialTopup, setInitialTopup] = useState<number>(0);
+  const [initialTopupDesc, setInitialTopupDesc] = useState("Premier versement");
+
+  // Form: inscriptions taken at creation time — search a class, then pick one
+  // or several of its créneaux (the picked groups are kept in the shared
+  // `selectedAssignIds` / dates / reductions state used by the "Affecter" modal).
+  const [createClassSearch, setCreateClassSearch] = useState("");
+  const [createClassId, setCreateClassId] = useState("");
 
   // Form: Topup
   const [topupAmount, setTopupAmount] = useState<number>(0);
@@ -385,6 +400,17 @@ export function StudentsPage() {
 
     const finalEmail = email || `${firstName.toLowerCase()}.${rfid.toLowerCase()}@elilm.com`;
 
+    // Inscriptions picked on this same screen. The one-time registration fee is
+    // charged here rather than on the first "Affecter", exactly like
+    // `handleAssignSubmit` does — paying students only.
+    const enrollIds = [...selectedAssignIds];
+    const registrationDue = createRegistrationFee;
+
+    const topupAmountToWrite = Math.round(initialTopup || 0);
+    // The RPC settles the fee out of the payment itself (and writes the matching
+    // "registration" history row), so it only makes sense with a real payment.
+    const settleRegistrationNow = settleReg && topupAmountToWrite > 0 && registrationDue > 0;
+
     try {
       const { id: studentId } = await createRoleUser({
         role: "student",
@@ -396,7 +422,7 @@ export function StudentsPage() {
         birthDate,
         rfid,
         isFree,
-        registrationDue: 0,
+        registrationDue,
       });
 
       const newStudent: Student = {
@@ -410,7 +436,7 @@ export function StudentsPage() {
         balance: 0,
         isFree,
         subscriptionIds: [],
-        registrationDue: 0,
+        registrationDue,
       };
       push("students", newStudent);
 
@@ -418,8 +444,53 @@ export function StudentsPage() {
       // It lives in a staff-only table — never readable by the student/parent.
       await setStudentPassword(studentId, password);
 
+      // The top-up RPC ends with a full refetch, so it has to run BEFORE the
+      // enrollment write — otherwise that refetch would land while the
+      // student_subscriptions rows are still in flight and wipe them locally.
+      let topupError = "";
+      if (topupAmountToWrite > 0) {
+        const res = await addBalance(
+          studentId,
+          topupAmountToWrite,
+          initialTopupDesc.trim() || "Premier versement",
+          settleRegistrationNow,
+        );
+        if (!res.ok) topupError = res.error ?? "erreur inconnue";
+      }
+
+      if (enrollIds.length > 0) {
+        updateItem("students", studentId, {
+          subscriptionIds: enrollIds,
+          subscriptionDates: buildEnrollmentDates(enrollIds),
+          subscriptionDiscounts: buildEnrollmentDiscounts(enrollIds),
+        });
+      }
+
+      const studentName = `${firstName} ${lastName}`;
       setIsCreateOpen(false);
       resetForm();
+
+      const settled = settleRegistrationNow && !topupError;
+      addToast({
+        type: topupError ? "warning" : "success",
+        title: topupError ? "Étudiant créé — versement en échec" : "Étudiant créé",
+        message: [
+          `${studentName} a été enregistré.`,
+          topupError
+            ? `Le premier versement n'a PAS été enregistré (${topupError}) — refaites-le depuis « Recharge ».`
+            : topupAmountToWrite > 0
+              ? `Solde initial: ${topupAmountToWrite - (settled ? registrationDue : 0)} DA (visible dans son historique).`
+              : "",
+          enrollIds.length > 0 ? `${enrollIds.length} inscription(s) enregistrée(s).` : "",
+          registrationDue > 0
+            ? settled
+              ? `Frais d'inscription de ${registrationDue} DA réglés sur ce versement.`
+              : `Frais d'inscription à régler: ${registrationDue} DA.`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      });
     } catch (err) {
       alert(err instanceof Error ? err.message : "Erreur lors de la création du compte.");
     }
@@ -732,6 +803,10 @@ export function StudentsPage() {
     setSelectedStudent(null);
     setIsEmailDirty(false);
     setIsPasswordDirty(false);
+    setInitialTopup(0);
+    setInitialTopupDesc("Premier versement");
+    setCreateClassSearch("");
+    setCreateClassId("");
   };
 
   const openEdit = (stu: Student) => {
@@ -988,23 +1063,12 @@ export function StudentsPage() {
     setOverlayStudentId(null);
   };
 
-  const handleAssignSubmit = () => {
-    if (!selectedStudent) return;
-
-    // The one-time registration fee is charged once, on first enrollment
-    // (paying students only). It is configured globally on the Abonnements page.
-    const wasEnrolled = selectedStudent.subscriptionIds.length > 0;
-    const willBeEnrolled = selectedAssignIds.length > 0;
-    const chargeRegistration =
-      !wasEnrolled && willBeEnrolled && !selectedStudent.isFree
-        ? school?.registrationFee || 0
-        : 0;
-
-    // Enrollment dates for EVERY module: the registration day (informative) and
-    // the day billing opens — a séance attended before it is recorded but never
-    // charged. Formations additionally get an expiry derived from their period.
+  /** Enrollment dates for EVERY module: the registration day (informative) and
+   *  the day billing opens — a séance attended before it is recorded but never
+   *  charged. Formations additionally get an expiry derived from their period. */
+  const buildEnrollmentDates = (ids: string[]) => {
     const subscriptionDates: Record<string, SubscriptionDates> = {};
-    for (const subId of selectedAssignIds) {
+    for (const subId of ids) {
       // Stages ("coursework") are not subscriptions — they carry no dates.
       if (!subscriptions.some((s) => s.id === subId)) continue;
       const startDate = assignStartDates[subId] || todayIso();
@@ -1017,18 +1081,35 @@ export function StudentsPage() {
           : undefined,
       };
     }
+    return subscriptionDates;
+  };
 
-    // Only keep reductions that still belong to a selected module.
+  /** Only the reductions that still belong to a selected module. */
+  const buildEnrollmentDiscounts = (ids: string[]) => {
     const subscriptionDiscounts: Record<string, SubscriptionDiscount> = {};
-    for (const subId of selectedAssignIds) {
+    for (const subId of ids) {
       const d = assignDiscounts[subId];
       if (d && d.value > 0) subscriptionDiscounts[subId] = d;
     }
+    return subscriptionDiscounts;
+  };
+
+  const handleAssignSubmit = () => {
+    if (!selectedStudent) return;
+
+    // The one-time registration fee is charged once, on first enrollment
+    // (paying students only). It is configured globally on the Abonnements page.
+    const wasEnrolled = selectedStudent.subscriptionIds.length > 0;
+    const willBeEnrolled = selectedAssignIds.length > 0;
+    const chargeRegistration =
+      !wasEnrolled && willBeEnrolled && !selectedStudent.isFree
+        ? school?.registrationFee || 0
+        : 0;
 
     updateItem("students", selectedStudent.id, {
       subscriptionIds: selectedAssignIds,
-      subscriptionDates,
-      subscriptionDiscounts,
+      subscriptionDates: buildEnrollmentDates(selectedAssignIds),
+      subscriptionDiscounts: buildEnrollmentDiscounts(selectedAssignIds),
       registrationDue: (selectedStudent.registrationDue || 0) + chargeRegistration,
     });
 
@@ -1036,52 +1117,31 @@ export function StudentsPage() {
     resetForm();
   };
 
-  // ---- What can be assigned: one entry per COURS, one option per GROUPE -----
-  // A student is enrolled in a cours (class + module + teacher) through exactly
-  // ONE of its groups. Every group of a cours shares the same tariff, so the
-  // price never depends on which group is picked — only the timing does.
-  interface AssignGroupOption {
-    /** subscription id — this is what gets stored on the student */
-    id: string;
-    sessionId: string;
-    groupName: string;
-    salleName: string;
-    daysLabel: string;
-    time: string;
-    enrolled: number;
-  }
-  interface AssignItem {
-    /** subscription id of the selected (or first) group — the item's own key */
-    id: string;
-    key: string;
-    label: string;
-    moduleName: string;
-    className: string;
-    levelLabel: string;
-    filiereLabel: string;
-    teacherName: string;
-    details: string;
-    price: number;
-    isCoursework: boolean;
-    isFormation?: boolean;
-    isOpen?: boolean;
-    periodMonths?: number;
-    periodLabel?: string;
-    groupOptions: AssignGroupOption[];
-  }
-
   const enrolledCountFor = (subId: string) =>
     students.filter((st) => st.subscriptionIds.includes(subId)).length;
 
-  /** Assignable courses + séances libres + stages, filtered by the search box.
-   *  The search matches everything printed on the card: module, class, level,
-   *  filière, teacher, group, salle, day and time. */
-  const getAssignableItems = (): AssignItem[] => {
+  /** A séance libre may cover several classes at once, so a timing belongs to a
+   *  class either through `classId` or through its `classIds` list. */
+  const sessionCoversClass = (s: { classId: string; classIds?: string[] }, classId: string) =>
+    s.classId === classId || !!s.classIds?.includes(classId);
+
+  /**
+   * Assignable courses + séances libres + stages.
+   *  - `search` (default: the "Affecter" search box) matches everything printed
+   *    on the card: module, class, level, filière, teacher, group, salle, day
+   *    and time.
+   *  - `classId` restricts the list to the timings of ONE class — that is what
+   *    the creation screen uses once a class has been picked. Stages are then
+   *    left out: they belong to no class.
+   */
+  const getAssignableItems = (opts: { search?: string; classId?: string } = {}): AssignItem[] => {
+    const search = (opts.search ?? assignSearch).trim().toLowerCase();
     const byCourse = new Map<string, AssignItem>();
 
     subscriptions.forEach((sub) => {
       const s = sessions.find((se) => se.id === sub.sessionId);
       if (!s) return;
+      if (opts.classId && !sessionCoversClass(s, opts.classId)) return;
       const cls = classes.find((c) => c.id === s.classId);
       const mod = modules.find((m) => m.id === s.moduleId);
       const t = teachers.find((te) => te.id === s.teacherId);
@@ -1108,7 +1168,7 @@ export function StudentsPage() {
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-      if (assignSearch && !haystack.includes(assignSearch.toLowerCase())) return;
+      if (search && !haystack.includes(search)) return;
 
       const option: AssignGroupOption = {
         id: sub.id,
@@ -1151,10 +1211,13 @@ export function StudentsPage() {
     list.forEach((item) => item.groupOptions.sort((a, b) => a.groupName.localeCompare(b.groupName)));
     list.sort((a, b) => a.moduleName.localeCompare(b.moduleName));
 
+    // Stages belong to no class, so they never show up in a class-scoped list.
+    if (opts.classId) return list;
+
     coursework.forEach((cw) => {
       const t = teachers.find((te) => te.id === cw.teacherId);
       const haystack = `${cw.name} ${t?.firstName ?? ""} ${t?.lastName ?? ""}`.toLowerCase();
-      if (assignSearch && !haystack.includes(assignSearch.toLowerCase())) return;
+      if (search && !haystack.includes(search)) return;
 
       list.push({
         id: cw.id,
@@ -1176,12 +1239,7 @@ export function StudentsPage() {
   };
 
   /** Which subscription (i.e. which group) of this cours the student is on. */
-  const selectedGroupOf = (item: AssignItem) =>
-    item.isCoursework
-      ? selectedAssignIds.includes(item.id)
-        ? item.id
-        : undefined
-      : item.groupOptions.find((g) => selectedAssignIds.includes(g.id))?.id;
+  const selectedGroupOf = (item: AssignItem) => selectedGroupIn(item, selectedAssignIds);
 
   /** Enrolling in a cours = picking ONE of its groups. Picking another group
    *  moves the student instead of enrolling him twice in the same cours. */
@@ -1215,6 +1273,61 @@ export function StudentsPage() {
     } else {
       setSelectedAssignIds([...selectedAssignIds, item.id]);
     }
+  };
+
+  /** Drops one inscription from the current selection (recap chips). */
+  const unselectEnrollment = (subId: string) =>
+    setSelectedAssignIds(selectedAssignIds.filter((id) => id !== subId));
+
+  /** What the selected inscriptions cost per séance once reductions apply
+   *  (formations count their level price, stages their total). */
+  const selectedEnrollmentTotal = (ids: string[]) =>
+    ids.reduce((sum, id) => {
+      const sub = subscriptions.find((s) => s.id === id);
+      if (sub) {
+        const sess = sessions.find((se) => se.id === sub.sessionId);
+        const cls = sess ? classes.find((c) => c.id === sess.classId) : undefined;
+        const base = cls?.type === "formation" ? sub.levelPrice ?? 0 : sub.pricePerSession;
+        return sum + netPriceFor(base, assignDiscounts[id]);
+      }
+      const cw = coursework.find((c) => c.id === id);
+      return sum + netPriceFor(cw?.total ?? 0, assignDiscounts[id]);
+    }, 0);
+
+  /** One-time registration fee the inscriptions picked on the creation screen
+   *  will add — charged once, on first enrollment, paying students only. */
+  const createRegistrationFee =
+    selectedAssignIds.length > 0 && !isFree ? school?.registrationFee || 0 : 0;
+
+  // ---- Creation screen: search a class, then pick its créneaux --------------
+  /** Classes matching the creation-screen search box, with a count of the
+   *  timings that are actually assignable (i.e. priced) on each one. */
+  const getSearchableClasses = () => {
+    const search = createClassSearch.trim().toLowerCase();
+    return classes
+      .map((cls) => {
+        const fil = cls.filiereId ? filieres.find((f) => f.id === cls.filiereId)?.name ?? "" : "";
+        const levelLabel = (cls.type === "cours" ? cls.coursLevel : cls.formationLevel) ?? "";
+        const timings = subscriptions.filter((sub) => {
+          const s = sessions.find((se) => se.id === sub.sessionId);
+          return !!s && sessionCoversClass(s, cls.id);
+        }).length;
+        return {
+          id: cls.id,
+          name: cls.name,
+          levelLabel,
+          filiereLabel: fil,
+          year: cls.year ?? "",
+          isFormation: cls.type === "formation",
+          timings,
+          haystack: [cls.name, levelLabel, fil, cls.year, cls.type, cls.description]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase(),
+        };
+      })
+      .filter((c) => !search || c.haystack.includes(search))
+      .sort((a, b) => a.name.localeCompare(b.name));
   };
 
   const handlePrintStudent = (stu: Student) => {
@@ -2291,6 +2404,227 @@ export function StudentsPage() {
           </div>
         </div>
 
+        {/* ---- 1. Première recharge de solde ---------------------------------
+            Optional, and written with the very same RPC as the "Recharge"
+            button of the student card, so it appears in the student's
+            transaction history and in the caisse. */}
+        <div className="mt-5 rounded-xl border border-success/30 bg-success/5 p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-success">
+              <DollarSign className="h-3.5 w-3.5" /> Premier versement (recharge du solde)
+            </span>
+            <span className="text-[10px] text-muted">Facultatif</span>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold text-muted mb-1">Montant à verser (DA)</label>
+              <Input
+                type="number"
+                min={0}
+                value={initialTopup || ""}
+                onChange={(e) => setInitialTopup(Number(e.target.value))}
+                placeholder="Ex: 5000"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-muted mb-1">Description</label>
+              <Input
+                value={initialTopupDesc}
+                onChange={(e) => setInitialTopupDesc(e.target.value)}
+                placeholder="Premier versement"
+              />
+            </div>
+          </div>
+          {/* The registration fee is created by the inscriptions picked below,
+              so it can be settled straight out of this first payment instead of
+              forcing a second pass through the "Recharge" screen. */}
+          {createRegistrationFee > 0 && initialTopup > 0 && (
+            <div className="flex items-center justify-between rounded-lg border border-warning/20 bg-warning/10 p-3 text-xs">
+              <div>
+                <strong className="text-warning block">Régler les frais d&apos;inscription ?</strong>
+                <span className="text-[10px] text-muted">
+                  Les inscriptions choisies ci-dessous ajoutent {createRegistrationFee} DA de frais uniques.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={settleReg}
+                onChange={(e) => setSettleReg(e.target.checked)}
+                className="h-5 w-5 text-warning focus:ring-warning"
+              />
+            </div>
+          )}
+          {initialTopup > 0 && (
+            <div className="flex items-center justify-between rounded-lg border border-line bg-surface p-2.5 text-xs">
+              <span className="text-muted font-semibold">Solde de départ de l&apos;étudiant</span>
+              <strong className="text-success text-sm">
+                {Math.round(initialTopup) - (settleReg ? createRegistrationFee : 0)} DA
+              </strong>
+            </div>
+          )}
+          <p className="text-[10px] leading-relaxed text-muted">
+            Le versement est enregistré comme une transaction «&nbsp;Versement / Recharge&nbsp;» dans
+            l&apos;<strong className="text-ink">historique de l&apos;étudiant</strong> et dans la caisse, exactement
+            comme une recharge faite depuis sa fiche. Laissez à 0 pour créer l&apos;étudiant sans versement.
+          </p>
+        </div>
+
+        {/* ---- 2. Inscriptions: chercher la classe, puis ses créneaux -------- */}
+        <div className="mt-4 rounded-xl border border-primary/25 bg-primary-50/40 p-3 space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-primary">
+              <BookOpen className="h-3.5 w-3.5" /> Inscriptions ({selectedAssignIds.length} sélectionnée(s))
+            </span>
+            <span className="text-[10px] text-muted">Facultatif</span>
+          </div>
+
+          {/* Class search */}
+          <div>
+            <label className="block text-[10px] font-semibold text-muted mb-1">
+              Rechercher la classe de l&apos;étudiant
+            </label>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
+              <Input
+                value={createClassSearch}
+                onChange={(e) => setCreateClassSearch(e.target.value)}
+                placeholder="Rechercher par classe, niveau, filière, année..."
+                className="pl-9"
+              />
+            </div>
+          </div>
+
+          <div className="max-h-40 overflow-y-auto rounded-xl border border-line bg-canvas/30 p-2 space-y-1.5">
+            {getSearchableClasses().length === 0 ? (
+              <p className="px-1 py-2 text-xs italic text-muted">Aucune classe ne correspond à cette recherche.</p>
+            ) : (
+              getSearchableClasses().map((cls) => {
+                const active = createClassId === cls.id;
+                return (
+                  <button
+                    key={cls.id}
+                    onClick={() => setCreateClassId(active ? "" : cls.id)}
+                    className={`flex w-full flex-wrap items-center justify-between gap-2 rounded-lg border p-2 text-start text-[11px] transition-colors ${
+                      active
+                        ? "border-primary bg-primary text-white"
+                        : "border-line bg-surface text-ink hover:bg-primary-50"
+                    }`}
+                  >
+                    <span className="font-bold">
+                      {cls.name}
+                      {cls.isFormation && (
+                        <span
+                          className={`ml-1.5 rounded px-1.5 py-0.5 text-[9px] font-bold ${
+                            active ? "bg-white/20 text-white" : "bg-primary/15 text-primary"
+                          }`}
+                        >
+                          Formation
+                        </span>
+                      )}
+                    </span>
+                    <span
+                      className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 ${
+                        active ? "text-white/85" : "text-muted"
+                      }`}
+                    >
+                      {cls.levelLabel && <span>{cls.levelLabel}</span>}
+                      {cls.filiereLabel && <span>{cls.filiereLabel}</span>}
+                      {cls.year && <span>{cls.year}</span>}
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" /> {cls.timings} créneau(x)
+                      </span>
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+
+          {/* Timings of the picked class */}
+          {createClassId && (
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Créneaux de{" "}
+                  <strong className="text-ink">
+                    {classes.find((c) => c.id === createClassId)?.name ?? "la classe"}
+                  </strong>{" "}
+                  — cochez ceux de l&apos;étudiant
+                </span>
+                <button
+                  onClick={() => setCreateClassId("")}
+                  className="text-[10px] font-bold text-primary hover:underline"
+                >
+                  Changer de classe
+                </button>
+              </div>
+
+              <EnrollmentCards
+                items={getAssignableItems({ classId: createClassId, search: "" })}
+                selectedIds={selectedAssignIds}
+                subDates={assignSubDates}
+                startDates={assignStartDates}
+                discounts={assignDiscounts}
+                onPickGroup={pickGroup}
+                onToggleCoursework={toggleCoursework}
+                onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
+                onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
+                onDiscountChange={setItemDiscount}
+                emptyLabel="Aucun créneau tarifé pour cette classe — définissez d'abord son tarif dans « Abonnements »."
+                className="max-h-72"
+              />
+            </div>
+          )}
+
+          {/* Recap: the selection survives changing class, so a student can be
+              enrolled on several classes in one pass. */}
+          {selectedAssignIds.length > 0 && (
+            <div className="rounded-xl border border-line bg-surface p-2.5 space-y-2">
+              <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">
+                Inscriptions retenues
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {selectedAssignIds.map((subId) => (
+                  <span
+                    key={subId}
+                    className="flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary-50 px-2.5 py-1 text-[10px] font-semibold text-primary"
+                  >
+                    {getSubLabel(subId)}
+                    <button
+                      onClick={() => unselectEnrollment(subId)}
+                      className="text-danger hover:underline"
+                      aria-label="Retirer cette inscription"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <div className="flex items-center justify-between border-t border-line pt-2 text-xs">
+                <span className="font-semibold text-muted">Total par séance après réductions</span>
+                <strong className="text-primary text-sm">
+                  {selectedEnrollmentTotal(selectedAssignIds)} DA
+                </strong>
+              </div>
+              {!isFree && (school?.registrationFee || 0) > 0 && (
+                <p className="text-[10px] leading-relaxed text-muted">
+                  Frais d&apos;inscription uniques de{" "}
+                  <strong className="text-ink">{school?.registrationFee} DA</strong> ajoutés à la création
+                  (première inscription).
+                </p>
+              )}
+            </div>
+          )}
+
+          <p className="text-[10px] leading-relaxed text-muted">
+            📅 Chaque créneau retenu est enregistré sur l&apos;étudiant avec sa{" "}
+            <strong className="text-ink">date d&apos;inscription</strong> et sa{" "}
+            <strong className="text-ink">date de début de facturation</strong>, puis apparaît dans l&apos;onglet
+            «&nbsp;Abonnements&nbsp;» de sa fiche. Elles restent modifiables ensuite via «&nbsp;Affecter des
+            abonnements&nbsp;».
+          </p>
+        </div>
+
         <div className="flex justify-end gap-2 pt-6 mt-4 border-t border-line">
           <Button variant="outline" onClick={() => setIsCreateOpen(false)}>
             Annuler
@@ -3204,251 +3538,19 @@ export function StudentsPage() {
             </p>
           </div>
 
-          <div className="border border-line rounded-xl max-h-[26rem] overflow-y-auto p-2 bg-canvas/30 space-y-2">
-            {getAssignableItems().length === 0 ? (
-              <p className="px-2 py-3 text-xs italic text-muted">
-                Aucun cours ou stage ne correspond à cette recherche.
-              </p>
-            ) : (
-              getAssignableItems().map((item) => {
-                const selectedId = selectedGroupOf(item);
-                const isChecked = !!selectedId;
-                // Reductions and enrollment dates hang off the CHOSEN group.
-                const keyId = selectedId ?? item.id;
-                const startDate = assignStartDates[keyId] || todayIso();
-                const subDate = assignSubDates[keyId] || todayIso();
-                const expiryDate = item.isFormation ? addMonths(startDate, item.periodMonths ?? 0) : "";
-                // Billing has not opened yet: séances attended until then are
-                // recorded but never taken off the balance.
-                const startsLater = daysUntil(startDate) > 0;
-                const discount = assignDiscounts[keyId];
-                const net = netPriceFor(item.price, discount);
-                const hasDiscount = !!discount && discount.value > 0;
-                const chosen = item.groupOptions.find((g) => g.id === selectedId);
-
-                return (
-                  <div
-                    key={item.key}
-                    className={`rounded-xl border p-2.5 ${
-                      isChecked ? "border-primary/30 bg-primary-50/60" : "border-line/70 bg-surface"
-                    }`}
-                  >
-                    {/* ---- Course header: everything about the timing ---- */}
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <strong className="block text-xs font-bold text-ink">
-                          {item.moduleName}
-                          {item.isFormation && (
-                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-primary/15 text-primary">
-                              Formation
-                            </span>
-                          )}
-                          {item.isOpen && (
-                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-success/15 text-success">
-                              Séance libre
-                            </span>
-                          )}
-                          {item.isCoursework && (
-                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-warning/15 text-warning">
-                              Stage
-                            </span>
-                          )}
-                          {hasDiscount && (
-                            <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-success/15 text-success">
-                              {discountLabel(discount)}
-                            </span>
-                          )}
-                        </strong>
-                        <span className="mt-0.5 block text-[10px] text-muted">
-                          {item.isCoursework ? (
-                            item.details
-                          ) : (
-                            <>
-                              Classe : <strong className="text-ink">{item.className}</strong>
-                              {item.levelLabel ? ` (${item.levelLabel})` : ""}
-                              {item.filiereLabel ? ` · ${item.filiereLabel}` : ""} · Enseignant :{" "}
-                              <strong className="text-ink">{item.teacherName}</strong>
-                              {item.periodLabel ? ` · ${item.periodLabel}` : ""}
-                            </>
-                          )}
-                        </span>
-                      </div>
-                      <div className="shrink-0 text-end">
-                        <span className="text-xs font-bold text-primary">
-                          {hasDiscount && (
-                            <span className="me-1 font-normal text-muted line-through">{item.price}</span>
-                          )}
-                          {net} DA
-                          {item.isFormation && (
-                            <span className="font-semibold text-muted"> / {item.periodMonths} mois</span>
-                          )}
-                        </span>
-                        {!item.isCoursework && (
-                          <span className="block text-[9px] text-muted">
-                            {item.groupOptions.length} groupe{item.groupOptions.length > 1 ? "s" : ""} · même tarif
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* ---- Group picker: the student joins ONE group ---- */}
-                    {item.isCoursework ? (
-                      <button
-                        onClick={() => toggleCoursework(item)}
-                        className={`mt-2 flex w-full items-center justify-between rounded-lg border p-2 text-[11px] transition-colors ${
-                          isChecked
-                            ? "border-primary bg-primary text-white"
-                            : "border-line bg-canvas/40 text-ink hover:bg-primary-50"
-                        }`}
-                      >
-                        <span className="font-bold">{item.label}</span>
-                        <input type="checkbox" checked={isChecked} readOnly className="h-4 w-4" />
-                      </button>
-                    ) : (
-                      <div className="mt-2 space-y-1">
-                        <span className="flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-muted">
-                          <Users className="h-3 w-3" /> Choisir le groupe de l&apos;étudiant
-                        </span>
-                        {item.groupOptions.map((g) => {
-                          const active = selectedId === g.id;
-                          return (
-                            <button
-                              key={g.id}
-                              onClick={() => pickGroup(item, g.id)}
-                              className={`flex w-full flex-wrap items-center justify-between gap-2 rounded-lg border p-2 text-start text-[11px] transition-colors ${
-                                active
-                                  ? "border-primary bg-primary text-white"
-                                  : "border-line bg-canvas/40 text-ink hover:bg-primary-50"
-                              }`}
-                            >
-                              <span className="font-bold">{g.groupName}</span>
-                              <span
-                                className={`flex flex-wrap items-center gap-x-3 gap-y-0.5 ${
-                                  active ? "text-white/85" : "text-muted"
-                                }`}
-                              >
-                                <span className="flex items-center gap-1">
-                                  <Clock className="h-3 w-3" /> {g.daysLabel} · {g.time}
-                                </span>
-                                <span className="flex items-center gap-1">
-                                  <MapPin className="h-3 w-3" /> {g.salleName}
-                                </span>
-                                <span>{g.enrolled} inscrit(s)</span>
-                              </span>
-                              <input
-                                type="radio"
-                                checked={active}
-                                readOnly
-                                className="h-4 w-4 shrink-0"
-                              />
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-
-                    {isChecked && (
-                      <div className="mt-2 flex flex-wrap items-end gap-4 rounded-xl border border-line bg-surface p-2.5">
-                        {chosen && (
-                          <div className="pb-1.5 text-xs">
-                            <span className="mb-1 block text-[10px] font-semibold text-muted">Groupe affecté</span>
-                            <strong className="text-primary">{chosen.groupName}</strong>
-                            <span className="text-muted">
-                              {" "}
-                              · {chosen.daysLabel} · {chosen.time}
-                            </span>
-                          </div>
-                        )}
-
-                        {/* Enrollment dates — every module, cours or formation.
-                            Both stay editable: reopening this modal reloads them. */}
-                        {!item.isCoursework && (
-                          <>
-                            <div>
-                              <label className="block text-[10px] font-semibold text-muted mb-1">
-                                Date d&apos;inscription
-                              </label>
-                              <Input
-                                type="date"
-                                value={subDate}
-                                onChange={(e) =>
-                                  setAssignSubDates({ ...assignSubDates, [keyId]: e.target.value })
-                                }
-                                className="w-40"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[10px] font-semibold text-muted mb-1">
-                                Date de début *
-                              </label>
-                              <Input
-                                type="date"
-                                value={startDate}
-                                onChange={(e) =>
-                                  setAssignStartDates({ ...assignStartDates, [keyId]: e.target.value })
-                                }
-                                className="w-40"
-                              />
-                              {startsLater && (
-                                <span className="mt-1 block text-[9px] font-semibold text-success">
-                                  Séances offertes jusqu&apos;au {formatDateFr(startDate)}
-                                </span>
-                              )}
-                            </div>
-                            {item.isFormation && (
-                              <div className="pb-1.5 text-xs">
-                                <span className="block text-[10px] font-semibold text-muted mb-1">
-                                  Date d&apos;expiration (calculée)
-                                </span>
-                                <strong className="text-primary">{formatDateFr(expiryDate)}</strong>
-                                <span className="text-muted"> · {item.periodMonths} mois</span>
-                              </div>
-                            )}
-                          </>
-                        )}
-
-                        {/* Per-module reduction */}
-                        <div>
-                          <label className="block text-[10px] font-semibold text-muted mb-1">Réduction</label>
-                          <Select
-                            value={discount?.type ?? "percent"}
-                            onChange={(e) => setItemDiscount(keyId, { type: e.target.value as DiscountType })}
-                            className="w-36"
-                          >
-                            <option value="percent">Pourcentage (%)</option>
-                            <option value="amount">Montant fixe (DA)</option>
-                          </Select>
-                        </div>
-                        <div>
-                          <label className="block text-[10px] font-semibold text-muted mb-1">
-                            Valeur {(discount?.type ?? "percent") === "percent" ? "(%)" : "(DA)"}
-                          </label>
-                          <Input
-                            type="number"
-                            min={0}
-                            max={(discount?.type ?? "percent") === "percent" ? 100 : undefined}
-                            value={discount?.value || ""}
-                            onChange={(e) => setItemDiscount(keyId, { value: Number(e.target.value) })}
-                            placeholder="0"
-                            className="w-28"
-                          />
-                        </div>
-                        <div className="pb-1.5 text-xs">
-                          <span className="block text-[10px] font-semibold text-muted mb-1">
-                            Tarif après réduction
-                          </span>
-                          <strong className={hasDiscount ? "text-success" : "text-ink"}>{net} DA</strong>
-                          {hasDiscount && (
-                            <span className="text-muted"> (au lieu de {item.price} DA)</span>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
+          <EnrollmentCards
+            items={getAssignableItems()}
+            selectedIds={selectedAssignIds}
+            subDates={assignSubDates}
+            startDates={assignStartDates}
+            discounts={assignDiscounts}
+            onPickGroup={pickGroup}
+            onToggleCoursework={toggleCoursework}
+            onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
+            onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
+            onDiscountChange={setItemDiscount}
+            emptyLabel="Aucun cours ou stage ne correspond à cette recherche."
+          />
 
           <div className="rounded-xl border border-line bg-canvas/40 p-3 text-[10px] leading-relaxed text-muted">
             📅 <strong className="text-ink">Dates d&apos;inscription :</strong> la{" "}
@@ -3473,18 +3575,7 @@ export function StudentsPage() {
                 Total par séance après réductions ({selectedAssignIds.length} module(s))
               </span>
               <strong className="text-primary text-sm">
-                {selectedAssignIds.reduce((sum, id) => {
-                  const sub = subscriptions.find((s) => s.id === id);
-                  if (sub) {
-                    const sess = sessions.find((se) => se.id === sub.sessionId);
-                    const cls = sess ? classes.find((c) => c.id === sess.classId) : undefined;
-                    const base = cls?.type === "formation" ? sub.levelPrice ?? 0 : sub.pricePerSession;
-                    return sum + netPriceFor(base, assignDiscounts[id]);
-                  }
-                  const cw = coursework.find((c) => c.id === id);
-                  return sum + netPriceFor(cw?.total ?? 0, assignDiscounts[id]);
-                }, 0)}{" "}
-                DA
+                {selectedEnrollmentTotal(selectedAssignIds)} DA
               </strong>
             </div>
           )}

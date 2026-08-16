@@ -675,12 +675,15 @@ interface DataActions {
   setStudentPassword: (studentId: string, password: string) => Promise<void>;
   /** Turns the weekly-absence billing on/off for a single module. */
   setModuleAbsenceRule: (moduleId: string, enabled: boolean, daysWindow?: number) => Promise<void>;
+  /** Writes a top-up: balance + `balance_tx` history row + caisse entry, in one
+   *  server-side transaction. Reports failures so the caller never claims a
+   *  payment was recorded when it wasn't. */
   addBalance: (
     studentId: string,
     amount: number,
     description: string,
     settleRegistration?: boolean,
-  ) => Promise<void>;
+  ) => Promise<{ ok: boolean; error?: string }>;
   payDebt: (studentId: string, amount: number) => Promise<void>;
   /** Corrects one balance_tx row (amount / description / date / type) and
    *  carries the difference over to the student's balance atomically. */
@@ -1006,7 +1009,12 @@ export const useData = create<DataStore>((set, get) => ({
       p_description: description,
       p_settle_registration: !!settleRegistration,
     });
-    if (!error) await get().fetchAll();
+    if (error) {
+      console.error("add_student_balance failed:", error.message);
+      return { ok: false, error: error.message };
+    }
+    await get().fetchAll();
+    return { ok: true };
   },
 
   payDebt: async (studentId, amount) => {
