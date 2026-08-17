@@ -51,6 +51,7 @@ import {
   classCascadeLabel,
   courseKeyOf,
   daysUntil,
+  deskPaymentFor,
   formatDateFr,
   formatDays,
   matchesAllWords,
@@ -86,6 +87,11 @@ import {
  *  connecter à l'application : l'adresse est fabriquée, jamais une vraie boîte
  *  mail, d'où un domaine unique pour toute l'école. */
 const PORTAL_EMAIL_DOMAIN = "benzaoui.com";
+
+/** Les trois écrans qui touchent au dossier d'un élève. « Ajouter un étudiant »
+ *  et « Modifier l'étudiant » affichent exactement les mêmes blocs ; l'écran
+ *  « Inscriptions » n'en reprend que le choix des créneaux. */
+type StudentFormMode = "create" | "edit" | "assign";
 
 /** Libellés des types de ligne du solde (onglet « Transactions »). */
 const TX_TYPE_LABELS: Record<BalanceTxType, string> = {
@@ -181,6 +187,13 @@ export function StudentsPage() {
   const [createFeeKey, setCreateFeeKey] = useState<RegistrationFeeKey | null | undefined>(undefined);
   const [createFeePayNow, setCreateFeePayNow] = useState(false);
 
+  // Form: same choice on the EDIT screen, except that a student already carries
+  // an amount on his file. `"current"` = leave that amount exactly as it is, so
+  // opening the screen and saving never silently re-prices his inscription;
+  // `null` = « aucun frais », which wipes what is still due.
+  const [editFeeKey, setEditFeeKey] = useState<RegistrationFeeKey | null | "current">("current");
+  const [editFeePayNow, setEditFeePayNow] = useState(false);
+
   // Form: inscriptions taken at creation time. Reception walks down niveau →
   // année → filière, then ticks the créneaux of that combination (the picked
   // groups are kept in the shared `selectedAssignIds` / dates / reductions
@@ -216,7 +229,6 @@ export function StudentsPage() {
   const [printPayEnd, setPrintPayEnd] = useState("");
 
   // Form: Assign subscription/coursework
-  const [assignSearch, setAssignSearch] = useState("");
   const [selectedAssignIds, setSelectedAssignIds] = useState<string[]>([]); // subscription or coursework ids
   // Enrollment dates, kept per subscription id for EVERY module (cours and
   // formations): the day the student was registered, and the day billing opens.
@@ -536,22 +548,85 @@ export function StudentsPage() {
     }
   };
 
+  /**
+   * Saves the edit screen — the mirror of `handleCreateStudent`, on a file that
+   * already exists: identité, frais d'inscription, versement et inscriptions in
+   * one pass. Every block defaults to the student's current state, so saving
+   * without touching one writes it back unchanged.
+   */
   const handleEditStudent = async () => {
     if (!selectedStudent) return;
+    const stu = selectedStudent;
+
+    if (!firstName || !lastName || !phone || !rfid) {
+      alert("Prénom, nom, téléphone et carte RFID sont obligatoires.");
+      return;
+    }
+    // Empty = keep the password in place; typed = it must be a valid one.
+    if (password && password.length < 6) {
+      alert("Le mot de passe doit contenir au moins 6 caractères.");
+      return;
+    }
 
     if (password) {
       try {
-        await resetUserPassword(selectedStudent.id, password);
+        await resetUserPassword(stu.id, password);
         // Mirror the new password into the staff-only table so the receipt
         // keeps printing credentials that actually work.
-        await setStudentPassword(selectedStudent.id, password);
+        await setStudentPassword(stu.id, password);
       } catch (err) {
         alert(err instanceof Error ? err.message : "Erreur lors du changement de mot de passe.");
         return;
       }
     }
 
-    updateItem("students", selectedStudent.id, {
+    const enrollIds = [...selectedAssignIds];
+    const fee = editRegistrationFee;
+    const feeLabel = editFeeOption?.label ?? "Frais d'inscription";
+    const payNow = settleRegistrationOnEdit;
+    const topup = Math.round(initialTopup || 0);
+
+    // ---- 1. L'argent d'abord ------------------------------------------------
+    // Same RPC as the "Recharge" button (history row + caisse entry), and it
+    // ends with a full refetch — so it has to run BEFORE the enrollment write,
+    // otherwise that refetch would land while the student_subscriptions rows
+    // are still in flight and wipe them locally.
+    // A fee settled here is taken out of the versement, exactly as at creation:
+    // only what the desk actually receives goes into the caisse.
+    const { cashed } = deskPaymentFor(topup, fee, payNow);
+    let moneyError = "";
+    if (cashed > 0) {
+      const description =
+        topup > 0 ? initialTopupDesc.trim() || "Versement" : `Frais d'inscription — ${feeLabel}`;
+      const res = await addBalance(stu.id, cashed, description, false);
+      if (!res.ok) moneyError = res.error ?? "erreur inconnue";
+    }
+
+    // ---- 2. Les frais d'inscription ----------------------------------------
+    // `add_student_balance` settles whatever the DATABASE says is still due, so
+    // it cannot be used when the desk has just picked another tariff. The
+    // registration line is therefore written here, against the amount shown on
+    // the screen: +versement encaissé, -frais, comme à la création.
+    let registrationDue = fee;
+    const patch: Partial<Student> = {};
+    if (payNow && !moneyError) {
+      // The RPC refetched everything, so the balance to start from is the fresh
+      // one, not the snapshot this screen was opened on.
+      const fresh = useData.getState().students.find((s) => s.id === stu.id);
+      push("balanceTx", {
+        id: uid("bt"),
+        studentId: stu.id,
+        amount: -fee,
+        date: new Date().toISOString(),
+        type: "registration",
+        description: `Frais d'inscription — ${feeLabel}`,
+      });
+      patch.balance = (fresh?.balance ?? stu.balance) - fee;
+      registrationDue = 0;
+    }
+
+    // ---- 3. Identité + inscriptions ----------------------------------------
+    updateItem("students", stu.id, {
       firstName,
       lastName,
       birthDate,
@@ -559,9 +634,37 @@ export function StudentsPage() {
       email,
       rfid,
       isFree,
+      registrationDue,
+      ...patch,
+      subscriptionIds: enrollIds,
+      subscriptionDates: buildEnrollmentDates(enrollIds),
+      subscriptionDiscounts: buildEnrollmentDiscounts(enrollIds),
     });
+
+    const studentName = `${firstName} ${lastName}`;
     setIsEditOpen(false);
     resetForm();
+
+    addToast({
+      type: moneyError ? "warning" : "success",
+      title: moneyError ? "Modifications enregistrées — versement en échec" : "Modifications enregistrées",
+      message: [
+        `La fiche de ${studentName} a été mise à jour.`,
+        moneyError
+          ? `Le paiement n'a PAS été enregistré (${moneyError}) — refaites-le depuis « Recharge ».`
+          : topup > 0
+            ? `Versement de ${topup} DA encaissé.`
+            : "",
+        `${enrollIds.length} inscription(s) enregistrée(s).`,
+        payNow && !moneyError
+          ? `${feeLabel} : ${fee} DA encaissés.`
+          : registrationDue > 0
+            ? `${feeLabel} : ${registrationDue} DA restent dus.`
+            : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
+    });
   };
 
   const handleDelete = (id: string) => {
@@ -839,7 +942,6 @@ export function StudentsPage() {
     setAssignDiscounts({});
     setBulkDiscountType("percent");
     setBulkDiscountValue(0);
-    setAssignSearch("");
     setSelectedStudent(null);
     setIsEmailDirty(false);
     setIsPasswordDirty(false);
@@ -847,6 +949,33 @@ export function StudentsPage() {
     setInitialTopupDesc("Premier versement");
     setCreateFeeKey(undefined);
     setCreateFeePayNow(false);
+    setEditFeeKey("current");
+    setEditFeePayNow(false);
+    setCreateClassSearch("");
+    setCreateLevel("");
+    setCreateYear("");
+    setCreateFiliereId("");
+  };
+
+  /** Loads a student's inscriptions into the shared enrollment form: the
+   *  créneaux he is on, the dates already recorded and his reductions. Shared by
+   *  « Modifier l'étudiant » and « Inscriptions », so both reopen on exactly
+   *  what he has instead of on an empty selection. */
+  const loadEnrollmentForm = (stu: Student) => {
+    setSelectedAssignIds(stu.subscriptionIds);
+    const starts: Record<string, string> = {};
+    const subscribed: Record<string, string> = {};
+    for (const subId of stu.subscriptionIds) {
+      const dates = stu.subscriptionDates?.[subId];
+      if (dates?.startDate) starts[subId] = dates.startDate;
+      if (dates?.subscribedAt) subscribed[subId] = dates.subscribedAt;
+    }
+    setAssignStartDates(starts);
+    setAssignSubDates(subscribed);
+    setAssignDiscounts({ ...(stu.subscriptionDiscounts ?? {}) });
+    setBulkDiscountType("percent");
+    setBulkDiscountValue(0);
+    // The niveau → année → filière cascade always reopens closed.
     setCreateClassSearch("");
     setCreateLevel("");
     setCreateYear("");
@@ -863,8 +992,26 @@ export function StudentsPage() {
     setEmail(stu.email);
     setPassword("");
     setIsFree(stu.isFree);
+    setIsEmailDirty(false);
+    setIsPasswordDirty(false);
+    loadEnrollmentForm(stu);
+    // Frais d'inscription: reopen on what he actually owes. A due amount that
+    // matches one of the school's tariffs shows that tariff as picked; anything
+    // else is kept as-is ("Montant actuel") so saving never re-prices it.
+    const due = stu.registrationDue ?? 0;
+    const matching = createFeeOptions.find((o) => o.amount === due);
+    setEditFeeKey(due === 0 ? null : matching ? matching.key : "current");
+    setEditFeePayNow(false);
+    // Nothing is cashed unless the desk types an amount.
+    setInitialTopup(0);
+    setInitialTopupDesc("Versement");
     setIsEditOpen(true);
     setOverlayStudentId(null);
+  };
+
+  const closeEdit = () => {
+    setIsEditOpen(false);
+    resetForm();
   };
 
   const openDetails = (stu: Student) => {
@@ -1010,21 +1157,9 @@ export function StudentsPage() {
 
   const openAssign = (stu: Student) => {
     setSelectedStudent(stu);
-    setSelectedAssignIds(stu.subscriptionIds);
     // Reopen on the dates already recorded, so the modal doubles as the edit
     // screen for them (an empty date falls back to today at save time).
-    const starts: Record<string, string> = {};
-    const subscribed: Record<string, string> = {};
-    for (const subId of stu.subscriptionIds) {
-      const dates = stu.subscriptionDates?.[subId];
-      if (dates?.startDate) starts[subId] = dates.startDate;
-      if (dates?.subscribedAt) subscribed[subId] = dates.subscribedAt;
-    }
-    setAssignStartDates(starts);
-    setAssignSubDates(subscribed);
-    setAssignDiscounts({ ...(stu.subscriptionDiscounts ?? {}) });
-    setBulkDiscountType("percent");
-    setBulkDiscountValue(0);
+    loadEnrollmentForm(stu);
     setIsAssignOpen(true);
     setOverlayStudentId(null);
   };
@@ -1165,15 +1300,14 @@ export function StudentsPage() {
 
   /**
    * Assignable courses + séances libres + stages.
-   *  - `search` (default: the "Affecter" search box) matches everything printed
-   *    on the card: module, class, level, filière, teacher, group, salle, day
-   *    and time.
+   *  - `search` matches everything printed on the card: module, class, level,
+   *    filière, teacher, group, salle, day and time.
    *  - `classIds` restricts the list to the timings of those classes — that is
    *    what the creation screen uses once niveau/année/filière are picked.
    *    Stages are then left out: they belong to no class.
    */
   const getAssignableItems = (opts: { search?: string; classIds?: string[] } = {}): AssignItem[] => {
-    const search = (opts.search ?? assignSearch).trim().toLowerCase();
+    const search = (opts.search ?? "").trim().toLowerCase();
     const byCourse = new Map<string, AssignItem>();
 
     subscriptions.forEach((sub) => {
@@ -1347,6 +1481,23 @@ export function StudentsPage() {
   /** Settling only makes sense against a real fee. */
   const settleRegistrationOnCreate = createFeePayNow && createRegistrationFee > 0;
 
+  // Same three questions on the edit screen, read against what the student
+  // already owes: which tariff applies now, and is it cashed on this save.
+  /** What is still due on the open student's file. */
+  const editCurrentDue = selectedStudent?.registrationDue ?? 0;
+  const editFeeOption =
+    isFree || editFeeKey === null || editFeeKey === "current"
+      ? undefined
+      : createFeeOptions.find((o) => o.key === editFeeKey);
+  /** Amount the student will owe once the form is saved. */
+  const editRegistrationFee = isFree
+    ? 0
+    : editFeeKey === "current"
+      ? editCurrentDue
+      : editFeeOption?.amount ?? 0;
+  const editFeeLabel = editFeeOption?.label ?? "Frais d'inscription";
+  const settleRegistrationOnEdit = editFeePayNow && editRegistrationFee > 0;
+
   // ---- Creation screen: niveau → année → filière, then the créneaux ---------
   // Reception picks the student's schooling the way it is spoken about: the
   // level first (primaire / moyen / lycée), then the year of that level, then
@@ -1471,6 +1622,570 @@ export function StudentsPage() {
   const pickCreateYear = (year: string) => {
     setCreateYear(year);
     setCreateFiliereId("");
+  };
+
+  // ---- Blocs partagés « Ajouter » / « Modifier » ----------------------------
+  // Both screens render the very same three blocks — frais d'inscription,
+  // versement, inscriptions — so a student's file is edited exactly the way it
+  // was created. Only the wording changes ("à la création" / "maintenant") and,
+  // on the edit screen, the amounts are read against what the student already
+  // owes and already has on his balance.
+
+  /** 1. Frais d'inscription : quel tarif, encaissé tout de suite ou laissé dû. */
+  const renderFeeSection = (mode: "create" | "edit") => {
+    const editing = mode === "edit";
+    const option = editing ? editFeeOption : createFeeOption;
+    const fee = editing ? editRegistrationFee : createRegistrationFee;
+    const payNow = editing ? editFeePayNow : createFeePayNow;
+    const setPayNow = editing ? setEditFeePayNow : setCreateFeePayNow;
+    const settles = editing ? settleRegistrationOnEdit : settleRegistrationOnCreate;
+    const pickKey = (key: RegistrationFeeKey | null) =>
+      editing ? setEditFeeKey(key) : setCreateFeeKey(key);
+    const isActiveKey = (key: RegistrationFeeKey) =>
+      editing ? editFeeKey === key : createFeeOption?.key === key;
+    const noneActive = editing ? editFeeKey === null : !createFeeOption;
+    // A due amount matching none of the school's tariffs (an older file, or a
+    // tariff changed since) stays offered as-is: saving must never re-price an
+    // inscription the desk did not touch.
+    const keepsCurrent =
+      editing && editCurrentDue > 0 && !createFeeOptions.some((o) => o.amount === editCurrentDue);
+    const feeLabel = option?.label ?? (editing && editFeeKey === "current" ? "Montant actuel" : "");
+
+    return (
+      <div className="mt-5 rounded-xl border border-warning/30 bg-warning/5 p-3 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-warning">
+            <CreditCard className="h-3.5 w-3.5" /> Frais d&apos;inscription
+          </span>
+          <span className="text-[10px] text-muted">
+            {editing ? `Actuellement dû : ${editCurrentDue} DA` : "Une seule fois par étudiant"}
+          </span>
+        </div>
+
+        {isFree ? (
+          <p className="rounded-lg border border-line bg-surface px-3 py-2 text-[11px] text-muted">
+            Études gratuites : <strong className="text-ink">aucun frais d&apos;inscription</strong> n&apos;est
+            facturé à cet étudiant.
+          </p>
+        ) : createFeeOptions.length === 0 && !keepsCurrent ? (
+          <p className="rounded-lg border border-line bg-surface px-3 py-2 text-[11px] text-muted">
+            Aucun tarif d&apos;inscription n&apos;est défini. Renseignez-le dans{" "}
+            <strong className="text-ink">Abonnements → Frais d&apos;inscription uniques</strong> pour pouvoir
+            le facturer ici.
+          </p>
+        ) : (
+          <>
+            <div>
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                Type d&apos;inscription facturé
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {keepsCurrent && (
+                  <button
+                    onClick={() => setEditFeeKey("current")}
+                    className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                      editFeeKey === "current"
+                        ? "border-warning bg-warning text-white"
+                        : "border-line bg-surface text-ink hover:bg-warning/10"
+                    }`}
+                  >
+                    Montant actuel
+                    <span className={editFeeKey === "current" ? "ms-1.5 text-white/80" : "ms-1.5 text-muted"}>
+                      {editCurrentDue} DA
+                    </span>
+                  </button>
+                )}
+                {createFeeOptions.map((opt) => {
+                  const active = isActiveKey(opt.key);
+                  return (
+                    <button
+                      key={opt.key}
+                      onClick={() => pickKey(opt.key)}
+                      className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                        active
+                          ? "border-warning bg-warning text-white"
+                          : "border-line bg-surface text-ink hover:bg-warning/10"
+                      }`}
+                    >
+                      {opt.label}
+                      <span className={active ? "ms-1.5 text-white/80" : "ms-1.5 text-muted"}>
+                        {opt.amount} DA
+                      </span>
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={() => pickKey(null)}
+                  className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                    noneActive
+                      ? "border-warning bg-warning text-white"
+                      : "border-line bg-surface text-ink hover:bg-warning/10"
+                  }`}
+                >
+                  Aucun frais
+                </button>
+              </div>
+            </div>
+
+            {fee > 0 && (
+              <div>
+                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                  {editing ? "Réglé maintenant ?" : "Réglé à la création de l'étudiant ?"}
+                </span>
+                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                  <button
+                    onClick={() => setPayNow(true)}
+                    className={`rounded-lg border p-2 text-start text-[11px] transition-colors ${
+                      payNow
+                        ? "border-success bg-success text-white"
+                        : "border-line bg-surface text-ink hover:bg-success/10"
+                    }`}
+                  >
+                    <strong className="block">Oui, payé maintenant</strong>
+                    <span className={payNow ? "text-white/80" : "text-muted"}>
+                      {initialTopup > 0
+                        ? `Déduit du ${editing ? "" : "premier "}versement ci-dessous.`
+                        : "Encaissé seul en caisse, solde inchangé."}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setPayNow(false)}
+                    className={`rounded-lg border p-2 text-start text-[11px] transition-colors ${
+                      !payNow
+                        ? "border-danger bg-danger text-white"
+                        : "border-line bg-surface text-ink hover:bg-danger/10"
+                    }`}
+                  >
+                    <strong className="block">Non, à régler plus tard</strong>
+                    <span className={!payNow ? "text-white/80" : "text-muted"}>
+                      Reste dû sur sa fiche, réglable depuis «&nbsp;Recharge&nbsp;».
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-lg border border-line bg-surface p-2.5 text-xs">
+              {fee === 0 ? (
+                <span className="text-muted">
+                  {editing && editCurrentDue > 0
+                    ? `Les ${editCurrentDue} DA encore dus seront effacés de sa fiche.`
+                    : "Aucun frais d'inscription ne sera facturé à cet étudiant."}
+                </span>
+              ) : (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-muted">
+                    {feeLabel} —{" "}
+                    {payNow
+                      ? editing
+                        ? "encaissé à l'enregistrement"
+                        : "encaissé à la création"
+                      : "laissé en dette"}
+                  </span>
+                  <strong className={payNow ? "text-success" : "text-danger"}>{fee} DA</strong>
+                </div>
+              )}
+              {settles && initialTopup > 0 && initialTopup < fee && (
+                <p className="mt-1.5 text-[10px] font-semibold text-danger">
+                  Le {editing ? "" : "premier "}versement ({Math.round(initialTopup)} DA) ne couvre pas ces
+                  frais : le solde de l&apos;étudiant {editing ? "descendra d'autant" : "partira en négatif"}.
+                </p>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  /** 2. Versement encaissé depuis l'écran — même RPC que « Recharge ». */
+  const renderTopupSection = (mode: "create" | "edit") => {
+    const editing = mode === "edit";
+    const fee = editing ? editRegistrationFee : createRegistrationFee;
+    const feeLabel = editing ? editFeeLabel : createFeeOption?.label ?? "";
+    const settles = editing ? settleRegistrationOnEdit : settleRegistrationOnCreate;
+    const currentBalance = editing ? selectedStudent?.balance ?? 0 : 0;
+    const topup = Math.round(initialTopup || 0);
+    // Exactly what the save will move — same helper as the two save handlers,
+    // so the preview can never drift from what is actually written.
+    const nextBalance = currentBalance + deskPaymentFor(topup, fee, settles).balanceDelta;
+
+    return (
+      <div className="mt-5 rounded-xl border border-success/30 bg-success/5 p-3 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-success">
+            <DollarSign className="h-3.5 w-3.5" />{" "}
+            {editing ? "Nouveau versement (recharge du solde)" : "Premier versement (recharge du solde)"}
+          </span>
+          <span className="text-[10px] text-muted">
+            {editing ? `Solde actuel : ${currentBalance} DA` : "Facultatif"}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <div>
+            <label className="block text-xs font-semibold text-muted mb-1">Montant à verser (DA)</label>
+            <Input
+              type="number"
+              min={0}
+              value={initialTopup || ""}
+              onChange={(e) => setInitialTopup(Number(e.target.value))}
+              placeholder="Ex: 5000"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-muted mb-1">Description</label>
+            <Input
+              value={initialTopupDesc}
+              onChange={(e) => setInitialTopupDesc(e.target.value)}
+              placeholder={editing ? "Versement" : "Premier versement"}
+            />
+          </div>
+        </div>
+        {/* The fee settled here is taken out of this very payment, so the
+            resulting balance is what is left once it is deducted. */}
+        {(initialTopup > 0 || settles) && (
+          <div className="flex items-center justify-between rounded-lg border border-line bg-surface p-2.5 text-xs">
+            <div>
+              <span className="text-muted font-semibold block">
+                {editing ? "Solde après enregistrement" : "Solde de départ de l'étudiant"}
+              </span>
+              {settles && (
+                <span className="text-[10px] text-muted">
+                  {topup > 0
+                    ? `Après déduction de ${fee} DA (${feeLabel}).`
+                    : `${feeLabel} encaissés seuls (${fee} DA) : le solde ne bouge pas.`}
+                </span>
+              )}
+            </div>
+            <strong className={`text-sm ${nextBalance < 0 ? "text-danger" : "text-success"}`}>
+              {nextBalance} DA
+            </strong>
+          </div>
+        )}
+        <p className="text-[10px] leading-relaxed text-muted">
+          Le versement est enregistré comme une transaction «&nbsp;Versement / Recharge&nbsp;» dans
+          l&apos;<strong className="text-ink">historique de l&apos;étudiant</strong> et dans la caisse, exactement
+          comme une recharge faite depuis sa fiche. Laissez à 0 pour {editing ? "n'encaisser aucun versement" : "créer l'étudiant sans versement"}.
+        </p>
+      </div>
+    );
+  };
+
+  /** 3. Inscriptions : niveau → année → filière, puis les créneaux de cette
+   *  combinaison. Partagé par « Ajouter », « Modifier » et « Inscriptions »,
+   *  pour que l'élève soit inscrit partout de la même façon. */
+  const renderEnrollmentPicker = (mode: StudentFormMode) => {
+    const matched = createMatchedClasses();
+    const searching = !!createClassSearch.trim();
+    const matchedItems =
+      matched.length > 0 ? getAssignableItems({ classIds: matched.map((c) => c.id), search: "" }) : [];
+    // Stages belong to no class, so the cascade never reaches them: they get
+    // their own list, filtered by whatever is typed in the search box.
+    const stageItems =
+      coursework.length > 0
+        ? getAssignableItems({ search: createClassSearch.trim() }).filter((i) => i.isCoursework)
+        : [];
+
+    // Everything already retained that neither list shows (another niveau, a
+    // stage, an inscription taken earlier) stays visible and editable below,
+    // instead of surviving only as a chip.
+    const shownIds = new Set<string>();
+    [...matchedItems, ...stageItems].forEach((i) => {
+      shownIds.add(i.id);
+      i.groupOptions.forEach((g) => shownIds.add(g.id));
+    });
+    const hiddenIds = selectedAssignIds.filter((id) => !shownIds.has(id));
+    const hiddenItems =
+      hiddenIds.length > 0
+        ? getAssignableItems({ search: "" }).filter(
+            (i) => hiddenIds.includes(i.id) || i.groupOptions.some((g) => hiddenIds.includes(g.id)),
+          )
+        : [];
+
+    const fee = mode === "create" ? createRegistrationFee : mode === "edit" ? editRegistrationFee : 0;
+    const feeLabel = mode === "create" ? createFeeOption?.label ?? "" : editFeeLabel;
+    const feePayNow = mode === "create" ? createFeePayNow : editFeePayNow;
+
+    return (
+      <div className="mt-4 rounded-xl border border-primary/25 bg-primary-50/40 p-3 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-primary">
+            <BookOpen className="h-3.5 w-3.5" /> Inscriptions ({selectedAssignIds.length} sélectionnée(s))
+          </span>
+          <span className="text-[10px] text-muted">{mode === "assign" ? "Modifiable à tout moment" : "Facultatif"}</span>
+        </div>
+
+        {/* Direct search: "lycee 2eme sciences" lands on the same créneaux
+            as walking the three steps below, in any word order. */}
+        <div>
+          <label className="block text-[10px] font-semibold text-muted mb-1">
+            Recherche directe : niveau + année + filière (ou nom d&apos;un stage)
+          </label>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
+            <Input
+              value={createClassSearch}
+              onChange={(e) => setCreateClassSearch(e.target.value)}
+              placeholder="Ex: lycee 2eme sciences"
+              className="pl-9 pr-20"
+            />
+            {createClassSearch && (
+              <button
+                onClick={() => setCreateClassSearch("")}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-primary hover:underline"
+              >
+                Effacer
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Steps 1→3, hidden while the search box drives the list itself. */}
+        {!searching && (
+          <div className="space-y-2.5">
+            <div>
+              <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                1. Niveau scolaire
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {createLevelOptions().length === 0 ? (
+                  <p className="text-xs italic text-muted">Aucune classe enregistrée dans l&apos;école.</p>
+                ) : (
+                  createLevelOptions().map((opt) => {
+                    const active = createLevel === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        onClick={() => pickCreateLevel(active ? "" : opt.value)}
+                        className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                          active
+                            ? "border-primary bg-primary text-white"
+                            : "border-line bg-surface text-ink hover:bg-primary-50"
+                        }`}
+                      >
+                        {opt.label}
+                        <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
+                          {opt.count} créneau{opt.count > 1 ? "x" : ""}
+                        </span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+            {createLevel && (
+              <div>
+                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                  2. {createLevel === "formation" ? "Niveau de formation" : "Année"}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {createYearOptions().length === 0 ? (
+                    <p className="text-xs italic text-muted">Aucune classe pour ce niveau.</p>
+                  ) : (
+                    createYearOptions().map((opt) => {
+                      const active = createYear === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          onClick={() => pickCreateYear(active ? "" : opt.value)}
+                          className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                            active
+                              ? "border-primary bg-primary text-white"
+                              : "border-line bg-surface text-ink hover:bg-primary-50"
+                          }`}
+                        >
+                          {opt.label}
+                          <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
+                            {opt.count} créneau{opt.count > 1 ? "x" : ""}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Formations carry no filière — their level is the last step. */}
+            {createLevel && createLevel !== "formation" && createYear && (
+              <div>
+                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                  3. Filière
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {createFiliereOptions().length === 0 ? (
+                    <p className="text-xs italic text-muted">Aucune classe pour cette année.</p>
+                  ) : (
+                    createFiliereOptions().map((opt) => {
+                      const active = createFiliereId === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          onClick={() => setCreateFiliereId(active ? "" : opt.value)}
+                          className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                            active
+                              ? "border-primary bg-primary text-white"
+                              : "border-line bg-surface text-ink hover:bg-primary-50"
+                          }`}
+                        >
+                          {opt.label}
+                          <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
+                            {opt.count} créneau{opt.count > 1 ? "x" : ""}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Every créneau created on the matched niveau + année + filière */}
+        {matched.length === 0 && searching && stageItems.length === 0 ? (
+          <p className="rounded-xl border border-line bg-canvas/30 px-3 py-2.5 text-xs italic text-muted">
+            Aucune classe ne correspond à «&nbsp;{createClassSearch.trim()}&nbsp;». Essayez «&nbsp;niveau
+            année filière&nbsp;», par exemple «&nbsp;lycee 2eme sciences&nbsp;».
+          </p>
+        ) : matched.length > 0 ? (
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                Créneaux de{" "}
+                <strong className="text-ink">
+                  {matched.slice(0, 3).map((c) => classFullLabel(c)).join(" / ")}
+                  {matched.length > 3 ? ` +${matched.length - 3} autre(s)` : ""}
+                </strong>{" "}
+                — cochez ceux de l&apos;étudiant
+              </span>
+              <span className="text-[10px] text-muted">
+                {matched.reduce((sum, c) => sum + timingCountOf(c.id), 0)} créneau(x)
+              </span>
+            </div>
+
+            <EnrollmentCards
+              items={matchedItems}
+              selectedIds={selectedAssignIds}
+              subDates={assignSubDates}
+              startDates={assignStartDates}
+              discounts={assignDiscounts}
+              onPickGroup={pickGroup}
+              onToggleCoursework={toggleCoursework}
+              onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
+              onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
+              onDiscountChange={setItemDiscount}
+              emptyLabel="Aucun créneau tarifé ici — définissez d'abord son tarif dans « Abonnements »."
+              className="max-h-72"
+            />
+          </div>
+        ) : null}
+
+        {/* Stages intensifs — hors cascade, ils n'appartiennent à aucune classe */}
+        {stageItems.length > 0 && (
+          <div className="space-y-2">
+            <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">
+              Stages intensifs — cochez ceux de l&apos;étudiant
+            </span>
+            <EnrollmentCards
+              items={stageItems}
+              selectedIds={selectedAssignIds}
+              subDates={assignSubDates}
+              startDates={assignStartDates}
+              discounts={assignDiscounts}
+              onPickGroup={pickGroup}
+              onToggleCoursework={toggleCoursework}
+              onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
+              onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
+              onDiscountChange={setItemDiscount}
+              emptyLabel="Aucun stage ne correspond à cette recherche."
+              className="max-h-56"
+            />
+          </div>
+        )}
+
+        {/* Inscriptions retenues qui ne sont pas dans les listes ci-dessus :
+            elles restent modifiables (créneau, dates, réduction) sans avoir à
+            retrouver leur niveau. */}
+        {hiddenItems.length > 0 && (
+          <div className="space-y-2">
+            <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">
+              Inscriptions déjà retenues ({hiddenIds.length}) — hors de la liste ci-dessus
+            </span>
+            <EnrollmentCards
+              items={hiddenItems}
+              selectedIds={selectedAssignIds}
+              subDates={assignSubDates}
+              startDates={assignStartDates}
+              discounts={assignDiscounts}
+              onPickGroup={pickGroup}
+              onToggleCoursework={toggleCoursework}
+              onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
+              onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
+              onDiscountChange={setItemDiscount}
+              emptyLabel=""
+              className="max-h-72"
+            />
+          </div>
+        )}
+
+        {/* Recap: the selection survives changing niveau/année/filière, so a
+            student can be enrolled across several classes in one pass. */}
+        {selectedAssignIds.length > 0 && (
+          <div className="rounded-xl border border-line bg-surface p-2.5 space-y-2">
+            <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">
+              Inscriptions retenues
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {selectedAssignIds.map((subId) => (
+                <span
+                  key={subId}
+                  className="flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary-50 px-2.5 py-1 text-[10px] font-semibold text-primary"
+                >
+                  {getSubLabel(subId)}
+                  <button
+                    onClick={() => unselectEnrollment(subId)}
+                    className="text-danger hover:underline"
+                    aria-label="Retirer cette inscription"
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+            <div className="flex items-center justify-between border-t border-line pt-2 text-xs">
+              <span className="font-semibold text-muted">Total par séance après réductions</span>
+              <strong className="text-primary text-sm">{selectedEnrollmentTotal(selectedAssignIds)} DA</strong>
+            </div>
+            {fee > 0 && (
+              <p className="text-[10px] leading-relaxed text-muted">
+                S&apos;y ajoutent les frais d&apos;inscription{" "}
+                <strong className="text-ink">
+                  {feeLabel} ({fee} DA)
+                </strong>
+                ,{" "}
+                {feePayNow
+                  ? mode === "create"
+                    ? "encaissés à la création"
+                    : "encaissés à l'enregistrement"
+                  : "laissés en dette sur sa fiche"}
+                .
+              </p>
+            )}
+          </div>
+        )}
+
+        <p className="text-[10px] leading-relaxed text-muted">
+          📅 Chaque créneau retenu est enregistré sur l&apos;étudiant avec sa{" "}
+          <strong className="text-ink">date d&apos;inscription</strong> et sa{" "}
+          <strong className="text-ink">date de début de facturation</strong>, puis apparaît dans l&apos;onglet
+          «&nbsp;Abonnements&nbsp;» de sa fiche. Tant que la date de début n&apos;est pas atteinte, la présence
+          est enregistrée sans rien retirer du solde. Tout reste modifiable ensuite depuis
+          «&nbsp;Modifier&nbsp;» ou «&nbsp;Inscriptions&nbsp;».
+        </p>
+      </div>
+    );
   };
 
   const handlePrintStudent = (stu: Student) => {
@@ -2547,431 +3262,11 @@ export function StudentsPage() {
           </div>
         </div>
 
-        {/* ---- 1. Frais d'inscription: quel type, réglé quand ? ---------------
-            L'école propose jusqu'à deux tarifs (page « Abonnements »). La
-            réception dit lequel s'applique à CET étudiant — ou aucun — et si
-            elle l'encaisse tout de suite ou le laisse dû sur sa fiche. */}
-        <div className="mt-5 rounded-xl border border-warning/30 bg-warning/5 p-3 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-warning">
-              <CreditCard className="h-3.5 w-3.5" /> Frais d&apos;inscription
-            </span>
-            <span className="text-[10px] text-muted">Une seule fois par étudiant</span>
-          </div>
+        {renderFeeSection("create")}
 
-          {isFree ? (
-            <p className="rounded-lg border border-line bg-surface px-3 py-2 text-[11px] text-muted">
-              Études gratuites : <strong className="text-ink">aucun frais d&apos;inscription</strong> n&apos;est
-              facturé à cet étudiant.
-            </p>
-          ) : createFeeOptions.length === 0 ? (
-            <p className="rounded-lg border border-line bg-surface px-3 py-2 text-[11px] text-muted">
-              Aucun tarif d&apos;inscription n&apos;est défini. Renseignez-le dans{" "}
-              <strong className="text-ink">Abonnements → Frais d&apos;inscription uniques</strong> pour pouvoir
-              le facturer ici.
-            </p>
-          ) : (
-            <>
-              <div>
-                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
-                  Type d&apos;inscription facturé
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {createFeeOptions.map((opt) => {
-                    const active = createFeeOption?.key === opt.key;
-                    return (
-                      <button
-                        key={opt.key}
-                        onClick={() => setCreateFeeKey(opt.key)}
-                        className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                          active
-                            ? "border-warning bg-warning text-white"
-                            : "border-line bg-surface text-ink hover:bg-warning/10"
-                        }`}
-                      >
-                        {opt.label}
-                        <span className={active ? "ms-1.5 text-white/80" : "ms-1.5 text-muted"}>
-                          {opt.amount} DA
-                        </span>
-                      </button>
-                    );
-                  })}
-                  <button
-                    onClick={() => setCreateFeeKey(null)}
-                    className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                      !createFeeOption
-                        ? "border-warning bg-warning text-white"
-                        : "border-line bg-surface text-ink hover:bg-warning/10"
-                    }`}
-                  >
-                    Aucun frais
-                  </button>
-                </div>
-              </div>
+        {renderTopupSection("create")}
 
-              {createRegistrationFee > 0 && (
-                <div>
-                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Réglé à la création de l&apos;étudiant ?
-                  </span>
-                  <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                    <button
-                      onClick={() => setCreateFeePayNow(true)}
-                      className={`rounded-lg border p-2 text-start text-[11px] transition-colors ${
-                        createFeePayNow
-                          ? "border-success bg-success text-white"
-                          : "border-line bg-surface text-ink hover:bg-success/10"
-                      }`}
-                    >
-                      <strong className="block">Oui, payé maintenant</strong>
-                      <span className={createFeePayNow ? "text-white/80" : "text-muted"}>
-                        {initialTopup > 0
-                          ? "Déduit du premier versement ci-dessous."
-                          : "Encaissé seul en caisse, solde inchangé."}
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => setCreateFeePayNow(false)}
-                      className={`rounded-lg border p-2 text-start text-[11px] transition-colors ${
-                        !createFeePayNow
-                          ? "border-danger bg-danger text-white"
-                          : "border-line bg-surface text-ink hover:bg-danger/10"
-                      }`}
-                    >
-                      <strong className="block">Non, à régler plus tard</strong>
-                      <span className={!createFeePayNow ? "text-white/80" : "text-muted"}>
-                        Reste dû sur sa fiche, réglable depuis «&nbsp;Recharge&nbsp;».
-                      </span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <div className="rounded-lg border border-line bg-surface p-2.5 text-xs">
-                {createRegistrationFee === 0 ? (
-                  <span className="text-muted">
-                    Aucun frais d&apos;inscription ne sera facturé à cet étudiant.
-                  </span>
-                ) : (
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-muted">
-                      {createFeeOption?.label} — {createFeePayNow ? "encaissé à la création" : "laissé en dette"}
-                    </span>
-                    <strong className={createFeePayNow ? "text-success" : "text-danger"}>
-                      {createRegistrationFee} DA
-                    </strong>
-                  </div>
-                )}
-                {settleRegistrationOnCreate && initialTopup > 0 && initialTopup < createRegistrationFee && (
-                  <p className="mt-1.5 text-[10px] font-semibold text-danger">
-                    Le premier versement ({Math.round(initialTopup)} DA) ne couvre pas ces frais : le solde de
-                    l&apos;étudiant partira en négatif.
-                  </p>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* ---- 2. Première recharge de solde ---------------------------------
-            Optional, and written with the very same RPC as the "Recharge"
-            button of the student card, so it appears in the student's
-            transaction history and in the caisse. */}
-        <div className="mt-5 rounded-xl border border-success/30 bg-success/5 p-3 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-success">
-              <DollarSign className="h-3.5 w-3.5" /> Premier versement (recharge du solde)
-            </span>
-            <span className="text-[10px] text-muted">Facultatif</span>
-          </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold text-muted mb-1">Montant à verser (DA)</label>
-              <Input
-                type="number"
-                min={0}
-                value={initialTopup || ""}
-                onChange={(e) => setInitialTopup(Number(e.target.value))}
-                placeholder="Ex: 5000"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-muted mb-1">Description</label>
-              <Input
-                value={initialTopupDesc}
-                onChange={(e) => setInitialTopupDesc(e.target.value)}
-                placeholder="Premier versement"
-              />
-            </div>
-          </div>
-          {/* The fee settled "à la création" is taken out of this very payment,
-              so the starting balance is what is left once it is deducted. */}
-          {initialTopup > 0 && (
-            <div className="flex items-center justify-between rounded-lg border border-line bg-surface p-2.5 text-xs">
-              <div>
-                <span className="text-muted font-semibold block">Solde de départ de l&apos;étudiant</span>
-                {settleRegistrationOnCreate && (
-                  <span className="text-[10px] text-muted">
-                    Après déduction de {createRegistrationFee} DA ({createFeeOption?.label}).
-                  </span>
-                )}
-              </div>
-              <strong
-                className={`text-sm ${
-                  Math.round(initialTopup) - (settleRegistrationOnCreate ? createRegistrationFee : 0) < 0
-                    ? "text-danger"
-                    : "text-success"
-                }`}
-              >
-                {Math.round(initialTopup) - (settleRegistrationOnCreate ? createRegistrationFee : 0)} DA
-              </strong>
-            </div>
-          )}
-          <p className="text-[10px] leading-relaxed text-muted">
-            Le versement est enregistré comme une transaction «&nbsp;Versement / Recharge&nbsp;» dans
-            l&apos;<strong className="text-ink">historique de l&apos;étudiant</strong> et dans la caisse, exactement
-            comme une recharge faite depuis sa fiche. Laissez à 0 pour créer l&apos;étudiant sans versement.
-          </p>
-        </div>
-
-        {/* ---- 3. Inscriptions: niveau → année → filière, puis les créneaux -- */}
-        <div className="mt-4 rounded-xl border border-primary/25 bg-primary-50/40 p-3 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-primary">
-              <BookOpen className="h-3.5 w-3.5" /> Inscriptions ({selectedAssignIds.length} sélectionnée(s))
-            </span>
-            <span className="text-[10px] text-muted">Facultatif</span>
-          </div>
-
-          {/* Direct search: "lycee 2eme sciences" lands on the same créneaux
-              as walking the three steps below, in any word order. */}
-          <div>
-            <label className="block text-[10px] font-semibold text-muted mb-1">
-              Recherche directe : niveau + année + filière
-            </label>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
-              <Input
-                value={createClassSearch}
-                onChange={(e) => setCreateClassSearch(e.target.value)}
-                placeholder="Ex: lycee 2eme sciences"
-                className="pl-9 pr-20"
-              />
-              {createClassSearch && (
-                <button
-                  onClick={() => setCreateClassSearch("")}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-primary hover:underline"
-                >
-                  Effacer
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Steps 1→3, hidden while the search box drives the list itself. */}
-          {!createClassSearch.trim() && (
-            <div className="space-y-2.5">
-              <div>
-                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
-                  1. Niveau scolaire
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {createLevelOptions().length === 0 ? (
-                    <p className="text-xs italic text-muted">Aucune classe enregistrée dans l&apos;école.</p>
-                  ) : (
-                    createLevelOptions().map((opt) => {
-                      const active = createLevel === opt.value;
-                      return (
-                        <button
-                          key={opt.value}
-                          onClick={() => pickCreateLevel(active ? "" : opt.value)}
-                          className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                            active
-                              ? "border-primary bg-primary text-white"
-                              : "border-line bg-surface text-ink hover:bg-primary-50"
-                          }`}
-                        >
-                          {opt.label}
-                          <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
-                            {opt.count} créneau{opt.count > 1 ? "x" : ""}
-                          </span>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-
-              {createLevel && (
-                <div>
-                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
-                    2. {createLevel === "formation" ? "Niveau de formation" : "Année"}
-                  </span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {createYearOptions().length === 0 ? (
-                      <p className="text-xs italic text-muted">Aucune classe pour ce niveau.</p>
-                    ) : (
-                      createYearOptions().map((opt) => {
-                        const active = createYear === opt.value;
-                        return (
-                          <button
-                            key={opt.value}
-                            onClick={() => pickCreateYear(active ? "" : opt.value)}
-                            className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                              active
-                                ? "border-primary bg-primary text-white"
-                                : "border-line bg-surface text-ink hover:bg-primary-50"
-                            }`}
-                          >
-                            {opt.label}
-                            <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
-                              {opt.count} créneau{opt.count > 1 ? "x" : ""}
-                            </span>
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Formations carry no filière — their level is the last step. */}
-              {createLevel && createLevel !== "formation" && createYear && (
-                <div>
-                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
-                    3. Filière
-                  </span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {createFiliereOptions().length === 0 ? (
-                      <p className="text-xs italic text-muted">Aucune classe pour cette année.</p>
-                    ) : (
-                      createFiliereOptions().map((opt) => {
-                        const active = createFiliereId === opt.value;
-                        return (
-                          <button
-                            key={opt.value}
-                            onClick={() => setCreateFiliereId(active ? "" : opt.value)}
-                            className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                              active
-                                ? "border-primary bg-primary text-white"
-                                : "border-line bg-surface text-ink hover:bg-primary-50"
-                            }`}
-                          >
-                            {opt.label}
-                            <span className={active ? "ms-1.5 text-white/75" : "ms-1.5 text-muted"}>
-                              {opt.count} créneau{opt.count > 1 ? "x" : ""}
-                            </span>
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Every créneau created on the matched niveau + année + filière */}
-          {(() => {
-            const matched = createMatchedClasses();
-            const searching = !!createClassSearch.trim();
-            // Nothing picked yet and nothing typed: the steps above speak for
-            // themselves, there is no empty list to show.
-            if (matched.length === 0 && !searching) return null;
-
-            if (matched.length === 0) {
-              return (
-                <p className="rounded-xl border border-line bg-canvas/30 px-3 py-2.5 text-xs italic text-muted">
-                  Aucune classe ne correspond à «&nbsp;{createClassSearch.trim()}&nbsp;». Essayez «&nbsp;niveau
-                  année filière&nbsp;», par exemple «&nbsp;lycee 2eme sciences&nbsp;».
-                </p>
-              );
-            }
-
-            return (
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Créneaux de{" "}
-                    <strong className="text-ink">
-                      {matched.slice(0, 3).map((c) => classFullLabel(c)).join(" / ")}
-                      {matched.length > 3 ? ` +${matched.length - 3} autre(s)` : ""}
-                    </strong>{" "}
-                    — cochez ceux de l&apos;étudiant
-                  </span>
-                  <span className="text-[10px] text-muted">
-                    {matched.reduce((sum, c) => sum + timingCountOf(c.id), 0)} créneau(x)
-                  </span>
-                </div>
-
-                <EnrollmentCards
-                  items={getAssignableItems({ classIds: matched.map((c) => c.id), search: "" })}
-                  selectedIds={selectedAssignIds}
-                  subDates={assignSubDates}
-                  startDates={assignStartDates}
-                  discounts={assignDiscounts}
-                  onPickGroup={pickGroup}
-                  onToggleCoursework={toggleCoursework}
-                  onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
-                  onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
-                  onDiscountChange={setItemDiscount}
-                  emptyLabel="Aucun créneau tarifé ici — définissez d'abord son tarif dans « Abonnements »."
-                  className="max-h-72"
-                />
-              </div>
-            );
-          })()}
-
-          {/* Recap: the selection survives changing niveau/année/filière, so a
-              student can be enrolled across several classes in one pass. */}
-          {selectedAssignIds.length > 0 && (
-            <div className="rounded-xl border border-line bg-surface p-2.5 space-y-2">
-              <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">
-                Inscriptions retenues
-              </span>
-              <div className="flex flex-wrap gap-1.5">
-                {selectedAssignIds.map((subId) => (
-                  <span
-                    key={subId}
-                    className="flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary-50 px-2.5 py-1 text-[10px] font-semibold text-primary"
-                  >
-                    {getSubLabel(subId)}
-                    <button
-                      onClick={() => unselectEnrollment(subId)}
-                      className="text-danger hover:underline"
-                      aria-label="Retirer cette inscription"
-                    >
-                      ✕
-                    </button>
-                  </span>
-                ))}
-              </div>
-              <div className="flex items-center justify-between border-t border-line pt-2 text-xs">
-                <span className="font-semibold text-muted">Total par séance après réductions</span>
-                <strong className="text-primary text-sm">
-                  {selectedEnrollmentTotal(selectedAssignIds)} DA
-                </strong>
-              </div>
-              {createRegistrationFee > 0 && (
-                <p className="text-[10px] leading-relaxed text-muted">
-                  S&apos;y ajoutent les frais d&apos;inscription{" "}
-                  <strong className="text-ink">
-                    {createFeeOption?.label} ({createRegistrationFee} DA)
-                  </strong>
-                  , {createFeePayNow ? "encaissés à la création" : "laissés en dette sur sa fiche"}.
-                </p>
-              )}
-            </div>
-          )}
-
-          <p className="text-[10px] leading-relaxed text-muted">
-            📅 Chaque créneau retenu est enregistré sur l&apos;étudiant avec sa{" "}
-            <strong className="text-ink">date d&apos;inscription</strong> et sa{" "}
-            <strong className="text-ink">date de début de facturation</strong>, puis apparaît dans l&apos;onglet
-            «&nbsp;Abonnements&nbsp;» de sa fiche. Elles restent modifiables ensuite via «&nbsp;Affecter des
-            abonnements&nbsp;».
-          </p>
-        </div>
+        {renderEnrollmentPicker("create")}
 
         <div className="flex justify-end gap-2 pt-6 mt-4 border-t border-line">
           <Button variant="outline" onClick={() => setIsCreateOpen(false)}>
@@ -2981,50 +3276,91 @@ export function StudentsPage() {
         </div>
       </Modal>
 
-      {/* Edit Modal */}
-      <Modal open={isEditOpen} onClose={() => setIsEditOpen(false)} title="Modifier l'étudiant">
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-muted mb-1">Prénom</label>
-              <Input value={firstName} onChange={(e) => setFirstName(e.target.value)} />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-muted mb-1">Nom</label>
-              <Input value={lastName} onChange={(e) => setLastName(e.target.value)} />
-            </div>
-          </div>
+      {/* Edit Modal — le même écran que « Ajouter un étudiant », ouvert sur un
+          dossier existant : identité, frais d'inscription, versement et
+          inscriptions. Tout est prérempli avec ce que l'élève a déjà, donc
+          enregistrer sans toucher à un bloc ne change rien. */}
+      <Modal open={isEditOpen} onClose={closeEdit} title="Modifier l'étudiant" wide>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Date de naissance</label>
-            <Input type="date" value={birthDate} onChange={(e) => setBirthDate(e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Téléphone</label>
-            <Input value={phone} onChange={(e) => setPhone(e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-muted mb-1">RFID</label>
-            <Input value={rfid} onChange={(e) => setRfid(e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Email</label>
-            <Input value={email} onChange={(e) => setEmail(e.target.value)} />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Nouveau mot de passe</label>
-            <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Laisser vide pour ne pas changer" />
-          </div>
-          <div className="flex items-center justify-between p-3 bg-canvas border border-line rounded-xl">
-            <span className="text-xs font-bold text-ink">Cas Spécial (Études gratuites)</span>
-            <input type="checkbox" checked={isFree} onChange={(e) => setIsFree(e.target.checked)} className="h-5 w-5" />
+            <label className="block text-xs font-semibold text-muted mb-1">Prénom *</label>
+            <Input value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Prénom" />
           </div>
 
-          <div className="flex justify-end gap-2 pt-4">
-            <Button variant="outline" onClick={() => setIsEditOpen(false)}>
-              Annuler
-            </Button>
-            <Button onClick={handleEditStudent}>Enregistrer</Button>
+          <div>
+            <label className="block text-xs font-semibold text-muted mb-1 font-sans">Nom de famille *</label>
+            <Input value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Nom de famille" />
           </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-muted mb-1">Date de naissance *</label>
+            <Input type="date" value={birthDate} onChange={(e) => setBirthDate(e.target.value)} />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-muted mb-1">Téléphone *</label>
+            <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+213 5XX XX XX XX" />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-muted mb-1">Numéro Carte RFID *</label>
+            <Input value={rfid} onChange={(e) => setRfid(e.target.value)} placeholder="Ex: RFID-0010" />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-muted mb-1">Email</label>
+            <Input
+              value={email}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                setIsEmailDirty(true);
+              }}
+              placeholder="email@ecole.com"
+            />
+          </div>
+
+          {/* Le mot de passe n'est jamais relu depuis le compte : le laisser
+              vide garde celui en place, le remplir le remplace partout. */}
+          <div>
+            <label className="block text-xs font-semibold text-muted mb-1">Nouveau mot de passe</label>
+            <Input
+              type="text"
+              value={password}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                setIsPasswordDirty(true);
+              }}
+              placeholder="Laisser vide pour ne pas le changer"
+            />
+          </div>
+
+          <div className="md:col-span-2 bg-primary-50/50 p-3 rounded-xl border border-line flex items-center justify-between mt-2">
+            <div>
+              <strong className="text-ink text-xs block">Cas spécial (Études gratuites)</strong>
+              <span className="text-[10px] text-muted">
+                L&apos;étudiant étudie gratuitement, aucun frais ne sera déduit.
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              checked={isFree}
+              onChange={(e) => setIsFree(e.target.checked)}
+              className="h-5 w-5 rounded border-line text-primary focus:ring-primary"
+            />
+          </div>
+        </div>
+
+        {renderFeeSection("edit")}
+
+        {renderTopupSection("edit")}
+
+        {renderEnrollmentPicker("edit")}
+
+        <div className="flex justify-end gap-2 pt-6 mt-4 border-t border-line">
+          <Button variant="outline" onClick={closeEdit}>
+            Annuler
+          </Button>
+          <Button onClick={handleEditStudent}>Enregistrer les modifications</Button>
         </div>
       </Modal>
 
@@ -3820,21 +4156,34 @@ export function StudentsPage() {
         })()}
       </Modal>
 
-      {/* Assign Subscriptions Modal */}
-      <Modal open={isAssignOpen} onClose={() => setIsAssignOpen(false)} title="Affecter des abonnements / cours" wide>
+      {/* Inscriptions Modal — les créneaux se choisissent ici exactement comme
+          sur l'écran « Ajouter un étudiant » : niveau → année → filière, puis
+          les créneaux de cette combinaison. La réduction groupée reste propre à
+          cet écran, pour retarifer plusieurs modules en une fois. */}
+      <Modal
+        open={isAssignOpen}
+        onClose={() => {
+          setIsAssignOpen(false);
+          resetForm();
+        }}
+        title="Inscriptions de l'étudiant"
+        wide
+      >
         <div className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-muted mb-1 font-sans">Rechercher des abonnements ou stages</label>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
-              <Input
-                value={assignSearch}
-                onChange={(e) => setAssignSearch(e.target.value)}
-                placeholder="Rechercher par module, enseignant..."
-                className="pl-9"
-              />
+          {selectedStudent && (
+            <div className="bg-canvas border border-line rounded-xl p-3 text-xs">
+              <span className="text-[10px] text-muted block uppercase">Élève</span>
+              <strong className="text-ink block mt-0.5">
+                {selectedStudent.firstName} {selectedStudent.lastName}
+              </strong>
+              <span className="text-muted">
+                {selectedStudent.subscriptionIds.length} inscription(s) enregistrée(s) · Solde:{" "}
+                {selectedStudent.balance} DA
+              </span>
             </div>
-          </div>
+          )}
+
+          {renderEnrollmentPicker("assign")}
 
           {/* Bulk reduction: one rate for every ticked module, in one go —
               instead of opening each module and setting it individually. */}
@@ -3880,25 +4229,11 @@ export function StudentsPage() {
               </Button>
             </div>
             <p className="text-[10px] leading-relaxed text-muted">
-              Cochez plusieurs modules puis appliquez la réduction une seule fois. Chaque module reste
-              modifiable individuellement ci-dessous. Le tarif réduit est celui réellement débité au scan,
-              en présence manuelle et par la facturation d&apos;absence hebdomadaire.
+              Cochez plusieurs modules ci-dessus puis appliquez la réduction une seule fois. Chaque module
+              reste modifiable individuellement sur sa carte. Le tarif réduit est celui réellement débité au
+              scan, en présence manuelle et par la facturation d&apos;absence hebdomadaire.
             </p>
           </div>
-
-          <EnrollmentCards
-            items={getAssignableItems()}
-            selectedIds={selectedAssignIds}
-            subDates={assignSubDates}
-            startDates={assignStartDates}
-            discounts={assignDiscounts}
-            onPickGroup={pickGroup}
-            onToggleCoursework={toggleCoursework}
-            onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
-            onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
-            onDiscountChange={setItemDiscount}
-            emptyLabel="Aucun cours ou stage ne correspond à cette recherche."
-          />
 
           <div className="rounded-xl border border-line bg-canvas/40 p-3 text-[10px] leading-relaxed text-muted">
             📅 <strong className="text-ink">Dates d&apos;inscription :</strong> la{" "}
@@ -3916,20 +4251,14 @@ export function StudentsPage() {
             enregistrée sur le groupe réellement suivi, au tarif de son inscription.
           </div>
 
-          {/* Running total of what the student will be charged per séance */}
-          {selectedAssignIds.length > 0 && (
-            <div className="flex items-center justify-between rounded-xl border border-line bg-canvas/40 p-3 text-xs">
-              <span className="text-muted font-semibold">
-                Total par séance après réductions ({selectedAssignIds.length} module(s))
-              </span>
-              <strong className="text-primary text-sm">
-                {selectedEnrollmentTotal(selectedAssignIds)} DA
-              </strong>
-            </div>
-          )}
-
           <div className="flex justify-end gap-2 pt-4">
-            <Button variant="outline" onClick={() => setIsAssignOpen(false)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setIsAssignOpen(false);
+                resetForm();
+              }}
+            >
               Annuler
             </Button>
             <Button onClick={handleAssignSubmit}>Confirmer les inscriptions</Button>

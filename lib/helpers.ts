@@ -205,6 +205,30 @@ export function registrationFeeOptions(school?: Partial<School>): RegistrationFe
   return allRegistrationFees(school).filter((o) => o.amount > 0);
 }
 
+/** Ce que le guichet encaisse réellement, et ce que devient le solde. */
+export interface DeskPayment {
+  /** Montant encaissé en caisse — la ligne « Versement / Recharge ». */
+  cashed: number;
+  /** Variation du solde de l'élève une fois les frais déduits. */
+  balanceDelta: number;
+}
+
+/**
+ * Un écran qui prend un versement ET règle l'inscription en une fois (création
+ * d'un élève, modification de sa fiche) : les frais réglés sont TOUJOURS pris
+ * sur le versement, donc seul ce que le guichet reçoit vraiment part en caisse.
+ *  - versement 5000, frais 3000 réglés → 5000 encaissés, solde +2000
+ *  - versement 0, frais 3000 réglés    → 3000 encaissés, solde inchangé
+ *  - versement 5000, frais non réglés  → 5000 encaissés, solde +5000
+ */
+export function deskPaymentFor(topup: number, fee: number, settleNow: boolean): DeskPayment {
+  const paid = Math.max(0, Math.round(topup || 0));
+  const due = settleNow ? Math.max(0, Math.round(fee || 0)) : 0;
+  // Sans versement, les frais sont encaissés seuls : le solde ne bouge pas.
+  const cashed = paid > 0 ? paid : due;
+  return { cashed, balanceDelta: cashed - due };
+}
+
 /** Human label for a reduction, e.g. "-20%" or "-500 DA". Empty when none. */
 export function discountLabel(discount?: SubscriptionDiscount): string {
   if (!discount || discount.value <= 0) return "";
