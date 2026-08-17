@@ -48,12 +48,7 @@ create table public.school (
   registre_commerce text,
   nif text,
   nis text,
-  -- Two registration tariffs: the student is charged one of them (or none) when
-  -- his file is created. A tariff left at 0 is simply never offered.
   registration_fee integer not null default 0,
-  registration_fee_label text,
-  registration_fee_2 integer not null default 0,
-  registration_fee_2_label text,
   created_at timestamptz not null default now()
 );
 

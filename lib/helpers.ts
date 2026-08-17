@@ -3,9 +3,7 @@ import { DAYS } from "@/lib/types";
 import type {
   CoursLevel,
   Day,
-  RegistrationFeeKey,
   ScheduleSession,
-  School,
   SchoolClass,
   Student,
   Subscription,
@@ -165,44 +163,6 @@ export function netPriceFor(basePrice: number, discount?: SubscriptionDiscount):
       ? Math.round((price * Math.min(Math.max(discount.value, 0), 100)) / 100)
       : Math.max(discount.value, 0);
   return Math.max(0, price - cut);
-}
-
-// ---- Frais d'inscription -----------------------------------------------------
-// The school charges at most two kinds of inscription. Both are optional: a
-// tariff left at 0 simply isn't offered when a student is created.
-
-/** Shown when the school never named its tariffs. */
-export const REGISTRATION_FEE_LABELS: Record<RegistrationFeeKey, string> = {
-  fee1: "Inscription 1",
-  fee2: "Inscription 2",
-};
-
-export interface RegistrationFeeOption {
-  key: RegistrationFeeKey;
-  label: string;
-  amount: number;
-}
-
-/** Both tariffs, named and rounded — including the ones left at 0. */
-export function allRegistrationFees(school?: Partial<School>): RegistrationFeeOption[] {
-  return [
-    {
-      key: "fee1" as const,
-      label: (school?.registrationFeeLabel || "").trim() || REGISTRATION_FEE_LABELS.fee1,
-      amount: Math.max(0, Math.round(school?.registrationFee || 0)),
-    },
-    {
-      key: "fee2" as const,
-      label: (school?.registrationFee2Label || "").trim() || REGISTRATION_FEE_LABELS.fee2,
-      amount: Math.max(0, Math.round(school?.registrationFee2 || 0)),
-    },
-  ];
-}
-
-/** Only the tariffs the school actually charges — what the création screen
- *  offers. Empty means "cette école ne facture aucune inscription". */
-export function registrationFeeOptions(school?: Partial<School>): RegistrationFeeOption[] {
-  return allRegistrationFees(school).filter((o) => o.amount > 0);
 }
 
 /** Human label for a reduction, e.g. "-20%" or "-500 DA". Empty when none. */

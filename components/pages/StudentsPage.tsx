@@ -35,7 +35,6 @@ import type {
   AttendanceRecord,
   AttendanceStatus,
   CoursLevel,
-  RegistrationFeeKey,
   SchoolClass,
   Student,
   Subscription,
@@ -55,7 +54,6 @@ import {
   formatDays,
   matchesAllWords,
   netPriceFor,
-  registrationFeeOptions,
   todayIso,
   COURS_LEVELS,
   COURS_LEVEL_LABELS,
@@ -81,11 +79,6 @@ import {
   type AssignGroupOption,
   type AssignItem,
 } from "@/components/students/EnrollmentPicker";
-
-/** Domaine des identifiants du portail. Les comptes élèves ne servent qu'à se
- *  connecter à l'application : l'adresse est fabriquée, jamais une vraie boîte
- *  mail, d'où un domaine unique pour toute l'école. */
-const PORTAL_EMAIL_DOMAIN = "benzaoui.com";
 
 /** Libellés des types de ligne du solde (onglet « Transactions »). */
 const TX_TYPE_LABELS: Record<BalanceTxType, string> = {
@@ -171,12 +164,6 @@ export function StudentsPage() {
   // so it lands in the student's transaction history and in the caisse.
   const [initialTopup, setInitialTopup] = useState<number>(0);
   const [initialTopupDesc, setInitialTopupDesc] = useState("Premier versement");
-
-  // Form: which of the school's two registration tariffs this student is
-  // charged (`null` = aucun frais), and whether he settles it right now or
-  // leaves it as a debt on his file.
-  const [createFeeKey, setCreateFeeKey] = useState<RegistrationFeeKey | null>("fee1");
-  const [createFeePayNow, setCreateFeePayNow] = useState(false);
 
   // Form: inscriptions taken at creation time. Reception walks down niveau →
   // année → filière, then ticks the créneaux of that combination (the picked
@@ -371,7 +358,7 @@ export function StudentsPage() {
 
       if (cleanedFirst && cleanedLast && cleanedBirth) {
         if (!isEmailDirty) {
-          setEmail(`${cleanedFirst}${cleanedLast}${cleanedBirth}@${PORTAL_EMAIL_DOMAIN}`);
+          setEmail(`${cleanedFirst}${cleanedLast}${cleanedBirth}@elilm.com`);
         }
         if (!isPasswordDirty) {
           setPassword(`${cleanedFirst}${cleanedLast}${cleanedBirth}`);
@@ -423,17 +410,18 @@ export function StudentsPage() {
       return;
     }
 
-    const finalEmail =
-      email || `${firstName.toLowerCase()}.${rfid.toLowerCase()}@${PORTAL_EMAIL_DOMAIN}`;
+    const finalEmail = email || `${firstName.toLowerCase()}.${rfid.toLowerCase()}@elilm.com`;
 
-    // Inscriptions picked on this same screen, plus the registration tariff
-    // chosen just above (« Frais d'inscription ») — paying students only.
+    // Inscriptions picked on this same screen. The one-time registration fee is
+    // charged here rather than on the first "Affecter", exactly like
+    // `handleAssignSubmit` does — paying students only.
     const enrollIds = [...selectedAssignIds];
     const registrationDue = createRegistrationFee;
-    const registrationLabel = createFeeOption?.label ?? "Frais d'inscription";
 
     const topupAmountToWrite = Math.round(initialTopup || 0);
-    const settleRegistrationNow = settleRegistrationOnCreate;
+    // The RPC settles the fee out of the payment itself (and writes the matching
+    // "registration" history row), so it only makes sense with a real payment.
+    const settleRegistrationNow = settleReg && topupAmountToWrite > 0 && registrationDue > 0;
 
     try {
       const { id: studentId } = await createRoleUser({
@@ -473,24 +461,11 @@ export function StudentsPage() {
       // student_subscriptions rows are still in flight and wipe them locally.
       let topupError = "";
       if (topupAmountToWrite > 0) {
-        // A first payment is made: the fee (when settled now) is taken out of
-        // it, so the student walks away with the remainder on his balance.
         const res = await addBalance(
           studentId,
           topupAmountToWrite,
           initialTopupDesc.trim() || "Premier versement",
           settleRegistrationNow,
-        );
-        if (!res.ok) topupError = res.error ?? "erreur inconnue";
-      } else if (settleRegistrationNow) {
-        // No first top-up, but the inscription IS paid at the desk: it is
-        // encashed on its own. The caisse receives the fee and the balance
-        // stays at zero (+fee versé, -fee inscription).
-        const res = await addBalance(
-          studentId,
-          registrationDue,
-          `Frais d'inscription — ${registrationLabel}`,
-          true,
         );
         if (!res.ok) topupError = res.error ?? "erreur inconnue";
       }
@@ -514,15 +489,15 @@ export function StudentsPage() {
         message: [
           `${studentName} a été enregistré.`,
           topupError
-            ? `Le paiement n'a PAS été enregistré (${topupError}) — refaites-le depuis « Recharge ».`
+            ? `Le premier versement n'a PAS été enregistré (${topupError}) — refaites-le depuis « Recharge ».`
             : topupAmountToWrite > 0
               ? `Solde initial: ${topupAmountToWrite - (settled ? registrationDue : 0)} DA (visible dans son historique).`
               : "",
           enrollIds.length > 0 ? `${enrollIds.length} inscription(s) enregistrée(s).` : "",
           registrationDue > 0
             ? settled
-              ? `${registrationLabel} : ${registrationDue} DA encaissés.`
-              : `${registrationLabel} : ${registrationDue} DA à régler.`
+              ? `Frais d'inscription de ${registrationDue} DA réglés sur ce versement.`
+              : `Frais d'inscription à régler: ${registrationDue} DA.`
             : "",
         ]
           .filter(Boolean)
@@ -842,8 +817,6 @@ export function StudentsPage() {
     setIsPasswordDirty(false);
     setInitialTopup(0);
     setInitialTopupDesc("Premier versement");
-    setCreateFeeKey("fee1");
-    setCreateFeePayNow(false);
     setCreateClassSearch("");
     setCreateLevel("");
     setCreateYear("");
@@ -1138,14 +1111,20 @@ export function StudentsPage() {
   const handleAssignSubmit = () => {
     if (!selectedStudent) return;
 
-    // The registration fee is NOT charged here. Which of the two tariffs a
-    // student owes — or none — is decided once, on his creation screen, so
-    // adding a module afterwards must never re-charge an inscription he has
-    // already been billed for (or deliberately exempted from).
+    // The one-time registration fee is charged once, on first enrollment
+    // (paying students only). It is configured globally on the Abonnements page.
+    const wasEnrolled = selectedStudent.subscriptionIds.length > 0;
+    const willBeEnrolled = selectedAssignIds.length > 0;
+    const chargeRegistration =
+      !wasEnrolled && willBeEnrolled && !selectedStudent.isFree
+        ? school?.registrationFee || 0
+        : 0;
+
     updateItem("students", selectedStudent.id, {
       subscriptionIds: selectedAssignIds,
       subscriptionDates: buildEnrollmentDates(selectedAssignIds),
       subscriptionDiscounts: buildEnrollmentDiscounts(selectedAssignIds),
+      registrationDue: (selectedStudent.registrationDue || 0) + chargeRegistration,
     });
 
     setIsAssignOpen(false);
@@ -1329,16 +1308,10 @@ export function StudentsPage() {
       return sum + netPriceFor(cw?.total ?? 0, assignDiscounts[id]);
     }, 0);
 
-  // ---- Frais d'inscription pris à la création ------------------------------
-  // The school offers up to two tariffs (Abonnements → « Frais d'inscription
-  // uniques »). Reception picks the one this student pays — a student on
-  // "études gratuites" never pays any — and says whether he settles it now.
-  const createFeeOptions = registrationFeeOptions(school);
-  /** The picked tariff, or undefined: none picked, none offered, or free. */
-  const createFeeOption = isFree ? undefined : createFeeOptions.find((o) => o.key === createFeeKey);
-  const createRegistrationFee = createFeeOption?.amount ?? 0;
-  /** Settling only makes sense against a real fee. */
-  const settleRegistrationOnCreate = createFeePayNow && createRegistrationFee > 0;
+  /** One-time registration fee the inscriptions picked on the creation screen
+   *  will add — charged once, on first enrollment, paying students only. */
+  const createRegistrationFee =
+    selectedAssignIds.length > 0 && !isFree ? school?.registrationFee || 0 : 0;
 
   // ---- Creation screen: niveau → année → filière, then the créneaux ---------
   // Reception picks the student's schooling the way it is spoken about: the
@@ -2123,7 +2096,7 @@ export function StudentsPage() {
               ? `
                 <div class="synthesis-line" style="color: #b91c1c;">
                   <span>Frais d'inscription déduits :</span>
-                  <strong>-${stu.registrationDue || 0} DA</strong>
+                  <strong>-${school.registrationFee || 0} DA</strong>
                 </div>
               ` 
               : ""
@@ -2540,133 +2513,7 @@ export function StudentsPage() {
           </div>
         </div>
 
-        {/* ---- 1. Frais d'inscription: quel type, réglé quand ? ---------------
-            L'école propose jusqu'à deux tarifs (page « Abonnements »). La
-            réception dit lequel s'applique à CET étudiant — ou aucun — et si
-            elle l'encaisse tout de suite ou le laisse dû sur sa fiche. */}
-        <div className="mt-5 rounded-xl border border-warning/30 bg-warning/5 p-3 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-warning">
-              <CreditCard className="h-3.5 w-3.5" /> Frais d&apos;inscription
-            </span>
-            <span className="text-[10px] text-muted">Une seule fois par étudiant</span>
-          </div>
-
-          {isFree ? (
-            <p className="rounded-lg border border-line bg-surface px-3 py-2 text-[11px] text-muted">
-              Études gratuites : <strong className="text-ink">aucun frais d&apos;inscription</strong> n&apos;est
-              facturé à cet étudiant.
-            </p>
-          ) : createFeeOptions.length === 0 ? (
-            <p className="rounded-lg border border-line bg-surface px-3 py-2 text-[11px] text-muted">
-              Aucun tarif d&apos;inscription n&apos;est défini. Renseignez-le dans{" "}
-              <strong className="text-ink">Abonnements → Frais d&apos;inscription uniques</strong> pour pouvoir
-              le facturer ici.
-            </p>
-          ) : (
-            <>
-              <div>
-                <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
-                  Type d&apos;inscription facturé
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {createFeeOptions.map((opt) => {
-                    const active = createFeeOption?.key === opt.key;
-                    return (
-                      <button
-                        key={opt.key}
-                        onClick={() => setCreateFeeKey(opt.key)}
-                        className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                          active
-                            ? "border-warning bg-warning text-white"
-                            : "border-line bg-surface text-ink hover:bg-warning/10"
-                        }`}
-                      >
-                        {opt.label}
-                        <span className={active ? "ms-1.5 text-white/80" : "ms-1.5 text-muted"}>
-                          {opt.amount} DA
-                        </span>
-                      </button>
-                    );
-                  })}
-                  <button
-                    onClick={() => setCreateFeeKey(null)}
-                    className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
-                      !createFeeOption
-                        ? "border-warning bg-warning text-white"
-                        : "border-line bg-surface text-ink hover:bg-warning/10"
-                    }`}
-                  >
-                    Aucun frais
-                  </button>
-                </div>
-              </div>
-
-              {createRegistrationFee > 0 && (
-                <div>
-                  <span className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-muted">
-                    Réglé à la création de l&apos;étudiant ?
-                  </span>
-                  <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                    <button
-                      onClick={() => setCreateFeePayNow(true)}
-                      className={`rounded-lg border p-2 text-start text-[11px] transition-colors ${
-                        createFeePayNow
-                          ? "border-success bg-success text-white"
-                          : "border-line bg-surface text-ink hover:bg-success/10"
-                      }`}
-                    >
-                      <strong className="block">Oui, payé maintenant</strong>
-                      <span className={createFeePayNow ? "text-white/80" : "text-muted"}>
-                        {initialTopup > 0
-                          ? "Déduit du premier versement ci-dessous."
-                          : "Encaissé seul en caisse, solde inchangé."}
-                      </span>
-                    </button>
-                    <button
-                      onClick={() => setCreateFeePayNow(false)}
-                      className={`rounded-lg border p-2 text-start text-[11px] transition-colors ${
-                        !createFeePayNow
-                          ? "border-danger bg-danger text-white"
-                          : "border-line bg-surface text-ink hover:bg-danger/10"
-                      }`}
-                    >
-                      <strong className="block">Non, à régler plus tard</strong>
-                      <span className={!createFeePayNow ? "text-white/80" : "text-muted"}>
-                        Reste dû sur sa fiche, réglable depuis «&nbsp;Recharge&nbsp;».
-                      </span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <div className="rounded-lg border border-line bg-surface p-2.5 text-xs">
-                {createRegistrationFee === 0 ? (
-                  <span className="text-muted">
-                    Aucun frais d&apos;inscription ne sera facturé à cet étudiant.
-                  </span>
-                ) : (
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-muted">
-                      {createFeeOption?.label} — {createFeePayNow ? "encaissé à la création" : "laissé en dette"}
-                    </span>
-                    <strong className={createFeePayNow ? "text-success" : "text-danger"}>
-                      {createRegistrationFee} DA
-                    </strong>
-                  </div>
-                )}
-                {settleRegistrationOnCreate && initialTopup > 0 && initialTopup < createRegistrationFee && (
-                  <p className="mt-1.5 text-[10px] font-semibold text-danger">
-                    Le premier versement ({Math.round(initialTopup)} DA) ne couvre pas ces frais : le solde de
-                    l&apos;étudiant partira en négatif.
-                  </p>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* ---- 2. Première recharge de solde ---------------------------------
+        {/* ---- 1. Première recharge de solde ---------------------------------
             Optional, and written with the very same RPC as the "Recharge"
             button of the student card, so it appears in the student's
             transaction history and in the caisse. */}
@@ -2697,26 +2544,30 @@ export function StudentsPage() {
               />
             </div>
           </div>
-          {/* The fee settled "à la création" is taken out of this very payment,
-              so the starting balance is what is left once it is deducted. */}
+          {/* The registration fee is created by the inscriptions picked below,
+              so it can be settled straight out of this first payment instead of
+              forcing a second pass through the "Recharge" screen. */}
+          {createRegistrationFee > 0 && initialTopup > 0 && (
+            <div className="flex items-center justify-between rounded-lg border border-warning/20 bg-warning/10 p-3 text-xs">
+              <div>
+                <strong className="text-warning block">Régler les frais d&apos;inscription ?</strong>
+                <span className="text-[10px] text-muted">
+                  Les inscriptions choisies ci-dessous ajoutent {createRegistrationFee} DA de frais uniques.
+                </span>
+              </div>
+              <input
+                type="checkbox"
+                checked={settleReg}
+                onChange={(e) => setSettleReg(e.target.checked)}
+                className="h-5 w-5 text-warning focus:ring-warning"
+              />
+            </div>
+          )}
           {initialTopup > 0 && (
             <div className="flex items-center justify-between rounded-lg border border-line bg-surface p-2.5 text-xs">
-              <div>
-                <span className="text-muted font-semibold block">Solde de départ de l&apos;étudiant</span>
-                {settleRegistrationOnCreate && (
-                  <span className="text-[10px] text-muted">
-                    Après déduction de {createRegistrationFee} DA ({createFeeOption?.label}).
-                  </span>
-                )}
-              </div>
-              <strong
-                className={`text-sm ${
-                  Math.round(initialTopup) - (settleRegistrationOnCreate ? createRegistrationFee : 0) < 0
-                    ? "text-danger"
-                    : "text-success"
-                }`}
-              >
-                {Math.round(initialTopup) - (settleRegistrationOnCreate ? createRegistrationFee : 0)} DA
+              <span className="text-muted font-semibold">Solde de départ de l&apos;étudiant</span>
+              <strong className="text-success text-sm">
+                {Math.round(initialTopup) - (settleReg ? createRegistrationFee : 0)} DA
               </strong>
             </div>
           )}
@@ -2727,7 +2578,7 @@ export function StudentsPage() {
           </p>
         </div>
 
-        {/* ---- 3. Inscriptions: niveau → année → filière, puis les créneaux -- */}
+        {/* ---- 2. Inscriptions: niveau → année → filière, puis les créneaux -- */}
         <div className="mt-4 rounded-xl border border-primary/25 bg-primary-50/40 p-3 space-y-3">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-primary">
@@ -2945,13 +2796,11 @@ export function StudentsPage() {
                   {selectedEnrollmentTotal(selectedAssignIds)} DA
                 </strong>
               </div>
-              {createRegistrationFee > 0 && (
+              {!isFree && (school?.registrationFee || 0) > 0 && (
                 <p className="text-[10px] leading-relaxed text-muted">
-                  S&apos;y ajoutent les frais d&apos;inscription{" "}
-                  <strong className="text-ink">
-                    {createFeeOption?.label} ({createRegistrationFee} DA)
-                  </strong>
-                  , {createFeePayNow ? "encaissés à la création" : "laissés en dette sur sa fiche"}.
+                  Frais d&apos;inscription uniques de{" "}
+                  <strong className="text-ink">{school?.registrationFee} DA</strong> ajoutés à la création
+                  (première inscription).
                 </p>
               )}
             </div>
