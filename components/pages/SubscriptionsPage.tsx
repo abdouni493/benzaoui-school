@@ -2,7 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
-import { classLabel, courseKeyOf, formatDateFr, formatDays, studentName, todayIso } from "@/lib/helpers";
+import {
+  classLabel,
+  courseKeyOf,
+  formatDateFr,
+  formatDays,
+  studentName,
+  todayIso,
+  REGISTRATION_FEE_LABELS,
+} from "@/lib/helpers";
 import { formatDA } from "@/lib/utils";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -64,12 +72,38 @@ export function SubscriptionsPage() {
 
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
-  // Global one-time registration fee (school-wide setting)
-  const [registrationFee, setRegistrationFee] = useState<number>(school?.registrationFee ?? 0);
+  // The two global one-time registration fees (school-wide setting). Each one
+  // carries the name the desk uses for it, because that name is what reception
+  // picks from when a student is created.
+  //
+  // `school` is fetched after mount, so the form CANNOT hold its own copy from
+  // the first render — it used to show 0 until a reload, and saving then wiped
+  // the real fee. The draft stays null until something is actually typed, so
+  // the inputs read the live school row right up to the first keystroke.
+  interface FeeDraft {
+    fee1: number;
+    label1: string;
+    fee2: number;
+    label2: string;
+  }
+  const [feeDraft, setFeeDraft] = useState<FeeDraft | null>(null);
   const [feeSaved, setFeeSaved] = useState(false);
 
+  const fees: FeeDraft = feeDraft ?? {
+    fee1: school?.registrationFee ?? 0,
+    label1: school?.registrationFeeLabel ?? "",
+    fee2: school?.registrationFee2 ?? 0,
+    label2: school?.registrationFee2Label ?? "",
+  };
+  const editFees = (patch: Partial<FeeDraft>) => setFeeDraft({ ...fees, ...patch });
+
   const handleSaveRegistrationFee = () => {
-    updateSchool({ registrationFee: Math.max(0, registrationFee || 0) });
+    updateSchool({
+      registrationFee: Math.max(0, Math.round(fees.fee1 || 0)),
+      registrationFeeLabel: fees.label1.trim(),
+      registrationFee2: Math.max(0, Math.round(fees.fee2 || 0)),
+      registrationFee2Label: fees.label2.trim(),
+    });
     setFeeSaved(true);
     setTimeout(() => setFeeSaved(false), 2000);
   };
@@ -342,38 +376,96 @@ export function SubscriptionsPage() {
         </Button>
       </div>
 
-      {/* Global one-time registration fee (school-wide, set once and editable) */}
+      {/* The two one-time registration fees (school-wide, set once and editable).
+          Reception picks one of them — or none — on the création screen. */}
       <Card className="mb-6">
-        <CardBody className="flex flex-col gap-4 sm:flex-row sm:items-end">
-          <div className="flex flex-1 items-start gap-3">
+        <CardBody className="space-y-4">
+          <div className="flex items-start gap-3">
             <div className="rounded-xl bg-primary-50 p-2.5 text-primary">
               <Wallet className="h-5 w-5" />
             </div>
             <div>
               <h3 className="text-sm font-bold text-ink">Frais d&apos;inscription uniques</h3>
               <p className="mt-0.5 text-xs text-muted">
-                Frais payés une seule fois par étudiant lors de sa première inscription. Modifiable à tout moment.
+                Deux types au choix, payés une seule fois par étudiant. À la création d&apos;une fiche, la
+                réception choisit lequel des deux lui est facturé — ou aucun. Un montant laissé à{" "}
+                <strong className="text-ink">0</strong> n&apos;est pas proposé.
               </p>
             </div>
           </div>
-          <div className="flex items-end gap-2">
-            <div>
-              <label className="mb-1 block text-xs font-semibold text-muted">Montant (DA)</label>
-              <Input
-                type="number"
-                value={registrationFee || ""}
-                onChange={(e) => setRegistrationFee(Number(e.target.value))}
-                placeholder="Ex: 1000"
-                className="w-32"
-              />
-            </div>
+
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {[
+              {
+                n: 1,
+                placeholder: "Ex: Inscription annuelle",
+                label: fees.label1,
+                setLabel: (v: string) => editFees({ label1: v }),
+                amount: fees.fee1,
+                setAmount: (v: number) => editFees({ fee1: v }),
+                fallback: REGISTRATION_FEE_LABELS.fee1,
+              },
+              {
+                n: 2,
+                placeholder: "Ex: Inscription semestrielle",
+                label: fees.label2,
+                setLabel: (v: string) => editFees({ label2: v }),
+                amount: fees.fee2,
+                setAmount: (v: number) => editFees({ fee2: v }),
+                fallback: REGISTRATION_FEE_LABELS.fee2,
+              },
+            ].map((fee) => (
+              <div
+                key={fee.n}
+                className={`rounded-xl border p-3 ${
+                  fee.amount > 0 ? "border-primary/30 bg-primary-50/40" : "border-line bg-canvas/30"
+                }`}
+              >
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                    Type {fee.n}
+                  </span>
+                  <Badge tone={fee.amount > 0 ? "success" : "neutral"} className="text-[9px]">
+                    {fee.amount > 0 ? "Proposé à la création" : "Non proposé"}
+                  </Badge>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_8rem]">
+                  <div>
+                    <label className="mb-1 block text-[10px] font-semibold text-muted">Nom du type</label>
+                    <Input
+                      value={fee.label}
+                      onChange={(e) => fee.setLabel(e.target.value)}
+                      placeholder={fee.placeholder}
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[10px] font-semibold text-muted">Montant (DA)</label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={fee.amount || ""}
+                      onChange={(e) => fee.setAmount(Number(e.target.value))}
+                      placeholder="0"
+                    />
+                  </div>
+                </div>
+                <p className="mt-1.5 text-[10px] text-muted">
+                  Affiché comme «&nbsp;
+                  <strong className="text-ink">{fee.label.trim() || fee.fallback}</strong>
+                  &nbsp;» dans la fiche étudiant.
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex justify-end">
             <Button onClick={handleSaveRegistrationFee} className="flex items-center gap-2">
               {feeSaved ? (
                 <>
                   <Check className="h-4 w-4" /> Enregistré
                 </>
               ) : (
-                "Enregistrer"
+                "Enregistrer les frais"
               )}
             </Button>
           </div>
@@ -689,8 +781,9 @@ export function SubscriptionsPage() {
           </div>
 
           <div className="bg-canvas/40 border border-line rounded-xl p-3 text-xs text-muted">
-            🎫 Les <strong className="text-ink">frais d&apos;inscription uniques</strong> sont définis globalement en haut de cette page
-            et s&apos;appliquent une seule fois par étudiant.
+            🎫 Les <strong className="text-ink">frais d&apos;inscription uniques</strong> (deux types au choix) sont
+            définis globalement en haut de cette page et s&apos;appliquent une seule fois par étudiant : le type
+            facturé est choisi sur sa fiche, à sa création.
           </div>
 
           <div className="flex justify-end gap-2 pt-4">

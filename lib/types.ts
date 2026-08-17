@@ -35,6 +35,13 @@ export interface School {
   nis?: string;
   /** one-time registration fee charged once per student on first enrollment */
   registrationFee?: number;
+  /** how that first tariff is called at the desk ("Inscription 1" by default) */
+  registrationFeeLabel?: string;
+  /** a SECOND registration tariff: schools that charge two kinds of inscription
+   *  (annuelle / semestrielle, interne / externe…) pick one of the two when the
+   *  student is created */
+  registrationFee2?: number;
+  registrationFee2Label?: string;
   /** master switch for the automatic weekly-absence billing */
   absencePenaltyEnabled?: boolean;
   /** floor date (YYYY-MM-DD): absences are only billed for weeks ending on/after
@@ -44,6 +51,10 @@ export interface School {
    *  a week runs from that day to the same day of the next week */
   absenceWeekStartDay?: number;
 }
+
+/** Which of the school's two registration tariffs a student is charged.
+ *  "none" = this student pays no inscription at all. */
+export type RegistrationFeeKey = "fee1" | "fee2";
 
 export type ClassType = "cours" | "formation";
 export type CoursLevel = "primaire" | "moyen" | "lycee";
