@@ -89,6 +89,7 @@ function emptyDatabase(): Database {
       email: "",
       address: "",
       registrationFee: 0,
+      registrationFee2: 0,
     },
     filieres: [],
     modules: [],
@@ -526,6 +527,9 @@ const schoolMapper = makeMapper<School>([
   ["nif", "nif"],
   ["nis", "nis"],
   ["registrationFee", "registration_fee"],
+  ["registrationFeeLabel", "registration_fee_label"],
+  ["registrationFee2", "registration_fee_2"],
+  ["registrationFee2Label", "registration_fee_2_label"],
   ["absencePenaltyEnabled", "absence_penalty_enabled"],
   ["absencePenaltySince", "absence_penalty_since"],
   ["absenceWeekStartDay", "absence_week_start_day"],
@@ -716,7 +720,11 @@ interface DataActions {
     description: string,
     date?: string,
   ) => void;
-  updateSchool: (updatedFields: Partial<School>) => void;
+  /** Writes the school row. Resolves with the outcome so screens that save a
+   *  setting (frais d'inscription…) can tell the user when the write is refused
+   *  — a column missing on a database that has not run the latest migration
+   *  rejects the WHOLE update, and the optimistic state would otherwise lie. */
+  updateSchool: (updatedFields: Partial<School>) => Promise<{ ok: boolean; error?: string }>;
   restoreState: (dump: Partial<Database>) => void;
   reset: () => void;
 }
@@ -1178,19 +1186,23 @@ export const useData = create<DataStore>((set, get) => ({
     });
   },
 
-  updateSchool: (updatedFields) => {
+  updateSchool: async (updatedFields) => {
     set((state) => ({ school: { ...state.school, ...updatedFields } }));
 
     const schoolId = get().school.id;
-    if (!schoolId) return;
+    if (!schoolId) return { ok: false, error: "école introuvable" };
     const supabase = createClient();
-    supabase
+    const { error } = await supabase
       .from("school")
       .update(schoolMapper.toRow(updatedFields))
-      .eq("id", schoolId)
-      .then(({ error }) => {
-        if (error) console.error("Failed to update school:", error.message);
-      });
+      .eq("id", schoolId);
+    if (error) {
+      console.error("Failed to update school:", error.message);
+      // The optimistic state now disagrees with the database: put it back.
+      await get().fetchSchool();
+      return { ok: false, error: error.message };
+    }
+    return { ok: true };
   },
 
   restoreState: (dump) => set(() => ({ ...dump })),

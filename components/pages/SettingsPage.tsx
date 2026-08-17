@@ -303,7 +303,7 @@ export function SettingsPage() {
                     </div>
                     <div>
                       <label className="block text-xs font-semibold text-muted mb-1 flex items-center gap-1.5">
-                        <Coins className="h-3.5 w-3.5 text-muted" /> Frais d'inscription par défaut (DA)
+                        <Coins className="h-3.5 w-3.5 text-muted" /> Frais d'inscription — type 1 (DA)
                       </label>
                       <Input
                         type="number"
@@ -312,6 +312,10 @@ export function SettingsPage() {
                         placeholder="Ex: 1000"
                         className="rounded-xl"
                       />
+                      <p className="mt-1 text-[10px] text-muted">
+                        Le <strong className="text-ink">second type</strong> et le nom de chacun se règlent dans
+                        «&nbsp;Abonnements&nbsp;» → «&nbsp;Frais d&apos;inscription uniques&nbsp;».
+                      </p>
                     </div>
 
                     <div className="sm:col-span-2 border border-line/60 bg-canvas/10 p-4 rounded-2xl space-y-3">
