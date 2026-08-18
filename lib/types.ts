@@ -474,4 +474,14 @@ export interface IndependentSession {
   /** the teacher has already been settled for this passager's séance — a
    *  créneau attended only by passagers has no unpaid_teacher_sessions row */
   teacherPaid?: boolean;
+  /**
+   * "Séance offerte": the séance is held and recorded exactly as usual, but
+   * NOBODY is paid on it — nothing is cashed by the school, nothing is taken
+   * off a registered student's balance, and the teacher earns no share for it.
+   * `price` is therefore 0; what the séance WOULD have cost sits in
+   * `waivedAmount` so the reports can price what the school offered.
+   */
+  isFree?: boolean;
+  /** tariff that was NOT charged (0 on every ordinary séance libre) */
+  waivedAmount?: number;
 }

@@ -29,15 +29,7 @@ import {
 } from "lucide-react";
 import type { IndependentSession, Student } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
-import {
-  bannerHtml,
-  fmtDate,
-  fmtDateTime,
-  letterheadHtml,
-  metaFooterHtml,
-  printDocument,
-  signaturesHtml,
-} from "@/lib/printTemplates";
+import { fmtDate, fmtDateTime, printDocument } from "@/lib/printTemplates";
 import { formatDateFr } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 
@@ -45,11 +37,17 @@ import { useSettings } from "@/lib/store/settings";
 interface CasualReceiptData {
   personName: string;
   isRegisteredStudent: boolean;
+  /** neither a known student nor a typed name: an anonymous passager */
+  isAnonymous?: boolean;
   itemLabel: string;
   teacherName?: string;
   classLabel?: string;
   timeLabel?: string;
+  daysLabel?: string;
   price: number;
+  /** séance offerte: nothing was cashed, this is what it would have cost */
+  isFree?: boolean;
+  waived?: number;
   date: string;
   createdAt: string;
 }
@@ -75,50 +73,76 @@ interface SeanceOption {
 
 const RECEIPT_LABELS = {
   fr: {
-    docTitle: "Reçu — Séance Libre",
-    receiptNo: "Reçu N° :",
-    seanceTitle: "Détail de la Séance",
-    person: "Élève / Passager :",
+    docTitle: "REÇU — SÉANCE LIBRE",
+    receiptNo: "N°",
+    person: "Élève / Passager",
     registered: "Élève inscrit",
-    passenger: "Passager occasionnel",
-    item: "Cours / Créneau :",
-    teacher: "Enseignant :",
-    classLevel: "Classe / Niveau :",
-    time: "Horaire :",
-    date: "Date de la séance :",
-    payTitle: "Règlement",
-    amount: "Montant payé :",
-    method: "Mode de paiement :",
+    passenger: "Passager",
+    anonymous: "Passager (anonyme)",
+    item: "Séance",
+    teacher: "Enseignant",
+    classLevel: "Classe",
+    days: "Jours",
+    time: "Horaire",
+    date: "Date",
+    method: "Règlement",
     cash: "Espèces",
-    paidOn: "Encaissé le :",
-    total: "TOTAL ENCAISSÉ :",
-    signClient: "Le Client",
+    paidOn: "Encaissé le",
+    total: "TOTAL PAYÉ",
+    offeredTotal: "SÉANCE OFFERTE",
+    offeredNote: (v: string) => `Valeur offerte par l'école : ${v}`,
     signCashier: "La Caisse",
+    thanks: "Merci de conserver ce reçu.",
     da: "DA",
   },
   ar: {
     docTitle: "وصل — حصة حرة",
-    receiptNo: "وصل رقم :",
-    seanceTitle: "تفاصيل الحصة",
-    person: "التلميذ / الزائر :",
+    receiptNo: "رقم",
+    person: "التلميذ / الزائر",
     registered: "تلميذ مسجل",
-    passenger: "زائر عابر",
-    item: "الدرس / الحصة :",
-    teacher: "الأستاذ :",
-    classLevel: "القسم / المستوى :",
-    time: "التوقيت :",
-    date: "تاريخ الحصة :",
-    payTitle: "الدفع",
-    amount: "المبلغ المدفوع :",
-    method: "طريقة الدفع :",
+    passenger: "زائر",
+    anonymous: "زائر (بدون اسم)",
+    item: "الحصة",
+    teacher: "الأستاذ",
+    classLevel: "القسم",
+    days: "الأيام",
+    time: "التوقيت",
+    date: "التاريخ",
+    method: "الدفع",
     cash: "نقدًا",
-    paidOn: "تم التحصيل في :",
-    total: "الإجمالي المحصَّل :",
-    signClient: "الزبون",
+    paidOn: "تم التحصيل في",
+    total: "المبلغ المدفوع",
+    offeredTotal: "حصة مجانية",
+    offeredNote: (v: string) => `قيمة الحصة المقدمة من المدرسة : ${v}`,
     signCashier: "الصندوق",
+    thanks: "يرجى الاحتفاظ بهذا الوصل.",
     da: "دج",
   },
 } as const;
+
+/** 80 mm cash-drawer ticket: the séance libre receipt is handed over at the
+ *  desk in a second, so it prints as a narrow slip instead of a full A4 page.
+ *  Appended AFTER `PRINT_BASE_CSS`, so these rules win over the A4 chrome. */
+const TICKET_CSS = `
+  @page { size: 80mm auto; margin: 3mm; }
+  @media print { body { padding: 0; margin: 0; font-size: 10px; } }
+  body { width: 74mm; margin: 0 auto; padding: 6px 0; background: #fff; color: #111; font-size: 11px; }
+  .ticket { width: 100%; }
+  .ticket .school { display: block; font-size: 1.25em; font-weight: 800; letter-spacing: .3px; }
+  .ticket .head { text-align: center; line-height: 1.35; padding-bottom: 6px; border-bottom: 1px dashed #999; }
+  .ticket .head span { display: block; font-size: .85em; color: #444; }
+  .ticket .title { margin: 7px 0 2px; text-align: center; font-weight: 800; font-size: 1.02em; letter-spacing: .5px; }
+  .ticket .num { text-align: center; font-family: monospace; font-size: .85em; color: #444; margin-bottom: 7px; }
+  .ticket table { width: 100%; border-collapse: collapse; font-size: .92em; margin: 0; }
+  .ticket th, .ticket td { padding: 2.5px 0; border: 0; background: none; text-transform: none; letter-spacing: 0; font-size: 1em; }
+  .ticket th { width: 38%; text-align: start; font-weight: 600; color: #555; }
+  .ticket td { text-align: end; font-weight: 700; color: #111; }
+  .ticket .total { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding: 6px 8px; border: 1.5px solid #111; border-radius: 4px; font-weight: 800; font-size: 1.1em; }
+  .ticket .total.free { border-style: dashed; }
+  .ticket .note { margin: 5px 0 0; text-align: center; font-size: .82em; font-style: italic; color: #444; }
+  .ticket .sign { margin-top: 14px; padding-top: 4px; border-top: 1px dashed #999; text-align: center; font-size: .8em; color: #555; }
+  .ticket .foot { margin-top: 8px; text-align: center; font-size: .75em; color: #777; line-height: 1.4; }
+`;
 
 /** Receipt number, generated at print time (module scope: never during render). */
 function makeReceiptNumber(): string {
@@ -163,6 +187,7 @@ export function IndependentPage() {
   const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
   const [listSearch, setListSearch] = useState("");
   const [payerFilter, setPayerFilter] = useState<"all" | "student" | "passager">("all");
+  const [billingFilter, setBillingFilter] = useState<"all" | "paid" | "free">("all");
   const [kindFilter, setKindFilter] = useState<"all" | "cours" | "timing">("all");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -172,9 +197,17 @@ export function IndependentPage() {
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [itemSearchQuery, setItemSearchQuery] = useState("");
   const [itemKindTab, setItemKindTab] = useState<"all" | "cours" | "timing">("all");
+  /** Restrict the list to the emplois du temps the picked student follows. */
+  const [onlyStudentSeances, setOnlyStudentSeances] = useState(false);
   const [selectedItem, setSelectedItem] = useState<SeanceOption | null>(null);
   const [casualDate, setCasualDate] = useState(new Date().toISOString().split("T")[0]);
   const [customPrice, setCustomPrice] = useState<number | null>(null);
+  // "Séance offerte": the cours is followed as usual but nobody is paid on it —
+  // the school cashes nothing and the teacher earns no share for it.
+  const [isFreeSeance, setIsFreeSeance] = useState(false);
+  // Explicit cash-in confirmation: the agent validates the amount received
+  // before the séance is written. Offered séances need no validation.
+  const [paymentValidated, setPaymentValidated] = useState(false);
 
   // Once a séance libre is created, immediately offer to print its receipt.
   const [receiptData, setReceiptData] = useState<CasualReceiptData | null>(null);
@@ -247,14 +280,33 @@ export function IndependentPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, subscriptions, teachers, modules, classes, groups, salles]);
 
-  const filteredOptions = seanceOptions.filter((o) => {
-    if (itemKindTab !== "all" && o.kind !== itemKindTab) return false;
-    if (!itemSearchQuery.trim()) return true;
-    const q = itemSearchQuery.toLowerCase();
-    return `${o.label} ${o.moduleName} ${o.classLabel} ${o.groupLabel} ${o.salleLabel} ${o.teacherName}`
-      .toLowerCase()
-      .includes(q);
-  });
+  /** The emplois du temps the selected student is enrolled on: what he
+   *  "studies on" is the usual answer at the desk, so those créneaux are
+   *  flagged and listed first. Empty as long as no student is picked. */
+  const studentSessionIds = useMemo(() => {
+    if (!selectedStudent) return new Set<string>();
+    return new Set(
+      selectedStudent.subscriptionIds
+        .map((id) => subscriptions.find((su) => su.id === id)?.sessionId)
+        .filter((id): id is string => !!id),
+    );
+  }, [selectedStudent, subscriptions]);
+
+  const isStudentSeance = (o: SeanceOption) => studentSessionIds.has(o.sessionId);
+
+  const filteredOptions = seanceOptions
+    .filter((o) => {
+      if (itemKindTab !== "all" && o.kind !== itemKindTab) return false;
+      if (onlyStudentSeances && !isStudentSeance(o)) return false;
+      if (!itemSearchQuery.trim()) return true;
+      const q = itemSearchQuery.toLowerCase();
+      return `${o.label} ${o.moduleName} ${o.classLabel} ${o.groupLabel} ${o.salleLabel} ${o.teacherName}`
+        .toLowerCase()
+        .includes(q);
+    })
+    // Stable sort: his own créneaux float to the top, everything else keeps
+    // the alphabetical order `seanceOptions` already established.
+    .sort((a, b) => Number(isStudentSeance(b)) - Number(isStudentSeance(a)));
 
   /** Student lookup by name OR card number (RFID) — an empty selection means
    *  the attendee is recorded as a "passager". */
@@ -271,7 +323,12 @@ export function IndependentPage() {
       .slice(0, 25);
   }, [students, studentSearchQuery]);
 
-  const effectivePrice = customPrice ?? selectedItem?.price ?? 0;
+  /** Tariff of the picked séance, reduction/override included. */
+  const listedPrice = customPrice ?? selectedItem?.price ?? 0;
+  /** What is actually cashed: nothing at all on an offered séance. */
+  const effectivePrice = isFreeSeance ? 0 : listedPrice;
+  /** What the school gives away when the séance is offered. */
+  const waivedPrice = isFreeSeance ? listedPrice : 0;
 
   /** Reverse lookup used by the list/cards to describe a stored séance. */
   const optionForSession = (sessionId?: string) =>
@@ -287,6 +344,8 @@ export function IndependentPage() {
         if (q && !`${person} ${ind.itemLabel}`.toLowerCase().includes(q)) return false;
         if (payerFilter === "student" && !ind.studentId) return false;
         if (payerFilter === "passager" && ind.studentId) return false;
+        if (billingFilter === "paid" && ind.isFree) return false;
+        if (billingFilter === "free" && !ind.isFree) return false;
         if (kindFilter !== "all") {
           const opt = optionForSession(ind.sessionId);
           const kind = opt?.kind ?? "cours";
@@ -298,13 +357,16 @@ export function IndependentPage() {
       })
       .sort((a, b) => (b.createdAt ?? b.date).localeCompare(a.createdAt ?? a.date));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [independent, listSearch, payerFilter, kindFilter, fromDate, toDate, students, seanceOptions]);
+  }, [independent, listSearch, payerFilter, billingFilter, kindFilter, fromDate, toDate, students, seanceOptions]);
 
   const totalCollected = filteredList.reduce((s, i) => s + i.price, 0);
+  const offeredList = filteredList.filter((i) => i.isFree);
+  const totalOffered = offeredList.reduce((s, i) => s + (i.waivedAmount ?? 0), 0);
 
   const clearListFilters = () => {
     setListSearch("");
     setPayerFilter("all");
+    setBillingFilter("all");
     setKindFilter("all");
     setFromDate("");
     setToDate("");
@@ -317,9 +379,12 @@ export function IndependentPage() {
     setStudentSearchQuery("");
     setItemSearchQuery("");
     setItemKindTab("all");
+    setOnlyStudentSeances(false);
     setSelectedItem(null);
     setCasualDate(new Date().toISOString().split("T")[0]);
     setCustomPrice(null);
+    setIsFreeSeance(false);
+    setPaymentValidated(false);
     setSelectedCasual(null);
   };
 
@@ -331,7 +396,10 @@ export function IndependentPage() {
   const openEdit = (ind: IndependentSession) => {
     setSelectedCasual(ind);
     setCasualDate(ind.date);
-    setCustomPrice(ind.price);
+    // An offered séance carries its tariff in `waivedAmount`, not in `price`.
+    setCustomPrice(ind.isFree ? ind.waivedAmount ?? 0 : ind.price);
+    setIsFreeSeance(!!ind.isFree);
+    setPaymentValidated(true);
 
     const student = ind.studentId ? students.find((s) => s.id === ind.studentId) : undefined;
     setSelectedStudent(student ?? null);
@@ -340,6 +408,7 @@ export function IndependentPage() {
     setSelectedItem(optionForSession(ind.sessionId) ?? null);
     setItemSearchQuery("");
     setItemKindTab("all");
+    setOnlyStudentSeances(false);
     setIsFormOpen(true);
     setActiveMenuId(null);
   };
@@ -350,15 +419,22 @@ export function IndependentPage() {
       return;
     }
 
-    // No student picked in the search => the attendee is a "passager", named
-    // from whatever the agent typed in the search box.
-    const passagerName = !selectedStudent ? studentSearchQuery.trim() : undefined;
-    if (!selectedStudent && !passagerName) {
-      alert("Recherchez un élève (nom ou n° de carte), ou saisissez le nom du passager.");
+    // An amount to cash must be validated first; an offered séance skips it.
+    if (!isFreeSeance && !paymentValidated) {
+      alert("Validez d'abord l'encaissement du paiement.");
       return;
     }
 
+    // Who attends, in decreasing order of precision:
+    //   1. an élève inscrit picked in the search,
+    //   2. the name typed in the search box — a named passager,
+    //   3. nothing at all — an anonymous passager, which is what the desk
+    //      records when someone drops in without giving a name.
+    const passagerName = !selectedStudent ? studentSearchQuery.trim() : undefined;
+    const isAnonymous = !selectedStudent && !passagerName;
+
     const price = effectivePrice;
+    const waived = waivedPrice;
 
     if (selectedCasual) {
       updateItem("independent", selectedCasual.id, {
@@ -366,6 +442,8 @@ export function IndependentPage() {
         passagerName: passagerName || undefined,
         itemLabel: selectedItem.label,
         price,
+        isFree: isFreeSeance,
+        waivedAmount: waived,
         date: casualDate,
         sessionId: selectedItem.sessionId,
         startTime: selectedItem.timeLabel.split(" - ")[0],
@@ -383,6 +461,8 @@ export function IndependentPage() {
       passagerName: passagerName || undefined,
       itemLabel: selectedItem.label,
       price,
+      isFree: isFreeSeance,
+      waivedAmount: waived,
       date: casualDate,
       sessionId: selectedItem.sessionId,
       startTime: selectedItem.timeLabel.split(" - ")[0],
@@ -392,46 +472,56 @@ export function IndependentPage() {
 
     push("independent", newCasual);
 
-    // Registered student: the séance is debited from his balance right away.
-    if (selectedStudent) {
-      const student = students.find((st) => st.id === selectedStudent.id);
-      if (student && !student.isFree) {
-        updateItem("students", student.id, { balance: student.balance - price });
-        push("balanceTx", {
-          id: uid("bt"),
-          studentId: student.id,
-          amount: -price,
-          date: nowIso,
-          type: "deduction",
-          description: `Séance libre: ${selectedItem.label}`,
-          moduleId: sessions.find((s) => s.id === selectedItem.sessionId)?.moduleId,
-        });
+    // Séance offerte: nothing is debited, nothing is cashed, and the teacher
+    // earns no share for it (see buildUnpaidTimings on the Enseignants screen).
+    if (!isFreeSeance) {
+      // Registered student: the séance is debited from his balance right away.
+      if (selectedStudent) {
+        const student = students.find((st) => st.id === selectedStudent.id);
+        if (student && !student.isFree) {
+          updateItem("students", student.id, { balance: student.balance - price });
+          push("balanceTx", {
+            id: uid("bt"),
+            studentId: student.id,
+            amount: -price,
+            date: nowIso,
+            type: "deduction",
+            description: `Séance libre: ${selectedItem.label}`,
+            moduleId: sessions.find((s) => s.id === selectedItem.sessionId)?.moduleId,
+          });
+        }
       }
-    }
 
-    // Cash inflow for the school
-    push("cash", {
-      id: uid("csh"),
-      type: "student_payment",
-      amount: price,
-      date: nowIso,
-      description: `Séance libre: ${selectedItem.label} (${
-        selectedStudent ? `${selectedStudent.firstName} ${selectedStudent.lastName}` : passagerName
-      })`,
-    });
+      // Cash inflow for the school
+      push("cash", {
+        id: uid("csh"),
+        type: "student_payment",
+        amount: price,
+        date: nowIso,
+        description: `Séance libre: ${selectedItem.label} (${
+          selectedStudent
+            ? `${selectedStudent.firstName} ${selectedStudent.lastName}`
+            : passagerName || "passager"
+        })`,
+      });
+    }
 
     setIsFormOpen(false);
 
     setReceiptData({
       personName: selectedStudent
         ? `${selectedStudent.firstName} ${selectedStudent.lastName}`
-        : passagerName || "-",
+        : passagerName || "Passager occasionnel",
       isRegisteredStudent: !!selectedStudent,
+      isAnonymous,
       itemLabel: selectedItem.label,
       teacherName: selectedItem.teacherName,
       classLabel: selectedItem.classLabel,
       timeLabel: selectedItem.timeLabel,
+      daysLabel: selectedItem.daysLabel,
       price,
+      isFree: isFreeSeance,
+      waived,
       date: casualDate,
       createdAt: nowIso,
     });
@@ -447,53 +537,63 @@ export function IndependentPage() {
   };
 
   // ---- Receipt --------------------------------------------------------------
+  // A séance libre is a 30-second transaction at the desk, so its proof of
+  // payment is a narrow cash-drawer ticket (TICKET_CSS), not an A4 invoice:
+  // school, séance, jours/horaire, montant, and that is all.
+
+  const escapeHtml = (value: string) =>
+    value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
 
   const handlePrintReceipt = (data: CasualReceiptData) => {
     const L = RECEIPT_LABELS[language];
     const receiptNum = makeReceiptNumber();
 
+    const row = (label: string, value?: string) =>
+      value ? `<tr><th>${label}</th><td>${escapeHtml(value)}</td></tr>` : "";
+
+    const who = data.isRegisteredStudent
+      ? L.registered
+      : data.isAnonymous
+        ? L.anonymous
+        : L.passenger;
+
     const bodyHtml = `
-      ${letterheadHtml(school)}
-      ${bannerHtml(L.docTitle, `${L.receiptNo} <strong style="font-family:monospace;">${receiptNum}</strong>`)}
+      <div class="ticket">
+        <div class="head">
+          <strong class="school">${escapeHtml(school.name || "")}</strong>
+          ${school.phone ? `<span>${escapeHtml(school.phone)}</span>` : ""}
+          ${school.address ? `<span>${escapeHtml(school.address)}</span>` : ""}
+        </div>
 
-      <div class="frame frame-info" style="margin-bottom:15px;">
-        <h3>${L.seanceTitle}</h3>
-        <table style="margin-top:0;">
-          <tr>
-            <td style="width:30%; font-weight:bold; color:#5c567a;">${L.person}</td>
-            <td style="font-weight:bold; font-size:1.05em;">${data.personName}
-              <span class="badge ${data.isRegisteredStudent ? "badge-primary" : "badge-warning"}" style="margin-inline-start:6px;">
-                ${data.isRegisteredStudent ? L.registered : L.passenger}
-              </span>
-            </td>
-          </tr>
-          <tr>
-            <td style="font-weight:bold; color:#5c567a;">${L.item}</td>
-            <td style="font-weight:bold;">${data.itemLabel}</td>
-          </tr>
-          ${data.teacherName ? `<tr><td style="font-weight:bold; color:#5c567a;">${L.teacher}</td><td>${data.teacherName}</td></tr>` : ""}
-          ${data.classLabel ? `<tr><td style="font-weight:bold; color:#5c567a;">${L.classLevel}</td><td>${data.classLabel}</td></tr>` : ""}
-          ${data.timeLabel ? `<tr><td style="font-weight:bold; color:#5c567a;">${L.time}</td><td style="font-family:monospace;">${data.timeLabel}</td></tr>` : ""}
-          <tr>
-            <td style="font-weight:bold; color:#5c567a;">${L.date}</td>
-            <td style="font-family:monospace;">${fmtDate(data.date, language)}</td>
-          </tr>
+        <div class="title">${L.docTitle}</div>
+        <div class="num">${L.receiptNo} ${receiptNum}</div>
+
+        <table>
+          ${row(L.person, data.personName)}
+          <tr><th></th><td>${who}</td></tr>
+          ${row(L.item, data.itemLabel)}
+          ${row(L.teacher, data.teacherName)}
+          ${row(L.classLevel, data.classLabel)}
+          ${row(L.days, data.daysLabel)}
+          ${row(L.time, data.timeLabel)}
+          ${row(L.date, fmtDate(data.date, language))}
+          ${data.isFree ? "" : row(L.method, L.cash)}
+          ${row(L.paidOn, fmtDateTime(data.createdAt, language))}
         </table>
-      </div>
 
-      <div class="summary-card" style="margin-top:0;">
-        <h3>${L.payTitle}</h3>
-        <div class="summary-line"><span>${L.amount}</span><strong>${data.price} ${L.da}</strong></div>
-        <div class="summary-line"><span>${L.method}</span><strong>${L.cash}</strong></div>
-        <div class="summary-line"><span>${L.paidOn}</span><strong>${fmtDateTime(data.createdAt, language)}</strong></div>
-        <div class="net-pay-box">
-          <span>${L.total}</span>
+        <div class="total${data.isFree ? " free" : ""}">
+          <span>${data.isFree ? L.offeredTotal : L.total}</span>
           <span>${data.price} ${L.da}</span>
         </div>
-      </div>
+        ${data.isFree ? `<p class="note">${L.offeredNote(`${data.waived ?? 0} ${L.da}`)}</p>` : ""}
 
-      ${signaturesHtml(L.signClient, L.signCashier)}
-      ${metaFooterHtml(school.name, language)}
+        <div class="sign">${L.signCashier}</div>
+        <div class="foot">${L.thanks}</div>
+      </div>
     `;
 
     printHtmlDocument(
@@ -501,22 +601,26 @@ export function IndependentPage() {
         title: `${L.docTitle} - ${data.personName}`,
         lang: language,
         bodyHtml,
-        // Receipt: compact centered column instead of the full A4 width.
-        extraCss: "body { max-width: 620px; margin: 0 auto; }",
+        extraCss: TICKET_CSS,
       }),
     );
   };
 
   const reprint = (ind: IndependentSession) => {
     const opt = optionForSession(ind.sessionId);
+    const person = ind.studentId ? getStudentName(ind.studentId) : ind.passagerName;
     handlePrintReceipt({
-      personName: ind.studentId ? getStudentName(ind.studentId) : ind.passagerName ?? "-",
+      personName: person || "Passager occasionnel",
       isRegisteredStudent: !!ind.studentId,
+      isAnonymous: !ind.studentId && !ind.passagerName,
       itemLabel: ind.itemLabel,
       teacherName: opt?.teacherName,
       classLabel: opt?.classLabel,
       timeLabel: ind.startTime && ind.endTime ? `${ind.startTime} - ${ind.endTime}` : opt?.timeLabel,
+      daysLabel: opt?.daysLabel,
       price: ind.price,
+      isFree: ind.isFree,
+      waived: ind.waivedAmount,
       date: ind.date,
       createdAt: ind.createdAt ?? `${ind.date}T12:00:00.000Z`,
     });
@@ -537,7 +641,7 @@ export function IndependentPage() {
         <PageHeader
           emoji="🎓"
           title="Séances Libres"
-          subtitle="Enregistrer les séances ponctuelles des élèves inscrits et des passagers"
+          subtitle="Séances ponctuelles des élèves inscrits et des passagers — encaissées ou offertes"
         />
         <Button onClick={openCreate} className="flex items-center gap-2 self-start sm:self-center">
           <Plus className="h-4 w-4" /> Nouvelle Séance Libre
@@ -552,7 +656,7 @@ export function IndependentPage() {
               <Filter className="h-4 w-4 text-primary" /> Rechercher & Filtrer
             </span>
             <div className="flex items-center gap-2">
-              {(listSearch || payerFilter !== "all" || kindFilter !== "all" || fromDate || toDate) && (
+              {(listSearch || payerFilter !== "all" || billingFilter !== "all" || kindFilter !== "all" || fromDate || toDate) && (
                 <button onClick={clearListFilters} className="text-primary hover:underline font-bold text-[10px] flex items-center gap-1">
                   <X className="h-3 w-3" /> Réinitialiser
                 </button>
@@ -578,7 +682,7 @@ export function IndependentPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
             <div className="lg:col-span-2">
               <label className="block text-[10px] font-bold text-muted uppercase mb-1 font-sans">Recherche</label>
               <div className="relative">
@@ -597,6 +701,18 @@ export function IndependentPage() {
                 <option value="all">Tous</option>
                 <option value="student">Élèves inscrits</option>
                 <option value="passager">Passagers</option>
+              </Select>
+            </div>
+            <div>
+              <label className="block text-[10px] font-bold text-muted uppercase mb-1 font-sans">Facturation</label>
+              <Select
+                value={billingFilter}
+                onChange={(e) => setBillingFilter(e.target.value as typeof billingFilter)}
+                className="w-full"
+              >
+                <option value="all">Toutes</option>
+                <option value="paid">Encaissées</option>
+                <option value="free">Offertes (gratuites)</option>
               </Select>
             </div>
             <div>
@@ -625,6 +741,9 @@ export function IndependentPage() {
             <Badge tone="neutral" className="font-bold">
               {filteredList.filter((i) => !i.studentId).length} passager(s)
             </Badge>
+            <Badge tone="warning" className="font-bold">
+              {offeredList.length} offerte(s) · {totalOffered} DA non encaissés
+            </Badge>
           </div>
         </CardBody>
       </Card>
@@ -652,7 +771,7 @@ export function IndependentPage() {
                     <div className="absolute inset-0 bg-surface/98 backdrop-blur-md rounded-2xl p-4 flex flex-col justify-between z-20 animate-in fade-in zoom-in-95 duration-200 border border-primary/20">
                       <div className="flex justify-between items-center border-b border-line pb-2">
                         <span className="font-bold text-[10px] text-muted uppercase tracking-wider truncate">
-                          Actions: {ind.studentId ? getStudentName(ind.studentId) : ind.passagerName}
+                          Actions: {ind.studentId ? getStudentName(ind.studentId) : ind.passagerName || "Passager anonyme"}
                         </span>
                         <button
                           onClick={() => setActiveMenuId(null)}
@@ -702,7 +821,9 @@ export function IndependentPage() {
                         </div>
                         <div className="min-w-0">
                           <h4 className="text-sm font-bold text-ink truncate">
-                            {ind.studentId ? getStudentName(ind.studentId) : ind.passagerName}
+                            {ind.studentId
+                              ? getStudentName(ind.studentId)
+                              : ind.passagerName || "Passager anonyme"}
                           </h4>
                           <span className="text-[10px] text-muted block font-mono truncate">
                             {ind.studentId ? "Élève Inscrit" : "Passager Occasionnel"}
@@ -725,10 +846,22 @@ export function IndependentPage() {
                             {opt?.kind === "timing" ? "Créneau séance libre" : "Cours"}
                           </span>
                           <span className="font-semibold text-ink block truncate">{ind.itemLabel}</span>
+                          {opt?.daysLabel && (
+                            <span className="text-[9px] text-muted block font-mono truncate">{opt.daysLabel}</span>
+                          )}
                         </div>
                         <div className="text-right shrink-0">
-                          <span className="text-[10px] text-muted block uppercase font-semibold">Tarif Payé</span>
-                          <span className="font-bold text-success">{ind.price} DA</span>
+                          <span className="text-[10px] text-muted block uppercase font-semibold">
+                            {ind.isFree ? "Offerte" : "Tarif Payé"}
+                          </span>
+                          {ind.isFree ? (
+                            <>
+                              <span className="font-bold text-warning">0 DA</span>
+                              <span className="text-[9px] text-muted block">valeur {ind.waivedAmount ?? 0} DA</span>
+                            </>
+                          ) : (
+                            <span className="font-bold text-success">{ind.price} DA</span>
+                          )}
                         </div>
                       </div>
 
@@ -756,7 +889,11 @@ export function IndependentPage() {
                         <Badge tone="warning" className="text-[8px] px-1 py-0">Passager</Badge>
                       )}
                     </span>
-                    <Badge tone="success" className="font-mono font-bold text-[10px]">{ind.price} DA</Badge>
+                    {ind.isFree ? (
+                      <Badge tone="warning" className="font-mono font-bold text-[10px]">🎁 Offerte</Badge>
+                    ) : (
+                      <Badge tone="success" className="font-mono font-bold text-[10px]">{ind.price} DA</Badge>
+                    )}
                   </div>
                 </CardBody>
               </Card>
@@ -786,7 +923,9 @@ export function IndependentPage() {
                     <tr key={ind.id} className="border-b border-line last:border-0 hover:bg-canvas/30 transition-colors">
                       <td className="p-3">
                         <span className="font-bold text-ink block">
-                          {ind.studentId ? getStudentName(ind.studentId) : ind.passagerName}
+                          {ind.studentId
+                            ? getStudentName(ind.studentId)
+                            : ind.passagerName || "Passager anonyme"}
                         </span>
                         <Badge tone={ind.studentId ? "primary" : "warning"} className="text-[9px] mt-0.5">
                           {ind.studentId ? "Inscrit" : "Passager"}
@@ -796,7 +935,11 @@ export function IndependentPage() {
                         <span className="text-ink block truncate max-w-[220px]">{ind.itemLabel}</span>
                         <span className="text-[10px] text-muted">
                           {opt?.kind === "timing" ? "Créneau séance libre" : "Cours"}
+                          {opt?.daysLabel ? ` · ${opt.daysLabel}` : ""}
                         </span>
+                        {ind.isFree && (
+                          <Badge tone="warning" className="text-[9px] mt-0.5">🎁 Offerte</Badge>
+                        )}
                       </td>
                       <td className="p-3 text-ink">{opt?.teacherName ?? "-"}</td>
                       <td className="p-3 font-mono text-[10px]">
@@ -804,7 +947,16 @@ export function IndependentPage() {
                         {ind.startTime && <span className="block text-muted">{ind.startTime} - {ind.endTime}</span>}
                       </td>
                       <td className="p-3 font-mono text-[10px] text-muted">{createdStamp(ind)}</td>
-                      <td className="p-3 text-right font-bold text-success font-mono">{ind.price} DA</td>
+                      <td className="p-3 text-right font-mono">
+                        {ind.isFree ? (
+                          <>
+                            <strong className="text-warning">0 DA</strong>
+                            <span className="block text-[9px] text-muted">valeur {ind.waivedAmount ?? 0} DA</span>
+                          </>
+                        ) : (
+                          <strong className="text-success">{ind.price} DA</strong>
+                        )}
+                      </td>
                       <td className="p-3">
                         <div className="flex justify-end gap-1">
                           <button
@@ -847,9 +999,19 @@ export function IndependentPage() {
           {/* ---- Who ---- */}
           <div className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-muted mb-1 font-sans">
-                Rechercher un élève (nom ou n° de carte)
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-semibold text-muted font-sans">
+                  1. Qui suit la séance ? <span className="font-normal">(facultatif)</span>
+                </label>
+                {(selectedStudent || studentSearchQuery) && (
+                  <button
+                    onClick={() => { setSelectedStudent(null); setStudentSearchQuery(""); }}
+                    className="text-[10px] font-bold text-primary hover:underline"
+                  >
+                    Vider
+                  </button>
+                )}
+              </div>
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
                 <Input
@@ -858,14 +1020,24 @@ export function IndependentPage() {
                     setStudentSearchQuery(e.target.value);
                     if (selectedStudent) setSelectedStudent(null);
                   }}
-                  placeholder="Nom, prénom ou numéro de carte RFID..."
+                  placeholder="Élève inscrit (nom, n° de carte) ou nom du passager..."
                   className="pl-9"
                 />
               </div>
-              <p className="text-[10px] text-muted mt-1 leading-relaxed">
-                Si aucun élève n&apos;est sélectionné, la séance est enregistrée au nom saisi ci-dessus
-                en tant que <strong>passager</strong>.
-              </p>
+              {/* The desk has three ways of naming the attendee, and all three
+                  are valid — a walk-in who gives no name is still a séance. */}
+              <div className="mt-1.5 rounded-xl border border-line bg-canvas/30 p-2 space-y-1 text-[10px] leading-relaxed text-muted">
+                <p className={selectedStudent ? "font-bold text-primary" : ""}>
+                  • <strong>Élève inscrit</strong> : cherchez-le puis sélectionnez-le dans les résultats.
+                </p>
+                <p className={!selectedStudent && studentSearchQuery.trim() ? "font-bold text-primary" : ""}>
+                  • <strong>Passager nommé</strong> : tapez simplement son nom complet, sans le sélectionner.
+                </p>
+                <p className={!selectedStudent && !studentSearchQuery.trim() ? "font-bold text-primary" : ""}>
+                  • <strong>Passager anonyme</strong> : laissez le champ vide — la séance est enregistrée
+                  sans nom.
+                </p>
+              </div>
             </div>
 
             {studentSearchQuery.trim() !== "" && (
@@ -912,7 +1084,7 @@ export function IndependentPage() {
               <Input type="date" value={casualDate} onChange={(e) => setCasualDate(e.target.value)} />
             </div>
 
-            {selectedStudent && (
+            {selectedStudent ? (
               <div className="bg-primary-50/50 border border-line rounded-xl p-3 text-xs">
                 <span className="text-[10px] text-muted block uppercase font-bold">Élève sélectionné</span>
                 <strong className="text-ink block mt-0.5">{selectedStudent.firstName} {selectedStudent.lastName}</strong>
@@ -922,6 +1094,17 @@ export function IndependentPage() {
                     {selectedStudent.isFree ? selectedStudent.balance : selectedStudent.balance - effectivePrice} DA
                   </strong>
                   {selectedStudent.isFree && " (élève gratuit — aucun débit)"}
+                  {isFreeSeance && " — séance offerte, aucun débit"}
+                </span>
+              </div>
+            ) : (
+              <div className="bg-warning/5 border border-warning/25 rounded-xl p-3 text-xs">
+                <span className="text-[10px] text-muted block uppercase font-bold">Enregistrée au nom de</span>
+                <strong className="text-ink block mt-0.5">
+                  {studentSearchQuery.trim() || "Passager occasionnel (sans nom)"}
+                </strong>
+                <span className="text-muted">
+                  Passager : aucun solde n&apos;est débité, l&apos;encaissement va directement en caisse.
                 </span>
               </div>
             )}
@@ -931,8 +1114,13 @@ export function IndependentPage() {
           <div className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-muted mb-1 font-sans">
-                Rechercher un cours ou un créneau de séance libre *
+                2. Sur quel emploi du temps ? *
               </label>
+              <p className="text-[10px] text-muted mb-2 leading-relaxed">
+                Cherchez l&apos;emploi du temps par son <strong>nom</strong> (module ou intitulé du créneau),
+                sa classe, son groupe, sa salle ou son enseignant. Le tarif d&apos;une séance est chargé
+                automatiquement.
+              </p>
               <div className="flex gap-1.5 mb-2">
                 {([
                   { key: "all", label: "Tout" },
@@ -949,13 +1137,23 @@ export function IndependentPage() {
                     {tab.label}
                   </button>
                 ))}
+                {selectedStudent && studentSessionIds.size > 0 && (
+                  <button
+                    onClick={() => setOnlyStudentSeances(!onlyStudentSeances)}
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                      onlyStudentSeances ? "bg-success text-white" : "bg-canvas text-muted hover:text-ink"
+                    }`}
+                  >
+                    🎓 Ses cours ({studentSessionIds.size})
+                  </button>
+                )}
               </div>
               <div className="relative mb-2">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
                 <Input
                   value={itemSearchQuery}
                   onChange={(e) => setItemSearchQuery(e.target.value)}
-                  placeholder="Module, classe, groupe, salle ou enseignant..."
+                  placeholder="Nom de l'emploi du temps, classe, groupe, salle, enseignant..."
                   className="pl-9"
                 />
               </div>
@@ -968,7 +1166,7 @@ export function IndependentPage() {
                     return (
                       <button
                         key={opt.key}
-                        onClick={() => { setSelectedItem(opt); setCustomPrice(opt.price); }}
+                        onClick={() => { setSelectedItem(opt); setCustomPrice(opt.price); setPaymentValidated(false); }}
                         className={`w-full text-start p-2.5 rounded-lg text-xs transition-colors border ${
                           isSel
                             ? "bg-primary/10 border-primary/40 text-ink"
@@ -979,6 +1177,11 @@ export function IndependentPage() {
                           <strong className="font-bold block min-w-0 truncate">
                             {opt.kind === "timing" && <span className="mr-1">🎯</span>}
                             {opt.label}
+                            {isStudentSeance(opt) && (
+                              <Badge tone="success" className="ml-1.5 text-[8px] px-1 py-0 align-middle">
+                                Son cours
+                              </Badge>
+                            )}
                           </strong>
                           <strong className="text-primary shrink-0">{opt.price} DA</strong>
                         </div>
@@ -1001,35 +1204,138 @@ export function IndependentPage() {
 
             {selectedItem && (
               <div className="space-y-3">
+                {/* Recap of the chosen emploi du temps */}
+                <div className="rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs space-y-1">
+                  <span className="text-[10px] text-muted block uppercase font-bold">Emploi du temps choisi</span>
+                  <strong className="text-ink block">
+                    {selectedItem.kind === "timing" && <span className="mr-1">🎯</span>}
+                    {selectedItem.label}
+                  </strong>
+                  <span className="text-[10px] text-muted block font-mono">
+                    {selectedItem.daysLabel} · {selectedItem.timeLabel} · {selectedItem.salleLabel}
+                  </span>
+                  <span className="text-[10px] text-muted block">
+                    Enseignant : <strong className="text-ink">{selectedItem.teacherName}</strong>
+                    {selectedItem.teacherIsPassager ? " (passager)" : ""}
+                  </span>
+                  <span className="text-[10px] text-muted block">
+                    Prix d&apos;une séance :{" "}
+                    <strong className="text-primary">{selectedItem.price} DA</strong>
+                  </span>
+                </div>
+
+                {/* Séance offerte: nobody is paid on it — neither the school,
+                    nor the teacher who animates it. */}
+                <label
+                  className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
+                    isFreeSeance
+                      ? "border-warning/40 bg-warning/10"
+                      : "border-line bg-canvas/30 hover:bg-primary-50/40"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isFreeSeance}
+                    onChange={(e) => { setIsFreeSeance(e.target.checked); setPaymentValidated(false); }}
+                    className="mt-0.5 h-4 w-4 shrink-0"
+                  />
+                  <span>
+                    <strong className="block text-ink">Séance offerte (gratuite)</strong>
+                    <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                      Rien n&apos;est encaissé par l&apos;école, aucun solde n&apos;est débité, et{" "}
+                      <strong>l&apos;enseignant n&apos;est pas rémunéré</strong> sur cette séance. Sa valeur
+                      ({listedPrice} DA) reste comptabilisée dans les rapports généraux.
+                    </span>
+                  </span>
+                </label>
+
                 <div>
                   <label className="block text-xs font-semibold text-muted mb-1 font-sans">
-                    Montant à encaisser (DA)
+                    {isFreeSeance ? "Valeur de la séance offerte (DA)" : "3. Montant à encaisser (DA)"}
                   </label>
                   <Input
                     type="number"
                     min={0}
                     value={customPrice ?? selectedItem.price}
-                    onChange={(e) => setCustomPrice(Number(e.target.value))}
+                    onChange={(e) => { setCustomPrice(Number(e.target.value)); setPaymentValidated(false); }}
                   />
                   <p className="text-[10px] text-muted mt-1">
                     Tarif chargé depuis {selectedItem.kind === "timing" ? "le créneau" : "l'abonnement"} :{" "}
                     <strong>{selectedItem.price} DA</strong>. Modifiable pour cette séance uniquement.
                   </p>
                 </div>
-                <div className="bg-success/10 border border-success/20 rounded-xl p-3.5 flex justify-between items-center text-xs">
-                  <span className="text-success font-semibold">Total à encaisser :</span>
-                  <strong className="text-success text-sm font-extrabold">{effectivePrice} DA</strong>
-                </div>
+
+                {isFreeSeance ? (
+                  <div className="rounded-xl border border-warning/30 bg-warning/10 p-3.5 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-warning">Total à encaisser :</span>
+                      <strong className="text-sm font-extrabold text-warning">0 DA</strong>
+                    </div>
+                    <p className="mt-1 text-[10px] text-muted">
+                      Séance offerte — valeur non encaissée : <strong>{waivedPrice} DA</strong>.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="bg-success/10 border border-success/20 rounded-xl p-3.5 flex justify-between items-center text-xs">
+                      <span className="text-success font-semibold">Total à encaisser :</span>
+                      <strong className="text-success text-sm font-extrabold">{effectivePrice} DA</strong>
+                    </div>
+                    {/* Explicit cash-in confirmation before the séance is written */}
+                    <label
+                      className={`flex cursor-pointer items-center gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
+                        paymentValidated
+                          ? "border-success/40 bg-success/10"
+                          : "border-line bg-canvas/30 hover:bg-primary-50/40"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={paymentValidated}
+                        onChange={(e) => setPaymentValidated(e.target.checked)}
+                        className="h-4 w-4 shrink-0"
+                      />
+                      <span>
+                        <strong className="block text-ink">
+                          Je valide l&apos;encaissement de {effectivePrice} DA
+                        </strong>
+                        <span className="block text-[10px] text-muted">
+                          Paiement en espèces reçu au guichet.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                )}
               </div>
             )}
           </div>
         </div>
 
-        <div className="flex justify-end gap-2 pt-4 mt-6 border-t border-line">
-          <Button variant="outline" onClick={() => setIsFormOpen(false)}>Annuler</Button>
-          <Button onClick={handleSubmit}>
-            {selectedCasual ? "Enregistrer les modifications" : "Enregistrer la Séance"}
-          </Button>
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-4 mt-6 border-t border-line">
+          <span className="text-[10px] text-muted">
+            {!selectedItem
+              ? "Sélectionnez d'abord un emploi du temps."
+              : isFreeSeance
+                ? `Séance offerte — 0 DA encaissé (valeur ${waivedPrice} DA).`
+                : paymentValidated
+                  ? `Paiement validé — ${effectivePrice} DA seront encaissés.`
+                  : "Validez l'encaissement pour pouvoir enregistrer."}
+          </span>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setIsFormOpen(false)}>Annuler</Button>
+            <Button
+              onClick={handleSubmit}
+              disabled={!selectedItem || (!isFreeSeance && !paymentValidated)}
+              className="flex items-center gap-2"
+            >
+              <Check className="h-4 w-4" />
+              {selectedCasual
+                ? "Enregistrer les modifications"
+                : isFreeSeance
+                  ? "Enregistrer la séance offerte"
+                  : "Valider & Encaisser"}
+            </Button>
+          </div>
         </div>
       </Modal>
 
@@ -1048,7 +1354,9 @@ export function IndependentPage() {
                 <div>
                   <span className="text-[10px] text-muted block uppercase">Élève / Passager</span>
                   <strong className="text-ink block">
-                    {student ? `${student.firstName} ${student.lastName}` : selectedCasual.passagerName}
+                    {student
+                      ? `${student.firstName} ${student.lastName}`
+                      : selectedCasual.passagerName || "Passager anonyme"}
                   </strong>
                   <Badge tone={student ? "primary" : "warning"} className="text-[9px] mt-1">
                     {student ? "Élève inscrit" : "Passager"}
@@ -1070,8 +1378,15 @@ export function IndependentPage() {
                 </div>
                 <div>
                   <span className="text-[10px] text-muted block uppercase">Montant encaissé</span>
-                  <strong className="text-success block text-base">{selectedCasual.price} DA</strong>
-                  <span className="text-[10px] text-muted">Créée le {createdStamp(selectedCasual)}</span>
+                  <strong className={`block text-base ${selectedCasual.isFree ? "text-warning" : "text-success"}`}>
+                    {selectedCasual.price} DA
+                  </strong>
+                  {selectedCasual.isFree && (
+                    <Badge tone="warning" className="text-[9px] mt-0.5">
+                      🎁 Offerte — valeur {selectedCasual.waivedAmount ?? 0} DA
+                    </Badge>
+                  )}
+                  <span className="text-[10px] text-muted block">Créée le {createdStamp(selectedCasual)}</span>
                 </div>
               </div>
 
@@ -1104,16 +1419,38 @@ export function IndependentPage() {
                   </h4>
                   <div className="flex justify-between border-b border-line/50 pb-1.5">
                     <span className="text-muted">Montant :</span>
-                    <strong className="text-success">{selectedCasual.price} DA</strong>
+                    <strong className={selectedCasual.isFree ? "text-warning" : "text-success"}>
+                      {selectedCasual.price} DA
+                    </strong>
                   </div>
                   <div className="flex justify-between border-b border-line/50 pb-1.5">
                     <span className="text-muted">Mode :</span>
-                    <strong className="text-ink">Espèces (encaissé)</strong>
+                    <strong className="text-ink">
+                      {selectedCasual.isFree ? "Séance offerte (rien encaissé)" : "Espèces (encaissé)"}
+                    </strong>
                   </div>
+                  {selectedCasual.isFree && (
+                    <>
+                      <div className="flex justify-between border-b border-line/50 pb-1.5">
+                        <span className="text-muted">Valeur offerte :</span>
+                        <strong className="text-warning">{selectedCasual.waivedAmount ?? 0} DA</strong>
+                      </div>
+                      <div className="flex justify-between border-b border-line/50 pb-1.5">
+                        <span className="text-muted">Enseignant rémunéré :</span>
+                        <strong className="text-ink">Non — séance offerte</strong>
+                      </div>
+                    </>
+                  )}
                   {student && (
                     <div className="flex justify-between border-b border-line/50 pb-1.5">
                       <span className="text-muted">Débité du solde :</span>
-                      <strong className="text-ink">{student.isFree ? "Non (élève gratuit)" : "Oui"}</strong>
+                      <strong className="text-ink">
+                        {selectedCasual.isFree
+                          ? "Non (séance offerte)"
+                          : student.isFree
+                            ? "Non (élève gratuit)"
+                            : "Oui"}
+                      </strong>
                     </div>
                   )}
                   <div className="flex justify-between">
@@ -1147,10 +1484,24 @@ export function IndependentPage() {
               ✔
             </div>
             <div className="space-y-2">
-              <h3 className="text-sm font-bold text-ink">Séance libre enregistrée avec succès !</h3>
+              <h3 className="text-sm font-bold text-ink">
+                {receiptData.isFree
+                  ? "Séance libre offerte enregistrée !"
+                  : "Séance libre enregistrée et encaissée !"}
+              </h3>
               <p className="text-xs text-muted max-w-sm mx-auto leading-relaxed">
                 <strong>{receiptData.itemLabel}</strong> pour <strong>{receiptData.personName}</strong> —{" "}
-                <strong>{receiptData.price} DA</strong> encaissés.
+                {receiptData.isFree ? (
+                  <>
+                    <strong className="text-warning">séance offerte</strong> (valeur{" "}
+                    <strong>{receiptData.waived ?? 0} DA</strong>, ni encaissée par l&apos;école ni
+                    rémunérée à l&apos;enseignant).
+                  </>
+                ) : (
+                  <>
+                    <strong>{receiptData.price} DA</strong> encaissés.
+                  </>
+                )}
                 <br />
                 Souhaitez-vous imprimer le reçu ?
               </p>
@@ -1164,7 +1515,7 @@ export function IndependentPage() {
                 onClick={() => { handlePrintReceipt(receiptData); setReceiptData(null); }}
                 className="px-5 py-2 rounded-xl text-xs font-bold flex items-center gap-2"
               >
-                <Printer className="h-4 w-4" /> Imprimer le Reçu
+                <Printer className="h-4 w-4" /> Imprimer le reçu (ticket)
               </Button>
             </div>
           </div>

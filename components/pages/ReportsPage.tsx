@@ -31,6 +31,7 @@ import {
   PiggyBank,
   ChevronRight,
   CircleDollarSign,
+  Gift,
   UserCog,
   ClipboardList,
   PieChart as PieIcon,
@@ -1102,7 +1103,14 @@ export function ReportsPage() {
     };
 
     /* ======================= INDEPENDENT / COURSEWORK ================= */
-    const independentRevenue = sum(fInd, (i) => i.price);
+    // Une séance libre OFFERTE est enregistrée avec `price = 0` : elle ne
+    // gonfle donc jamais la recette. Ce qu'elle aurait coûté est conservé dans
+    // `waivedAmount` — c'est la valeur que l'école a offerte, ni encaissée par
+    // elle ni rémunérée à l'enseignant.
+    const paidCasual = fInd.filter((i) => !i.isFree);
+    const offeredCasual = fInd.filter((i) => i.isFree);
+    const independentRevenue = sum(paidCasual, (i) => i.price);
+    const offeredCasualValue = sum(offeredCasual, (i) => i.waivedAmount ?? 0);
     const courseworkInRange = coursework.filter((c) => c.dates.some((d) => inRange(d)));
     const courseworkRevenue = courseworkInRange.reduce(
       (s, c) => s + c.pricePerSession * c.dates.filter((d) => inRange(d)).length,
@@ -1129,11 +1137,48 @@ export function ReportsPage() {
               { label: "Prestation", render: (r) => <span className="text-primary">{r.itemLabel}</span> },
               { label: "Montant", align: "right", render: (r) => <strong className="text-success">{inflow(r.price)}</strong> },
             ],
-            rows: [...fInd].sort((a, b) => (a.date < b.date ? 1 : -1)),
+            rows: [...paidCasual].sort((a, b) => (a.date < b.date ? 1 : -1)),
             totalLabel: "Recette séances libres",
             totalValue: inflow(independentRevenue),
             totalTone: "success",
             empty: "Aucune séance libre sur la période.",
+            searchable: (r) => `${r.studentId ? sName(r.studentId) : r.passagerName} ${r.itemLabel}`,
+          },
+        },
+        {
+          label: "Séances libres offertes",
+          value: formatDA(offeredCasualValue),
+          tone: "warning",
+          icon: <Gift className="h-5 w-5" />,
+          hint: "Gratuites : ni encaissées, ni payées à l'enseignant",
+          detail: {
+            columns: [
+              { label: "Date", render: (r) => dateCell(r.date) },
+              {
+                label: "Bénéficiaire",
+                render: (r) => (
+                  <span className="font-bold text-ink">
+                    {r.studentId ? sName(r.studentId) : r.passagerName || "Passager anonyme"}
+                  </span>
+                ),
+              },
+              { label: "Prestation", render: (r) => <span className="text-primary">{r.itemLabel}</span> },
+              {
+                label: "Encaissé",
+                align: "right",
+                render: () => <span className="text-muted">0 DA</span>,
+              },
+              {
+                label: "Valeur offerte",
+                align: "right",
+                render: (r) => <strong className="text-warning">{formatDA(r.waivedAmount ?? 0)}</strong>,
+              },
+            ],
+            rows: [...offeredCasual].sort((a, b) => (a.date < b.date ? 1 : -1)),
+            totalLabel: "Valeur totale offerte",
+            totalValue: formatDA(offeredCasualValue),
+            totalTone: "warning",
+            empty: "Aucune séance libre offerte sur la période.",
             searchable: (r) => `${r.studentId ? sName(r.studentId) : r.passagerName} ${r.itemLabel}`,
           },
         },
@@ -1174,7 +1219,15 @@ export function ReportsPage() {
           icon: <Puzzle className="h-4 w-4 text-primary" />,
           lines: [
             { label: "Séances libres (nombre)", value: `${fInd.length}` },
+            { label: "dont encaissées", value: `${paidCasual.length}` },
             { label: "Recette séances libres", value: inflow(independentRevenue), tone: "success" },
+            { label: "dont offertes (gratuites)", value: `${offeredCasual.length}`, tone: "warning" },
+            {
+              label: "Valeur des séances offertes",
+              value: formatDA(offeredCasualValue),
+              tone: "warning",
+              formula: "Tarif de chaque séance offerte — non encaissé, non payé à l'enseignant",
+            },
             { label: "Stages actifs sur la période", value: `${courseworkInRange.length}` },
             { label: "Recette stages (période)", value: formatDA(courseworkRevenue), tone: "sky" },
             { label: "Total activités indépendantes", value: inflow(independentRevenue + courseworkRevenue), tone: "success", emphasis: true },

@@ -27,6 +27,7 @@ export const fr = {
   },
   nav: {
     dashboard: "Tableau de bord",
+    timetables: "Emplois de Temps",
     classes: "Classes",
     planner: "Planner",
     subscriptions: "Abonnements",

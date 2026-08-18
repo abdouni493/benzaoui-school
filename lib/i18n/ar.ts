@@ -29,6 +29,7 @@ export const ar: Dictionary = {
   },
   nav: {
     dashboard: "لوحة التحكم",
+    timetables: "جداول التوقيت",
     classes: "الأقسام",
     planner: "المخطط",
     subscriptions: "الاشتراكات",

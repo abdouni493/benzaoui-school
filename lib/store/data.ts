@@ -441,6 +441,8 @@ const independentMapper = makeMapper<IndependentSession>([
   ["endTime", "end_time"],
   ["createdAt", "created_at"],
   ["teacherPaid", "teacher_paid"],
+  ["isFree", "is_free"],
+  ["waivedAmount", "waived_amount"],
 ]);
 
 const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {

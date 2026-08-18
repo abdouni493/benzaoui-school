@@ -29,6 +29,7 @@ export function navMetaForHref(href: string): { key: string; emoji: string } | n
 export const NAV_BY_ROLE: Record<Role, NavItem[]> = {
   admin: [
     { key: "dashboard", emoji: "📊", href: "/dashboard" },
+    { key: "timetables", emoji: "🗓️", href: "/timetables" },
     { key: "classes", emoji: "🏫", href: "/classes" },
     { key: "planner", emoji: "📅", href: "/planner" },
     { key: "subscriptions", emoji: "🎫", href: "/subscriptions" },
@@ -49,6 +50,7 @@ export const NAV_BY_ROLE: Record<Role, NavItem[]> = {
   ],
   reception: [
     { key: "dashboard", emoji: "📊", href: "/dashboard" },
+    { key: "timetables", emoji: "🗓️", href: "/timetables" },
     { key: "classes", emoji: "🏫", href: "/classes" },
     { key: "planner", emoji: "📅", href: "/planner" },
     { key: "subscriptions", emoji: "🎫", href: "/subscriptions" },

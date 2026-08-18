@@ -24,11 +24,12 @@ import {
   Clock,
   X,
 } from "lucide-react";
-import type { Teacher, TeacherPaymentDetail } from "@/lib/types";
+import type { Day, ScheduleSession, Teacher, TeacherPaymentDetail } from "@/lib/types";
+import { DAYS } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
 import { buildTeacherPaymentReport } from "@/lib/reports/teacherPayment";
 import { buildTeacherSettlementReceipt } from "@/lib/reports/teacherSettlement";
-import { formatDateFr } from "@/lib/helpers";
+import { DAY_LABELS_FR, formatDateFr, formatDays } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 
 /** One unpaid timing of a teacher: a (date, séance) pair with everyone who was
@@ -65,6 +66,7 @@ export function TeachersPage() {
     modules,
     groups,
     classes,
+    salles,
     students,
     unpaidTeacher,
     acomptes,
@@ -220,6 +222,116 @@ export function TeachersPage() {
   // Only UNPAID timings are ever listed: once settled, the underlying rows are
   // `paid = true` and the timing disappears from here for good.
   // ---------------------------------------------------------------------------
+  // ---- Emploi du temps of one teacher --------------------------------------
+  // Every screen that lists a teacher's timings shows the SAME card, because
+  // what reception asks first about a créneau is "quels jours ?" — the hours
+  // alone say nothing about when the teacher is actually expected.
+
+  /** Minutes of one séance of this timing. */
+  const timingMinutes = (s: ScheduleSession) => {
+    const [sh, sm] = s.startTime.split(":").map(Number);
+    const [eh, em] = s.endTime.split(":").map(Number);
+    const diff = (eh * 60 + em) - (sh * 60 + sm);
+    return diff > 0 ? diff : 0;
+  };
+
+  const asHours = (minutes: number) =>
+    `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}`;
+
+  /** A séance libre spreads over several classes / groups / salles. */
+  const timingLabels = (s: ScheduleSession) => {
+    const many = (ids: string[] | undefined, one: string | undefined, name: (id: string) => string) =>
+      (s.isOpen && ids?.length ? ids : [one]).filter(Boolean).map((id) => name(id as string)).join(" · ") || "—";
+    return {
+      title: s.isOpen
+        ? s.title || `Séance libre — ${modules.find((m) => m.id === s.moduleId)?.name ?? "Séance"}`
+        : modules.find((m) => m.id === s.moduleId)?.name ?? "Séance",
+      moduleName: modules.find((m) => m.id === s.moduleId)?.name ?? "—",
+      className: many(s.classIds, s.classId, (id) => classes.find((c) => c.id === id)?.name ?? "—"),
+      groupName: many(s.groupIds, s.groupId, (id) => groups.find((g) => g.id === id)?.name ?? "—"),
+      salleName: many(s.salleIds, s.salleId, (id) => salles.find((sa) => sa.id === id)?.name ?? "—"),
+    };
+  };
+
+  /** One assigned emploi du temps, days of the week included. */
+  const renderTimingCard = (s: ScheduleSession) => {
+    const l = timingLabels(s);
+    const weekly = timingMinutes(s) * s.days.length;
+    return (
+      <div key={s.id} className="space-y-2 rounded-xl border border-line bg-canvas/30 p-3 text-xs">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <strong className="block truncate text-ink">
+              {s.isOpen && <span className="me-1">🎯</span>}
+              {l.title}
+            </strong>
+            <span className="mt-0.5 block truncate text-[10px] text-muted">
+              {l.className} · Gr: {l.groupName} · Salle: {l.salleName}
+            </span>
+          </div>
+          <Badge tone={s.isOpen ? "success" : "primary"} className="shrink-0 text-[9px]">
+            {s.isOpen ? "Séance libre" : "Cours"}
+          </Badge>
+        </div>
+
+        {/* Days of the week — the whole point of this card */}
+        <div className="flex flex-wrap items-center gap-1">
+          {DAYS.map((d: Day) => {
+            const on = s.days.includes(d);
+            return (
+              <span
+                key={d}
+                className={`rounded-md border px-1.5 py-0.5 text-[9px] font-bold ${
+                  on
+                    ? "border-primary bg-primary text-white"
+                    : "border-line bg-surface text-muted/50"
+                }`}
+                title={DAY_LABELS_FR[d]}
+              >
+                {DAY_LABELS_FR[d].slice(0, 3)}
+              </span>
+            );
+          })}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line/60 pt-2 font-mono text-[10px] text-primary">
+          <span className="flex items-center gap-1">
+            <Clock className="h-3 w-3" /> {s.startTime} - {s.endTime}
+          </span>
+          <span className="text-muted">
+            {s.days.length} séance{s.days.length > 1 ? "s" : ""} / semaine · {asHours(weekly)}
+          </span>
+          {s.periodStart && (
+            <span className="text-muted">
+              {formatDateFr(s.periodStart)} → {formatDateFr(s.periodEnd)}
+            </span>
+          )}
+        </div>
+
+        <p className="text-[10px] text-muted">
+          <strong className="text-ink">Jours :</strong> {formatDays(s.days) || "aucun jour défini"}
+        </p>
+      </div>
+    );
+  };
+
+  /** "3 créneaux · 7 séances / semaine · 12h00" — recap above the cards. */
+  const renderTimingRecap = (list: ScheduleSession[]) => {
+    const seances = list.reduce((sum, s) => sum + s.days.length, 0);
+    const minutes = list.reduce((sum, s) => sum + timingMinutes(s) * s.days.length, 0);
+    const daysCovered = DAYS.filter((d) => list.some((s) => s.days.includes(d)));
+    return (
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[10px]">
+        <Badge tone="primary" className="font-bold">{list.length} créneau(x)</Badge>
+        <Badge tone="neutral" className="font-bold">{seances} séance(s) / semaine</Badge>
+        <Badge tone="success" className="font-bold">{asHours(minutes)} / semaine</Badge>
+        <span className="text-muted">
+          Jours travaillés : <strong className="text-ink">{formatDays(daysCovered) || "—"}</strong>
+        </span>
+      </div>
+    );
+  };
+
   const buildUnpaidTimings = (tid: string): UnpaidTiming[] => {
     const map = new Map<string, UnpaidTiming>();
 
@@ -285,11 +397,17 @@ export function TeachersPage() {
 
     // Passagers of the same timings (séances libres, no student account).
     // `teacherPaid` is their own settlement flag: a créneau attended only by
-    // passagers has no unpaid_teacher_sessions row to flip.
+    // passagers has no unpaid_teacher_sessions row to flip. A séance OFFERTE
+    // (`isFree`) is skipped outright: nobody is paid on it, teacher included.
     const teacherSessionIds = new Set(sessions.filter((s) => s.teacherId === tid).map((s) => s.id));
     independent
       .filter(
-        (ind) => ind.sessionId && teacherSessionIds.has(ind.sessionId) && !ind.studentId && !ind.teacherPaid,
+        (ind) =>
+          ind.sessionId &&
+          teacherSessionIds.has(ind.sessionId) &&
+          !ind.studentId &&
+          !ind.isFree &&
+          !ind.teacherPaid,
       )
       .forEach((ind) => {
         const key = `${ind.date}|${ind.sessionId}`;
@@ -1197,24 +1315,35 @@ export function TeachersPage() {
                 .filter((a) => myTimingIds.has(a.sessionId))
                 .reduce((s, a) => s + a.amountDeducted, 0)
                 + myPassagerAttendees.reduce((s, i) => s + i.price, 0);
+              // Séances offertes: nothing was cashed, nothing is owed to him —
+              // but the school still wants to see what it gave away.
+              const offeredSeances = myPassagerAttendees.filter((i) => i.isFree);
+              const offeredValue = offeredSeances.reduce((s, i) => s + (i.waivedAmount ?? 0), 0);
 
               // One line per (date, timing) actually held, paid or not.
-              const heldTimings = new Map<string, { dateKey: string; sessionId: string; presents: number; passagers: number; revenue: number; paid: boolean }>();
+              const heldTimings = new Map<string, { dateKey: string; sessionId: string; presents: number; passagers: number; offered: number; revenue: number; waived: number; paid: boolean }>();
+              const emptyRow = (dateKey: string, sessionId: string) => ({
+                dateKey, sessionId, presents: 0, passagers: 0, offered: 0, revenue: 0, waived: 0, paid: true,
+              });
               attendance.forEach((a) => {
                 if (!myTimingIds.has(a.sessionId)) return;
                 const dateKey = new Date(a.timestamp).toLocaleDateString("fr-CA");
                 const key = `${dateKey}|${a.sessionId}`;
-                const row = heldTimings.get(key) ?? { dateKey, sessionId: a.sessionId, presents: 0, passagers: 0, revenue: 0, paid: true };
+                const row = heldTimings.get(key) ?? emptyRow(dateKey, a.sessionId);
                 row.presents += 1;
                 row.revenue += a.amountDeducted;
                 heldTimings.set(key, row);
               });
               myPassagerAttendees.forEach((ind) => {
                 const key = `${ind.date}|${ind.sessionId}`;
-                const row = heldTimings.get(key) ?? { dateKey: ind.date, sessionId: ind.sessionId!, presents: 0, passagers: 0, revenue: 0, paid: true };
+                const row = heldTimings.get(key) ?? emptyRow(ind.date, ind.sessionId!);
                 row.presents += 1;
                 row.passagers += 1;
                 row.revenue += ind.price;
+                if (ind.isFree) {
+                  row.offered += 1;
+                  row.waived += ind.waivedAmount ?? 0;
+                }
                 heldTimings.set(key, row);
               });
               myDues.forEach((u) => {
@@ -1223,6 +1352,7 @@ export function TeachersPage() {
                 if (row && !u.paid) row.paid = false;
               });
               myPassagerAttendees.forEach((ind) => {
+                if (ind.isFree) return; // offerte: rien n'est dû à l'enseignant
                 const row = heldTimings.get(`${ind.date}|${ind.sessionId}`);
                 if (row && !ind.teacherPaid) row.paid = false;
               });
@@ -1243,6 +1373,11 @@ export function TeachersPage() {
                     <div className="bg-canvas border border-line p-3 rounded-xl text-center">
                       <span className="text-muted text-[10px] uppercase block font-semibold">Recette générée</span>
                       <strong className="text-success text-base font-mono">{revenueGenerated} DA</strong>
+                      {offeredSeances.length > 0 && (
+                        <span className="text-[9px] text-warning block">
+                          {offeredSeances.length} offerte(s) · {offeredValue} DA
+                        </span>
+                      )}
                     </div>
                     <div className="bg-canvas border border-line p-3 rounded-xl text-center">
                       <span className="text-muted text-[10px] uppercase block font-semibold">Total versé</span>
@@ -1293,11 +1428,21 @@ export function TeachersPage() {
                                         <span className="text-[9px] text-warning block">{r.passagers} pass.</span>
                                       )}
                                     </td>
-                                    <td className="py-1.5 text-right font-mono">{r.revenue} DA</td>
+                                    <td className="py-1.5 text-right font-mono">
+                                      {r.revenue} DA
+                                      {r.waived > 0 && (
+                                        <span className="text-[9px] text-warning block">offert: {r.waived} DA</span>
+                                      )}
+                                    </td>
                                     <td className="py-1.5 text-right">
                                       <Badge tone={r.paid ? "success" : "warning"} className="text-[9px]">
                                         {r.paid ? "Payé" : "Dû"}
                                       </Badge>
+                                      {r.offered > 0 && (
+                                        <Badge tone="neutral" className="text-[9px] mt-0.5">
+                                          {r.offered} offerte(s)
+                                        </Badge>
+                                      )}
                                     </td>
                                   </tr>
                                 );
@@ -1351,35 +1496,20 @@ export function TeachersPage() {
                     </div>
                   </div>
 
-                  {/* Timings he is attached to */}
+                  {/* Timings he is attached to — days of the week included */}
                   <div className="border border-line rounded-2xl p-4 bg-surface">
                     <h4 className="font-bold text-ink mb-3 text-xs uppercase tracking-wider text-muted">
-                      📅 Créneaux affectés
+                      📅 Emplois du temps affectés
                     </h4>
                     {myTimings.length === 0 ? (
                       <p className="text-xs text-muted italic text-center py-6">Aucun créneau affecté.</p>
                     ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {myTimings.map((s) => (
-                          <div key={s.id} className="text-xs bg-canvas/30 p-3 rounded-xl border border-line space-y-1">
-                            <strong className="text-ink block">
-                              {s.title || modules.find((m) => m.id === s.moduleId)?.name}
-                            </strong>
-                            <span className="text-[10px] text-muted block">
-                              {classes.find((c) => c.id === s.classId)?.name} · Gr:{" "}
-                              {groups.find((g) => g.id === s.groupId)?.name}
-                            </span>
-                            <div className="flex items-center gap-1.5 text-[10px] text-primary font-mono">
-                              <Clock className="h-3 w-3" /> {s.startTime} - {s.endTime}
-                              {s.periodStart && (
-                                <span className="text-muted">
-                                  · {formatDateFr(s.periodStart)} → {formatDateFr(s.periodEnd)}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
+                      <>
+                        {renderTimingRecap(myTimings)}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {myTimings.map((s) => renderTimingCard(s))}
+                        </div>
+                      </>
                     )}
                   </div>
 
@@ -1432,38 +1562,86 @@ export function TeachersPage() {
             </div>
 
             {/* TAB CONTENT: Info / Schedule */}
-            {!selectedTeacher.isPassager && detailsTab === "info" && (
-              <div className="space-y-4">
-                <div className="border border-line rounded-2xl p-4 bg-surface">
-                  <h4 className="font-bold text-ink mb-3 flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
-                    📅 Séances de cours programmées
-                  </h4>
-                  {sessions.filter((s) => s.teacherId === selectedTeacher.id).length === 0 ? (
-                    <p className="text-xs text-muted italic text-center py-6">Aucune séance programmée pour cet enseignant.</p>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-72 overflow-y-auto pr-1">
-                      {sessions
-                        .filter((s) => s.teacherId === selectedTeacher.id)
-                        .map((s) => (
-                          <div key={s.id} className="text-xs bg-canvas/30 p-3 rounded-xl border border-line flex flex-col justify-between gap-1">
-                            <div>
-                              <strong className="text-ink block text-sm">
-                                {modules.find((m) => m.id === s.moduleId)?.name}
-                              </strong>
-                              <span className="text-muted block text-[10px] uppercase font-semibold mt-0.5">
-                                Groupe: {groups.find((g) => g.id === s.groupId)?.name || "Inconnu"} | Salle: {classes.find((c) => c.id === s.classId)?.name}
-                              </span>
-                            </div>
-                            <div className="text-primary font-bold mt-1 text-[11px] font-mono">
-                              Horaires: {s.startTime} - {s.endTime}
-                            </div>
+            {!selectedTeacher.isPassager && detailsTab === "info" && (() => {
+              const myTimings = sessions
+                .filter((s) => s.teacherId === selectedTeacher.id)
+                .sort(
+                  (a, b) =>
+                    DAYS.findIndex((d) => a.days.includes(d)) - DAYS.findIndex((d) => b.days.includes(d)) ||
+                    a.startTime.localeCompare(b.startTime),
+                );
+              /** The same timings read the other way round: what the teacher
+               *  actually does on each day of the week. */
+              const byDay = DAYS.map((d) => ({
+                day: d,
+                items: myTimings
+                  .filter((s) => s.days.includes(d))
+                  .sort((a, b) => a.startTime.localeCompare(b.startTime)),
+              }));
+
+              return (
+                <div className="space-y-4">
+                  <div className="border border-line rounded-2xl p-4 bg-surface">
+                    <h4 className="font-bold text-ink mb-3 flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
+                      📅 Emplois du temps affectés
+                    </h4>
+                    {myTimings.length === 0 ? (
+                      <p className="text-xs text-muted italic text-center py-6">Aucune séance programmée pour cet enseignant.</p>
+                    ) : (
+                      <>
+                        {renderTimingRecap(myTimings)}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-80 overflow-y-auto pr-1">
+                          {myTimings.map((s) => renderTimingCard(s))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Week board: the teacher's presence day by day */}
+                  {myTimings.length > 0 && (
+                    <div className="border border-line rounded-2xl p-4 bg-surface">
+                      <h4 className="font-bold text-ink mb-3 flex items-center gap-2 text-xs uppercase tracking-wider text-muted">
+                        🗓️ Sa semaine, jour par jour
+                      </h4>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+                        {byDay.map(({ day, items }) => (
+                          <div
+                            key={day}
+                            className={`rounded-xl border p-2 space-y-1.5 ${
+                              items.length > 0 ? "border-primary/25 bg-primary-50/50" : "border-line bg-canvas/30"
+                            }`}
+                          >
+                            <span
+                              className={`block text-[10px] font-bold text-center ${
+                                items.length > 0 ? "text-primary" : "text-muted"
+                              }`}
+                            >
+                              {DAY_LABELS_FR[day]}
+                            </span>
+                            {items.length === 0 ? (
+                              <span className="block text-center text-[9px] italic text-muted/60">Libre</span>
+                            ) : (
+                              items.map((s) => (
+                                <div
+                                  key={`${day}-${s.id}`}
+                                  className="rounded-lg border border-line bg-surface px-1.5 py-1 text-[9px]"
+                                >
+                                  <strong className="block truncate text-ink">{timingLabels(s).title}</strong>
+                                  <span className="block font-mono text-muted">
+                                    {s.startTime} - {s.endTime}
+                                  </span>
+                                  <span className="block truncate text-muted">{timingLabels(s).salleName}</span>
+                                </div>
+                              ))
+                            )}
                           </div>
                         ))}
+                      </div>
                     </div>
                   )}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* TAB CONTENT: Finance History */}
             {!selectedTeacher.isPassager && detailsTab === "finance" && (() => {
