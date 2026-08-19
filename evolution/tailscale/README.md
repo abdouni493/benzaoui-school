@@ -9,6 +9,11 @@ Le fichier ne contient **aucun commentaire** : il est désérialisé par Tailsca
 et une clé étrangère ajoutée « pour expliquer » risquerait d'être refusée. Les
 explications vivent donc ici.
 
+C'est **ce dossier entier** qui est monté dans le conteneur (`./tailscale:/config`),
+et non `funnel.json` seul : la documentation Tailscale le recommande, un
+bind-mount de fichier unique empêchant le conteneur de voir les modifications
+faites ensuite côté Windows.
+
 ## Ce que fait chaque bloc
 
 | Bloc | Rôle |

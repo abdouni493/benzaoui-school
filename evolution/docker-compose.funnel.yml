@@ -128,7 +128,10 @@ services:
       # réseau, ce qui est exactement ce que permet Docker Desktop sur Windows.
       - TS_USERSPACE=true
     volumes:
-      - ./tailscale/funnel.json:/config/funnel.json:ro
+      # Le DOSSIER est monté, pas le fichier seul : c'est ce que recommande la
+      # documentation Tailscale, un bind-mount de fichier unique empêchant le
+      # conteneur de voir les modifications ultérieures.
+      - ./tailscale:/config:ro
       - tailscale_state:/var/lib/tailscale
     depends_on:
       - evolution

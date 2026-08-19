@@ -109,10 +109,14 @@ Sur [tailscale.com](https://tailscale.com), créer un compte **gratuit** (plan P
 console d'administration, relever le **nom du tailnet**, de la forme `tail1a2b3c.ts.net` : il forme
 la seconde moitié de l'adresse publique.
 
-### 2. Activer les certificats HTTPS
+### 2. Activer MagicDNS et les certificats HTTPS
 
-Console → **DNS → HTTPS Certificates → Enable HTTPS.** Sans cela, le Funnel ne peut pas servir en
-HTTPS, et Vercel refusera de parler à la passerelle.
+Console → **DNS**. Deux réglages sur cette page, dans cet ordre :
+
+1. **MagicDNS** — activé par défaut sur un tailnet neuf ; le Funnel l'exige.
+2. **HTTPS Certificates → Enable HTTPS.**
+
+Sans le second, le Funnel ne peut pas servir en HTTPS et Vercel refusera de parler à la passerelle.
 
 ### 3. Autoriser le Funnel
 
