@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useData } from "@/lib/store/data";
 import { useSession } from "@/lib/store/session";
 import { changeOwnPassword } from "@/lib/supabase/createUser";
+import { MatiereTimetable } from "@/components/timetable/MatiereTimetable";
+import { classCascadeLabel } from "@/lib/helpers";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -35,9 +37,11 @@ import type {
   Module,
   Salle,
   ScheduleSession,
+  SchoolClass,
   Student,
   Subscription,
 } from "@/lib/types";
+import { DAYS } from "@/lib/types";
 
 interface PageProps {
   slug: string;
@@ -91,7 +95,7 @@ export function StudentPages({ slug }: PageProps) {
     case "home":
       return <StudentHomeView student={student} activeSubs={activeSubs} getSessionInfo={getSessionInfo} announcements={announcements} sessions={sessions} modules={modules} classes={classes} groups={groups} />;
     case "schedule":
-      return <StudentScheduleView student={student} activeSubs={activeSubs} getSessionInfo={getSessionInfo} />;
+      return <StudentScheduleView student={student} activeSubs={activeSubs} />;
     case "subjects":
       return <StudentSubjectsView student={student} activeSubs={activeSubs} getSessionInfo={getSessionInfo} subjects={subjects} />;
     case "attendance":
@@ -279,31 +283,15 @@ function StudentHomeView({
 // 2. SCHEDULE VIEW
 // ----------------------------------------------------
 function StudentScheduleView({
-  student,
   activeSubs,
-  getSessionInfo,
 }: {
   student: Student;
   activeSubs: Subscription[];
-  getSessionInfo: (id: string) => any;
 }) {
-  const { teachers, salles } = useData();
-  const daysOfWeek = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"];
-  const [filterSessionId, setFilterSessionId] = useState("");
-  const [selectedSession, setSelectedSession] = useState<any | null>(null);
-  const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+  const { sessions, classes, groups, modules, salles, teachers, filieres } = useData();
+  const [selected, setSelected] = useState<ScheduleSession | null>(null);
+  const [scopeMode, setScopeMode] = useState<"level" | "mine">("level");
 
-  // Fetch all sessions student is linked to
-  const mySessions = activeSubs
-    .map((sub) => getSessionInfo(sub.sessionId))
-    .filter(Boolean) as any[];
-
-  // Filter based on dropdown choice
-  const filteredSessions = filterSessionId 
-    ? mySessions.filter((s) => s.id === filterSessionId)
-    : mySessions;
-
-  // Helpers for formatting days
   const frenchDays: Record<string, string> = {
     saturday: "Samedi",
     sunday: "Dimanche",
@@ -314,116 +302,172 @@ function StudentScheduleView({
     friday: "Vendredi",
   };
 
-  // Generate consistent coloring by module name
-  const getSessionColor = (name: string) => {
-    let hash = 0;
-    for (let i = 0; i < name.length; i++) {
-      hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  // A séance libre spans every classe / groupe of its selection.
+  const seanceClassIds = (s: ScheduleSession) =>
+    s.isOpen && s.classIds?.length ? s.classIds : [s.classId];
+  const seanceGroupIds = (s: ScheduleSession) =>
+    s.isOpen && s.groupIds?.length ? s.groupIds : [s.groupId];
+
+  // The séances the student is actually enrolled on.
+  const ownSessionIds = useMemo(
+    () => new Set(activeSubs.map((sub) => sub.sessionId).filter(Boolean) as string[]),
+    [activeSubs],
+  );
+
+  // His classe(s) and groupe(s) are read from those enrolled séances.
+  const { ownClassIds, ownGroupIds } = useMemo(() => {
+    const cls = new Set<string>();
+    const grp = new Set<string>();
+    for (const s of sessions) {
+      if (!ownSessionIds.has(s.id)) continue;
+      seanceClassIds(s).forEach((c) => c && cls.add(c));
+      seanceGroupIds(s).forEach((g) => g && grp.add(g));
     }
-    const colors = [
-      "border-l-4 border-l-blue-500 bg-blue-50/70 text-blue-900 dark:bg-blue-950/20 dark:text-blue-200 border-blue-100",
-      "border-l-4 border-l-emerald-500 bg-emerald-50/70 text-emerald-900 dark:bg-emerald-950/20 dark:text-emerald-200 border-emerald-100",
-      "border-l-4 border-l-amber-500 bg-amber-50/70 text-amber-900 dark:bg-amber-950/20 dark:text-amber-200 border-amber-100",
-      "border-l-4 border-l-rose-500 bg-rose-50/70 text-rose-900 dark:bg-rose-950/20 dark:text-rose-200 border-rose-100",
-      "border-l-4 border-l-purple-500 bg-purple-50/70 text-purple-900 dark:bg-purple-950/20 dark:text-purple-200 border-purple-100",
-      "border-l-4 border-l-cyan-500 bg-cyan-50/70 text-cyan-900 dark:bg-cyan-950/20 dark:text-cyan-200 border-cyan-100",
-      "border-l-4 border-l-indigo-500 bg-indigo-50/70 text-indigo-900 dark:bg-indigo-950/20 dark:text-indigo-200 border-indigo-100",
-    ];
-    return colors[Math.abs(hash) % colors.length];
+    return { ownClassIds: cls, ownGroupIds: grp };
+  }, [sessions, ownSessionIds]);
+
+  // « Même classe et année » = same niveau + année (cours) or same niveau de
+  // formation. Every filière and groupe of that scope is shown; only the
+  // student's own classe + filière + groupe is highlighted (see `isOwn`).
+  const classScopeKey = (c: SchoolClass) =>
+    c.type === "formation" ? `f:${c.formationLevel ?? ""}` : `c:${c.coursLevel ?? ""}:${c.year ?? ""}`;
+  const peerClassIds = useMemo(() => {
+    const keys = new Set(classes.filter((c) => ownClassIds.has(c.id)).map(classScopeKey));
+    return new Set(classes.filter((c) => keys.has(classScopeKey(c))).map((c) => c.id));
+  }, [classes, ownClassIds]);
+
+  const scopeIds = scopeMode === "mine" ? ownClassIds : peerClassIds;
+  const visibleSessions = useMemo(
+    () => sessions.filter((s) => seanceClassIds(s).some((c) => scopeIds.has(c))),
+    [sessions, scopeIds],
+  );
+
+  /** The student's own séances — same classe + filière + groupe (or the ones he
+   *  is directly enrolled on). These are the ones the board paints in color. */
+  const isOwn = (s: ScheduleSession) =>
+    ownSessionIds.has(s.id) ||
+    (seanceClassIds(s).some((c) => ownClassIds.has(c)) &&
+      seanceGroupIds(s).some((g) => ownGroupIds.has(g)));
+
+  // ---- Labels for the details modal ----------------------------------------
+  const filiereLabelOf = (id?: string) => (id ? filieres.find((f) => f.id === id)?.name ?? "" : "");
+  const classCascade = (id?: string) => {
+    const c = classes.find((x) => x.id === id);
+    return c ? classCascadeLabel(c, c.filiereId ? filiereLabelOf(c.filiereId) : "") || c.name : "—";
+  };
+  const moduleName = (id?: string) => modules.find((m) => m.id === id)?.name ?? "Matière";
+  const groupName = (id?: string) => groups.find((g) => g.id === id)?.name ?? "—";
+  const salleName = (id?: string) => salles.find((s) => s.id === id)?.name ?? "—";
+  const teacherName = (id?: string) => {
+    const t = teachers.find((x) => x.id === id);
+    return t ? `${t.firstName} ${t.lastName}` : "—";
   };
 
-  const handleOpenDetails = (ses: any) => {
-    const teacherObj = teachers.find((t) => t.id === ses.teacherId);
-    const salleObj = salles.find((sa) => sa.id === ses.salleId);
-    setSelectedSession({
-      ...ses,
-      teacherName: teacherObj ? `${teacherObj.firstName} ${teacherObj.lastName}` : "Non spécifié",
-      salleName: salleObj ? salleObj.name : "Salle non spécifiée",
-    });
-    setIsDetailsOpen(true);
-  };
+  const ownClasseLabel = [...ownClassIds].map(classCascade).join(" · ");
+  const ownGroupeLabel = [...ownGroupIds].map(groupName).join(" · ");
+
+  const sel = selected;
+  const selClassIds = sel ? seanceClassIds(sel) : [];
+  const selGroupIds = sel ? seanceGroupIds(sel) : [];
 
   return (
     <div className="space-y-6 text-xs">
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <PageHeader emoji="🗓️" title="Mon Emploi du Temps" subtitle="Votre planning de cours hebdomadaire" />
-        
-        {/* Quick select filter for student */}
-        <div className="w-56 self-start sm:self-center">
-          <Select value={filterSessionId} onChange={(e) => setFilterSessionId(e.target.value)} className="w-full">
-            <option value="">Tous mes cours</option>
-            {mySessions.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.moduleLabel} ({s.groupLabel})
-              </option>
+      <PageHeader
+        emoji="🗓️"
+        title="Mon Emploi du Temps"
+        subtitle="Toutes les séances de votre niveau et année — les vôtres en couleur"
+      />
+
+      {/* Ma classe + scope toggle */}
+      <Card className="border border-line">
+        <CardBody className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">Ma classe</span>
+            <strong className="block truncate text-sm text-ink">{ownClasseLabel || "—"}</strong>
+            {ownGroupeLabel && <span className="block text-[10px] text-muted">Groupe : {ownGroupeLabel}</span>}
+          </div>
+          <div className="flex shrink-0 gap-1 rounded-xl border border-line bg-canvas p-1">
+            {(
+              [
+                ["level", "Tout mon niveau"],
+                ["mine", "Mes cours"],
+              ] as const
+            ).map(([mode, label]) => (
+              <button
+                key={mode}
+                onClick={() => setScopeMode(mode)}
+                className={`rounded-lg px-3 py-1.5 text-[10px] font-bold transition-all ${
+                  scopeMode === mode ? "bg-primary text-white" : "text-muted hover:text-ink"
+                }`}
+              >
+                {label}
+              </button>
             ))}
-          </Select>
-        </div>
+          </div>
+        </CardBody>
+      </Card>
+
+      {/* Legend */}
+      <div className="flex flex-wrap items-center gap-4 text-[10px] text-muted">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-3 w-3 rounded border-l-4 border-l-primary bg-primary-50 ring-1 ring-primary/40" />
+          Mes séances (ma classe, filière et groupe)
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-3 w-3 rounded border-l-4 border-l-line bg-canvas/60" />
+          Autres séances de mon niveau / année
+        </span>
       </div>
 
-      <div className="overflow-x-auto pb-4">
-        <div className="grid grid-cols-1 md:grid-cols-7 gap-4 min-w-[900px] md:min-w-0">
-          {daysOfWeek.map((day) => {
-            const daySessions = filteredSessions
-              .filter((s) => s.days.includes(day))
-              .sort((a, b) => a.startTime.localeCompare(b.startTime));
-
-            return (
-              <div key={day} className="flex flex-col bg-canvas/30 rounded-2xl border border-line p-3 min-h-[380px] space-y-3">
-                <span className="font-extrabold text-ink uppercase text-[10px] block border-b border-line pb-2 text-center capitalize">
-                  {frenchDays[day] || day}
-                </span>
-                
-                <div className="flex-1 space-y-2.5 overflow-y-auto max-h-[400px]">
-                  {daySessions.length === 0 ? (
-                    <span className="text-[10px] text-muted italic block text-center mt-12 font-medium">Libre</span>
-                  ) : (
-                    daySessions.map((s) => (
-                      <div
-                        key={s.id}
-                        onClick={() => handleOpenDetails(s)}
-                        className={`p-2.5 rounded-xl border cursor-pointer hover:scale-[1.02] hover:shadow-sm transition-all duration-200 space-y-1.5 ${getSessionColor(
-                          s.moduleLabel
-                        )}`}
-                      >
-                        <strong className="text-ink block text-[11px] font-black leading-tight truncate">{s.moduleLabel}</strong>
-                        <span className="text-[9px] text-muted block truncate font-bold">{s.groupLabel}</span>
-                        <div className="flex items-center gap-1 text-[9px] font-bold font-mono opacity-90 mt-1 border-t border-black/5 dark:border-white/5 pt-1">
-                          <Clock className="h-3 w-3 shrink-0" />
-                          <span>{s.startTime} - {s.endTime}</span>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      <MatiereTimetable
+        sessions={visibleSessions}
+        onSelect={setSelected}
+        isHighlighted={isOwn}
+        emptyLabel={
+          ownClassIds.size === 0
+            ? "Vous n'êtes inscrit à aucun cours pour le moment."
+            : "Aucune séance pour votre niveau et votre année."
+        }
+      />
 
       {/* Details Modal */}
-      <Modal open={isDetailsOpen} onClose={() => setIsDetailsOpen(false)} title="Détails du Cours" wide>
-        {selectedSession && (
+      <Modal open={sel !== null} onClose={() => setSelected(null)} title="Détails du Cours" wide>
+        {sel && (
           <div className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="text-base font-bold text-ink">
+                  {sel.isOpen && <span className="me-1">🎯</span>}
+                  {sel.isOpen ? sel.title || `Séance Libre — ${moduleName(sel.moduleId)}` : moduleName(sel.moduleId)}
+                </h3>
+                <span className="mt-0.5 block text-[11px] text-muted">{selClassIds.map(classCascade).join(" · ")}</span>
+              </div>
+              {isOwn(sel) ? (
+                <Badge tone="primary" className="font-bold">Ma séance</Badge>
+              ) : (
+                <Badge tone="neutral" className="font-bold">Autre groupe / filière</Badge>
+              )}
+            </div>
+
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 bg-primary-50/50 rounded-xl p-4 border border-line">
               <div>
                 <span className="text-[10px] text-muted block uppercase font-sans">Matière</span>
-                <span className="font-bold text-ink">{selectedSession.moduleLabel}</span>
+                <span className="font-bold text-ink">{moduleName(sel.moduleId)}</span>
               </div>
               <div>
-                <span className="text-[10px] text-muted block uppercase font-sans">Niveau / Classe</span>
-                <span className="font-semibold text-ink">{selectedSession.classLabel}</span>
+                <span className="text-[10px] text-muted block uppercase font-sans">Classe / année / filière</span>
+                <span className="font-semibold text-ink">{selClassIds.map(classCascade).join(" · ")}</span>
               </div>
               <div>
                 <span className="text-[10px] text-muted block uppercase font-sans">Groupe / Salle</span>
                 <span className="font-semibold text-ink">
-                  {selectedSession.groupLabel} - {selectedSession.salleName}
+                  {selGroupIds.map(groupName).join(" · ")} ·{" "}
+                  {(sel.isOpen && sel.salleIds?.length ? sel.salleIds : [sel.salleId]).map(salleName).join(" · ")}
                 </span>
               </div>
               <div>
                 <span className="text-[10px] text-muted block uppercase font-sans">Enseignant</span>
-                <span className="font-semibold text-ink">{selectedSession.teacherName}</span>
+                <span className="font-semibold text-ink">{teacherName(sel.teacherId)}</span>
               </div>
             </div>
 
@@ -432,17 +476,13 @@ function StudentScheduleView({
                 <Clock className="h-4 w-4 text-primary" /> Jours & Horaires
               </h4>
               <div className="flex justify-between items-center text-xs border-b border-line pb-2">
-                <span className="text-muted">Heure de début:</span>
-                <strong className="text-primary font-bold">{selectedSession.startTime}</strong>
-              </div>
-              <div className="flex justify-between items-center text-xs border-b border-line pb-2">
-                <span className="text-muted">Heure de fin:</span>
-                <strong className="text-primary font-bold">{selectedSession.endTime}</strong>
+                <span className="text-muted">Horaire :</span>
+                <strong className="text-primary font-bold">{sel.startTime} - {sel.endTime}</strong>
               </div>
               <div>
-                <span className="text-[10px] text-muted block mb-1.5 font-sans">Jours programmés:</span>
+                <span className="text-[10px] text-muted block mb-1.5 font-sans">Jours programmés :</span>
                 <div className="flex flex-wrap gap-1">
-                  {selectedSession.days.map((d: string) => (
+                  {DAYS.filter((d) => sel.days.includes(d)).map((d) => (
                     <Badge key={d} tone="primary" className="uppercase text-[9px] font-bold">
                       {frenchDays[d] || d}
                     </Badge>
@@ -452,7 +492,7 @@ function StudentScheduleView({
             </div>
 
             <div className="flex justify-end pt-2 border-t border-line">
-              <Button onClick={() => setIsDetailsOpen(false)}>Fermer</Button>
+              <Button onClick={() => setSelected(null)}>Fermer</Button>
             </div>
           </div>
         )}

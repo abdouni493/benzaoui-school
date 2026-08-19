@@ -190,6 +190,14 @@ export interface ScheduleSession {
   salleIds?: string[];
   /** price of one séance libre (mirrored into the auto-created subscription) */
   openPrice?: number;
+  /**
+   * "Séance libre offerte": the whole créneau is free. Every présence recorded
+   * on it is offered — the student's balance is never debited, the school cashes
+   * nothing, and the teacher earns no share. What each séance WOULD have cost
+   * (`openPrice`) is what the reports price as the value the school gave away.
+   * Only meaningful when `isOpen` is true.
+   */
+  isFree?: boolean;
 }
 
 export interface Subscription {

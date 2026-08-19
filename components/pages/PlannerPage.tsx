@@ -164,6 +164,9 @@ export function PlannerPage() {
   const [openPassagerName, setOpenPassagerName] = useState("");
   const [openPassagerPhone, setOpenPassagerPhone] = useState("");
   const [openTitleOverride, setOpenTitleOverride] = useState("");
+  // "Séance libre offerte": the whole créneau is free — every présence recorded
+  // on it is offered (no débit, no encaissement, no rémunération de l'enseignant).
+  const [openIsFree, setOpenIsFree] = useState(false);
   const [savingOpenSeance, setSavingOpenSeance] = useState(false);
   // "Vue" filter: all timings / regular courses only / séances libres only
   const [kindFilter, setKindFilter] = useState<"all" | "cours" | "open">("all");
@@ -311,6 +314,7 @@ export function PlannerPage() {
     setOpenPassagerName("");
     setOpenPassagerPhone("");
     setOpenTitleOverride("");
+    setOpenIsFree(false);
   };
 
   const openEditOpenSeance = (s: ScheduleSession) => {
@@ -336,6 +340,7 @@ export function PlannerPage() {
     setOpenPassagerName(t?.isPassager ? `${t.firstName} ${t.lastName}`.trim() : "");
     setOpenPassagerPhone(t?.isPassager ? t.phone : "");
     setOpenTitleOverride(s.title ?? "");
+    setOpenIsFree(!!s.isFree);
     setIsOpenSeanceModalOpen(true);
     setIsDetailsOpen(false);
   };
@@ -428,6 +433,7 @@ export function PlannerPage() {
         groupIds: openGroupIds,
         salleIds: openSalleIds,
         openPrice,
+        isFree: openIsFree,
       };
 
       if (editingOpenSession) {
@@ -865,7 +871,7 @@ export function PlannerPage() {
                               </strong>
                               <span className="block text-[9px] opacity-80 font-bold truncate">
                                 {s.isOpen
-                                  ? `Séance libre · ${openSessionPrice(s)} DA`
+                                  ? `Séance libre · ${openSessionPrice(s)} DA${s.isFree ? " · 🎁 Offerte" : ""}`
                                   : getClassName(s.classId)}
                               </span>
                             </div>
@@ -928,6 +934,9 @@ export function PlannerPage() {
                               <Badge tone={openSessionActive(s) ? "success" : "neutral"} className="font-bold text-[9px]">
                                 {openSessionActive(s) ? "Séance Libre" : "Période terminée"}
                               </Badge>
+                            )}
+                            {s.isOpen && s.isFree && (
+                              <Badge tone="warning" className="font-bold text-[9px]">🎁 Offerte</Badge>
                             )}
                             <Badge tone="primary" className="font-bold">
                               {s.isOpen
@@ -1188,8 +1197,9 @@ export function PlannerPage() {
                       ))}
                   </div>
                   <p className="text-[10px] text-muted leading-relaxed">
-                    L&apos;enseignant est rémunéré sur cette séance libre exactement comme sur ses autres
-                    séances (sa part est calculée à chaque présence selon son contrat).
+                    {openIsFree
+                      ? "Séance offerte : l'enseignant n'est pas rémunéré sur ce créneau."
+                      : "L'enseignant est rémunéré sur cette séance libre exactement comme sur ses autres séances (sa part est calculée à chaque présence selon son contrat)."}
                   </p>
                 </div>
               ) : (
@@ -1295,6 +1305,31 @@ export function PlannerPage() {
                 l&apos;interface <strong>Abonnements</strong> comme s&apos;il y avait été saisi à la main.
               </p>
             </div>
+
+            {/* Séance libre offerte : tout le créneau est gratuit — chaque
+                présence enregistrée dessus est offerte (ni débit, ni
+                encaissement, ni rémunération de l'enseignant). */}
+            <label
+              className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
+                openIsFree ? "border-warning/50 bg-warning/10" : "border-line bg-canvas/40 hover:bg-primary-50/40"
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={openIsFree}
+                onChange={(e) => setOpenIsFree(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0"
+              />
+              <span>
+                <strong className="block text-ink">🎁 Séance libre offerte (gratuite)</strong>
+                <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                  Chaque présence enregistrée sur ce créneau est <strong>offerte</strong> : aucun solde élève
+                  n&apos;est débité, l&apos;école n&apos;encaisse rien et{" "}
+                  <strong>l&apos;enseignant n&apos;est pas rémunéré</strong>. La valeur d&apos;une séance
+                  ({openPrice || 0} DA) reste comptabilisée dans les rapports.
+                </span>
+              </span>
+            </label>
 
             <div>
               <label className="block text-xs font-semibold text-muted mb-1 font-sans">Nom du créneau</label>

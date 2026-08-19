@@ -69,6 +69,8 @@ interface SeanceOption {
   daysLabel: string;
   timeLabel: string;
   periodLabel?: string;
+  /** the whole séance libre timing is offered — every présence on it is free */
+  sessionIsFree: boolean;
 }
 
 const RECEIPT_LABELS = {
@@ -273,6 +275,7 @@ export function IndependentPage() {
           isOpen && s.periodStart && s.periodEnd
             ? `${formatDateFr(s.periodStart)} → ${formatDateFr(s.periodEnd)}`
             : undefined,
+        sessionIsFree: isOpen && !!s.isFree,
       });
     });
 
@@ -1166,7 +1169,7 @@ export function IndependentPage() {
                     return (
                       <button
                         key={opt.key}
-                        onClick={() => { setSelectedItem(opt); setCustomPrice(opt.price); setPaymentValidated(false); }}
+                        onClick={() => { setSelectedItem(opt); setCustomPrice(opt.price); setPaymentValidated(false); setIsFreeSeance(!!opt.sessionIsFree); }}
                         className={`w-full text-start p-2.5 rounded-lg text-xs transition-colors border ${
                           isSel
                             ? "bg-primary/10 border-primary/40 text-ink"
@@ -1180,6 +1183,11 @@ export function IndependentPage() {
                             {isStudentSeance(opt) && (
                               <Badge tone="success" className="ml-1.5 text-[8px] px-1 py-0 align-middle">
                                 Son cours
+                              </Badge>
+                            )}
+                            {opt.sessionIsFree && (
+                              <Badge tone="warning" className="ml-1.5 text-[8px] px-1 py-0 align-middle">
+                                🎁 Offerte
                               </Badge>
                             )}
                           </strong>
@@ -1225,9 +1233,12 @@ export function IndependentPage() {
                 </div>
 
                 {/* Séance offerte: nobody is paid on it — neither the school,
-                    nor the teacher who animates it. */}
+                    nor the teacher who animates it. A créneau flagged « offert »
+                    on the planning forces this on and locks it. */}
                 <label
-                  className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
+                  className={`flex items-start gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
+                    selectedItem.sessionIsFree ? "cursor-not-allowed" : "cursor-pointer"
+                  } ${
                     isFreeSeance
                       ? "border-warning/40 bg-warning/10"
                       : "border-line bg-canvas/30 hover:bg-primary-50/40"
@@ -1236,6 +1247,7 @@ export function IndependentPage() {
                   <input
                     type="checkbox"
                     checked={isFreeSeance}
+                    disabled={selectedItem.sessionIsFree}
                     onChange={(e) => { setIsFreeSeance(e.target.checked); setPaymentValidated(false); }}
                     className="mt-0.5 h-4 w-4 shrink-0"
                   />
@@ -1246,6 +1258,11 @@ export function IndependentPage() {
                       <strong>l&apos;enseignant n&apos;est pas rémunéré</strong> sur cette séance. Sa valeur
                       ({listedPrice} DA) reste comptabilisée dans les rapports généraux.
                     </span>
+                    {selectedItem.sessionIsFree && (
+                      <span className="mt-1 block text-[10px] font-bold text-warning">
+                        🎁 Ce créneau est configuré comme « offert » dans le planning — toute présence y est gratuite.
+                      </span>
+                    )}
                   </span>
                 </label>
 

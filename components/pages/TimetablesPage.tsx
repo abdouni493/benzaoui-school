@@ -14,7 +14,6 @@ import {
   Clock,
   Filter,
   LayoutGrid,
-  MapPin,
   Phone,
   Search,
   Table as TableIcon,
@@ -24,6 +23,7 @@ import {
 } from "lucide-react";
 import type { CoursLevel, Day, ScheduleSession, SchoolClass } from "@/lib/types";
 import { DAYS } from "@/lib/types";
+import { MatiereTimetable } from "@/components/timetable/MatiereTimetable";
 import {
   COURS_LEVELS,
   COURS_LEVEL_LABELS,
@@ -45,16 +45,6 @@ const DAY_SHORT: Record<Day, string> = {
   thursday: "Jeu",
   friday: "Ven",
 };
-
-/** One row of the board: every timing sharing the exact same hours. */
-interface TimeRow {
-  key: string;
-  startTime: string;
-  endTime: string;
-  /** minutes, used by the weekly-volume figures */
-  minutes: number;
-  byDay: Record<Day, ScheduleSession[]>;
-}
 
 function minutesBetween(start: string, end: string): number {
   const [sh, sm] = start.split(":").map(Number);
@@ -110,10 +100,6 @@ export function TimetablesPage() {
   const groupName = (id?: string) => groups.find((g) => g.id === id)?.name ?? "—";
   const salleName = (id?: string) => salles.find((s) => s.id === id)?.name ?? "—";
   const teacherOf = (id: string) => teachers.find((t) => t.id === id);
-  const teacherName = (id: string) => {
-    const t = teacherOf(id);
-    return t ? `${t.firstName} ${t.lastName}` : "—";
-  };
   const classLabelOf = (id?: string) => {
     const c = classes.find((x) => x.id === id);
     if (!c) return "—";
@@ -281,35 +267,9 @@ export function TimetablesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, classes, search, level, year, filiereId, classId, moduleId, kind]);
 
-  /** One row per distinct horaire, chronological — the board's backbone. */
-  const rows = useMemo<TimeRow[]>(() => {
-    const byRange = new Map<string, TimeRow>();
-    filtered.forEach((s) => {
-      const key = `${s.startTime}-${s.endTime}`;
-      let row = byRange.get(key);
-      if (!row) {
-        row = {
-          key,
-          startTime: s.startTime,
-          endTime: s.endTime,
-          minutes: minutesBetween(s.startTime, s.endTime),
-          byDay: {
-            saturday: [], sunday: [], monday: [], tuesday: [],
-            wednesday: [], thursday: [], friday: [],
-          },
-        };
-        byRange.set(key, row);
-      }
-      s.days.forEach((d) => row!.byDay[d].push(s));
-    });
-    return [...byRange.values()].sort(
-      (a, b) => a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime),
-    );
-  }, [filtered]);
-
-  /** Days that actually carry a timing — an empty day column is still drawn,
-   *  the school reads its week as a whole, but the counter tells the truth. */
-  const countForDay = (day: Day) => filtered.filter((s) => s.days.includes(day)).length;
+  /** Board summary figures — the board itself is grouped by matière now. */
+  const distinctModules = new Set(filtered.map((s) => s.moduleId)).size;
+  const distinctHoraires = new Set(filtered.map((s) => `${s.startTime}-${s.endTime}`)).size;
 
   /** Weekly volume: a timing counts once per day it is held on. */
   const weeklyMinutes = filtered.reduce(
@@ -353,22 +313,6 @@ export function TimetablesPage() {
     setModuleId("");
   };
 
-  /** Consistent color per module, so the same matière reads the same all week. */
-  const moduleColor = (mid: string) => {
-    let hash = 0;
-    for (let i = 0; i < mid.length; i++) hash = mid.charCodeAt(i) + ((hash << 5) - hash);
-    const palette = [
-      "border-l-blue-500 bg-blue-50/70 text-blue-900 dark:bg-blue-950/25 dark:text-blue-200",
-      "border-l-emerald-500 bg-emerald-50/70 text-emerald-900 dark:bg-emerald-950/25 dark:text-emerald-200",
-      "border-l-amber-500 bg-amber-50/70 text-amber-900 dark:bg-amber-950/25 dark:text-amber-200",
-      "border-l-rose-500 bg-rose-50/70 text-rose-900 dark:bg-rose-950/25 dark:text-rose-200",
-      "border-l-purple-500 bg-purple-50/70 text-purple-900 dark:bg-purple-950/25 dark:text-purple-200",
-      "border-l-cyan-500 bg-cyan-50/70 text-cyan-900 dark:bg-cyan-950/25 dark:text-cyan-200",
-      "border-l-indigo-500 bg-indigo-50/70 text-indigo-900 dark:bg-indigo-950/25 dark:text-indigo-200",
-    ];
-    return palette[Math.abs(hash) % palette.length];
-  };
-
   const stepButton = (active: boolean) =>
     `rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
       active ? "border-primary bg-primary text-white" : "border-line bg-surface text-ink hover:bg-primary-50"
@@ -407,7 +351,7 @@ export function TimetablesPage() {
                     viewMode === "board" ? "bg-primary text-white" : "text-muted hover:text-ink"
                   }`}
                 >
-                  <TableIcon className="h-3 w-3" /> Tableau
+                  <TableIcon className="h-3 w-3" /> Par matière
                 </button>
                 <button
                   onClick={() => setViewMode("cards")}
@@ -599,7 +543,8 @@ export function TimetablesPage() {
           {/* What the current filters lead to */}
           <div className="flex flex-wrap items-center gap-2 border-t border-line pt-2.5 text-[11px]">
             <Badge tone="primary" className="font-bold">{filtered.length} créneau(x)</Badge>
-            <Badge tone="neutral" className="font-bold">{rows.length} horaire(s) distinct(s)</Badge>
+            <Badge tone="neutral" className="font-bold">{distinctModules} matière(s)</Badge>
+            <Badge tone="neutral" className="font-bold">{distinctHoraires} horaire(s)</Badge>
             <Badge tone="success" className="font-bold">{weeklyHours} h / semaine</Badge>
             <Badge tone="neutral" className="font-bold">{distinctTeachers} enseignant(s)</Badge>
             <Badge tone="neutral" className="font-bold">{distinctSalles} salle(s)</Badge>
@@ -625,84 +570,7 @@ export function TimetablesPage() {
           l&apos;écran <strong className="text-ink">Planner</strong>.
         </div>
       ) : viewMode === "board" ? (
-        <div className="overflow-hidden rounded-2xl border border-line bg-surface">
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1000px] border-collapse text-left text-xs">
-              <thead>
-                <tr className="border-b border-line bg-canvas text-[10px] font-bold uppercase tracking-wider text-muted">
-                  <th className="w-28 p-3">Horaire</th>
-                  {DAYS.map((day) => (
-                    <th key={day} className="p-3 text-center">
-                      <span className="block text-ink">{DAY_LABELS_FR[day]}</span>
-                      <span className="text-[9px] font-semibold normal-case text-muted">
-                        {countForDay(day)} créneau(x)
-                      </span>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <tr key={row.key} className="border-b border-line align-top last:border-0">
-                    <td className="border-e border-line bg-canvas/40 p-3">
-                      <span className="block font-mono text-[11px] font-bold text-ink">{row.startTime}</span>
-                      <span className="block font-mono text-[10px] text-muted">{row.endTime}</span>
-                      <span className="mt-1 block text-[9px] font-semibold uppercase text-muted">
-                        {Math.floor(row.minutes / 60)}h{String(row.minutes % 60).padStart(2, "0")}
-                      </span>
-                    </td>
-                    {DAYS.map((day) => {
-                      const cell = row.byDay[day];
-                      return (
-                        <td key={day} className="p-1.5">
-                          {cell.length === 0 ? (
-                            <div className="flex h-full min-h-[52px] items-center justify-center text-[10px] italic text-muted/60">
-                              —
-                            </div>
-                          ) : (
-                            <div className="space-y-1.5">
-                              {cell.map((s) => (
-                                <button
-                                  key={s.id}
-                                  onClick={() => setSelected(s)}
-                                  className={`w-full space-y-1 rounded-xl border border-line border-l-4 p-2 text-start transition-all hover:shadow-md hover:brightness-[0.98] ${moduleColor(
-                                    s.moduleId,
-                                  )}`}
-                                >
-                                  <strong className="block truncate text-[11px] font-black leading-tight">
-                                    {s.isOpen && <span className="me-1">🎯</span>}
-                                    {sessionTitle(s)}
-                                  </strong>
-                                  <span className="block truncate text-[9px] font-bold opacity-80">
-                                    {s.isOpen ? `Séance libre · ${sessionPrice(s)} DA` : sessionClassesLabel(s)}
-                                  </span>
-                                  <span className="flex items-center gap-1 truncate text-[9px] opacity-90">
-                                    <User className="h-2.5 w-2.5 shrink-0" />
-                                    {teacherName(s.teacherId)}
-                                  </span>
-                                  <span className="flex items-center justify-between gap-1 text-[9px] opacity-90">
-                                    <span className="flex items-center gap-1 truncate">
-                                      <MapPin className="h-2.5 w-2.5 shrink-0" />
-                                      {sessionSallesLabel(s)}
-                                    </span>
-                                    <span className="flex items-center gap-1 truncate">
-                                      <Users className="h-2.5 w-2.5 shrink-0" />
-                                      {sessionGroupsLabel(s)}
-                                    </span>
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <MatiereTimetable sessions={filtered} onSelect={setSelected} />
       ) : (
         /* CARDS VIEW — one card per timing, every detail on its face */
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
