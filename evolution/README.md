@@ -120,16 +120,58 @@ Sans le second, le Funnel ne peut pas servir en HTTPS et Vercel refusera de parl
 
 ### 3. Autoriser le Funnel
 
-Console → **Access controls**, ajouter dans la politique (ou compléter `nodeAttrs` s'il existe) :
+Console → **Access controls**. Le bloc `nodeAttrs` doit être ajouté **à l'intérieur** de la
+politique existante, comme frère de `grants` — et non collé au-dessus d'elle. Coller un second
+objet `{ … }` donne l'erreur `invalid character '{' after top-level value` : le fichier ne peut
+contenir **qu'un seul** objet de haut niveau.
 
-```json
-"nodeAttrs": [
-  { "target": ["autogroup:member"], "attr": ["funnel"] }
-]
+Politique complète, telle qu'elle fonctionne sur le tailnet de l'école :
+
+```jsonc
+{
+  "grants": [
+    {"src": ["*"], "dst": ["*"], "ip": ["*"]},
+  ],
+
+  // C'est CE bloc qui autorise le Funnel.
+  "nodeAttrs": [
+    {
+      "target": ["autogroup:member"],
+      "attr":   ["funnel"],
+    },
+  ],
+
+  "ssh": [
+    {
+      "action": "check",
+      "src":    ["autogroup:member"],
+      "dst":    ["autogroup:self"],
+      "users":  ["autogroup:nonroot", "root"],
+    },
+  ],
+}
 ```
 
-Sans cet attribut, le conteneur démarre mais refuse de publier : la passerelle reste privée et
-Vercel obtient un délai d'attente.
+Les virgules finales et les `//` sont volontaires : ce fichier est du HuJSON, pas du JSON strict.
+Un tailnet récent utilise `grants` ; les anciens exemples à base de `acls` restent valides, mais
+n'ajoutez pas les deux.
+
+> **Piège coûteux — `tailscale funnel status` ment.**
+> Sans cet attribut, le conteneur démarre, applique sa configuration, obtient même son certificat
+> TLS, et affiche fièrement `# Funnel on: https://…`. Cet affichage vient du fichier de
+> configuration **local**, qui s'applique quoi qu'il arrive. Le plan de contrôle, lui, refuse
+> silencieusement de publier l'enregistrement DNS public : l'adresse ne résout nulle part et Vercel
+> obtient un délai d'attente, sans le moindre message d'erreur nulle part.
+>
+> La **seule** vérification qui fasse foi est la liste des capacités réellement accordées :
+>
+> ```powershell
+> docker exec evolution-tailscale tailscale status --json | Select-String "funnel"
+> ```
+>
+> Elle doit contenir `funnel` **et** `funnel-ports?ports=443,8443,10000`. Si elle ne renvoie rien,
+> l'attribut n'est pas accordé — quoi qu'affiche `funnel status`. La politique est prise en compte
+> en quelques secondes, sans redémarrer le conteneur.
 
 ### 4. Générer une clé d'authentification
 
@@ -432,6 +474,7 @@ Un numéro banni par WhatsApp l'est **sans recours**. Utilisez un numéro dédi�
 | Tout marchait, plus rien le lendemain | Le poste s'est mis en veille — lancer `keep-alive.ps1 -Apply` |
 | Plus rien après une coupure de courant | Docker Desktop ne s'est pas relancé — `keep-alive.ps1 -Apply` |
 | L'adresse `.ts.net` a changé | Volume `tailscale_state` perdu : reprendre `TUNNEL_PUBLIC_URL`, `EVOLUTION_BASE_URL`, puis **Initialiser** |
+| `funnel status` dit « on » mais l'adresse ne résout pas | Attribut `funnel` non accordé. Vérifier avec `tailscale status --json`, pas avec `funnel status` (section B, étape 3) |
 | Le Funnel refuse de publier | Attribut `funnel` absent des ACL, ou HTTPS non activé (section B, étapes 2 et 3) |
 | « Clé API refusée » | `EVOLUTION_API_KEY` différent entre Vercel et la passerelle |
 | « Instance introuvable » | Cliquer sur **Initialiser l'instance** dans Paramètres |
