@@ -130,6 +130,9 @@ export function TimetablesPage() {
     return s.openPrice ?? 0;
   };
   const sessionPriceLabel = (s: ScheduleSession) => {
+    // Créneau de séance libre coché « offert » : il n'a pas de tarif du tout,
+    // ni pour l'élève, ni pour l'école, ni pour l'enseignant.
+    if (s.isOpen && s.isFree) return "🎁 Séance offerte — 0 DA";
     const sub = subscriptions.find((su) => su.sessionId === s.id);
     if (sub?.levelPrice) return `${sub.levelPrice} DA / ${sub.periodMonths ?? 0} mois`;
     return `${sessionPrice(s)} DA / séance`;

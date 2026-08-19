@@ -18,10 +18,10 @@ import type { Parent, School, Student } from "@/lib/types";
 const sentAlertKeys = new Set<string>();
 
 /** Envoie l'alerte de solde par WhatsApp via /api/whatsapp/send — le seul chemin
- *  qui détient le jeton d'accès Meta. L'alerte part en MODÈLE approuvé (message
- *  proactif), construit par buildBalanceAlert. Volontairement « fire-and-forget »
- *  et sans jamais lever d'exception : un échec côté Meta ne doit casser ni le
- *  scan ni la transaction déjà écrite. */
+ *  qui détient la clé de la passerelle. L'alerte part en TEXTE, construit par
+ *  buildBalanceAlert. Volontairement « fire-and-forget » et sans jamais lever
+ *  d'exception : une passerelle éteinte ou une session tombée ne doit casser ni
+ *  le scan ni la transaction déjà écrite. */
 async function sendAutoBalanceAlert(opts: {
   student: Student;
   parent?: Parent | null;
@@ -70,11 +70,16 @@ async function sendAutoBalanceAlert(opts: {
 }
 
 /**
- * The single check-in pipeline shared by every entry point — the hardware
- * RFID reader (GlobalRFIDListener) and the manual scanner of the topbar
- * (ScanModal). Both run the same scan_card RPC, the same voice announcement,
- * the same toasts and the same automatic low-balance/debt parent alerts, so
- * a manually typed code behaves exactly like a card swipe.
+ * The single check-in pipeline shared by EVERY entry point — the hardware RFID
+ * reader (GlobalRFIDListener, always listening on every page) and the manual
+ * scanner of the Étudiants screen. All of them run the same scan_card RPC, the
+ * same worker-badge fallback, the same voice announcement, the same toasts and
+ * the same automatic low-balance/debt parent alerts, so a manually typed code
+ * behaves exactly like a card swipe.
+ *
+ * The code is trimmed here as well as server-side, and the RPC matches the card
+ * without regard to case: a code typed « rfid-0010 » reaches the same student as
+ * « RFID-0010 » instead of coming back « carte introuvable ».
  */
 export function useScanProcessor() {
   const { scanCard, scanWorkerCard, students, subscriptions, parents, school, push } = useData();
@@ -82,7 +87,9 @@ export function useScanProcessor() {
   const { addToast } = useToast();
 
   const processScan = useCallback(
-    async (code: string): Promise<ScanResult> => {
+    async (rawCode: string): Promise<ScanResult> => {
+      const code = rawCode.trim();
+      if (!code) return { ok: false, messageKey: "scan.notFound" };
       const result = await scanCard(code);
 
       // Same reader for both populations: a badge unknown to the students
@@ -219,9 +226,16 @@ export function useScanProcessor() {
         // Période gratuite: the presence is written exactly as usual, only the
         // deduction is skipped — so reception sees what was offered, not a bug.
         const isFreePeriod = !!result.free;
-        const freeNote = isFreePeriod
-          ? ` PÉRIODE GRATUITE${result.freePeriodName ? ` « ${result.freePeriodName} »` : ""} : séance offerte, aucun débit sur le solde.`
-          : "";
+        // Deux gratuités distinctes : la PÉRIODE gratuite (toute une classe sur
+        // un intervalle de dates) et le CRÉNEAU de séance libre coché
+        // « offert » à sa création — ni débit élève, ni encaissement école, ni
+        // rémunération enseignant.
+        const isFreeSeance = !!result.freeSeance;
+        const freeNote = isFreeSeance
+          ? " SÉANCE LIBRE OFFERTE : séance offerte, aucun débit sur le solde, aucune rémunération enseignant."
+          : isFreePeriod
+            ? ` PÉRIODE GRATUITE${result.freePeriodName ? ` « ${result.freePeriodName} »` : ""} : séance offerte, aucun débit sur le solde.`
+            : "";
         // Inscription enregistrée avec une date de début future : la présence
         // est écrite exactement comme d'habitude, mais le solde n'est PAS touché
         // tant que l'abonnement n'a pas commencé.
@@ -244,7 +258,7 @@ export function useScanProcessor() {
             ? "Déjà pointé — aucun débit"
             : isDebt
               ? "Présence enregistrée — SOLDE EN DETTE"
-              : isFreePeriod
+              : isFreePeriod || isFreeSeance
                 ? "Présence Enregistrée — GRATUIT"
                 : isPreStart
                   ? "Présence Enregistrée — AVANT LE DÉBUT (aucun débit)"
@@ -263,7 +277,11 @@ export function useScanProcessor() {
           newBalance: result.newBalance,
           autoSentAlert,
           waived: result.waived,
-          freePeriodName: isFreePeriod ? result.freePeriodName ?? "période en cours" : undefined,
+          freePeriodName: isFreeSeance
+            ? "séance libre offerte"
+            : isFreePeriod
+              ? result.freePeriodName ?? "période en cours"
+              : undefined,
         });
       } else {
         // Show failure toast — surface the exact reason so reception sees why

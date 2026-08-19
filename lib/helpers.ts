@@ -299,6 +299,21 @@ export function addMonths(dateStr: string, months: number): string {
   return target.toLocaleDateString("fr-CA");
 }
 
+/**
+ * End date of an enrollment, or `undefined` when it never expires.
+ *
+ * Only a formation that declares a real duration gets one. A duration of 0 (or
+ * none at all) used to produce `addMonths(start, 0)` — an expiry landing on the
+ * very start date, i.e. an inscription born expired, whose card was refused
+ * with « abonnement expiré » from the next day on. No duration now means no
+ * expiry at all, which is what an open-ended cours enrollment is.
+ */
+export function enrollmentExpiry(startDate: string, periodMonths?: number): string | undefined {
+  const months = Math.floor(periodMonths ?? 0);
+  if (!startDate || months <= 0) return undefined;
+  return addMonths(startDate, months);
+}
+
 /** Whole days from today (local) until a YYYY-MM-DD date. Negative = already past. */
 export function daysUntil(dateStr: string): number {
   const now = new Date();

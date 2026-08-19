@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { createClient } from "@/lib/supabase/client";
+import { useToast } from "@/lib/store/toast";
 import type {
   AbsencePenalty,
   Announcement,
@@ -542,6 +543,60 @@ const schoolMapper = makeMapper<School>([
  *  through /api/admin/users and deletion must remove the auth user too. */
 const AUTH_LINKED_KEYS = new Set(["students", "teachers", "parents", "reception"]);
 
+// ---- Écritures tolérantes au schéma ----------------------------------------
+// PostgREST refuse la requête ENTIÈRE dès qu'une colonne lui est inconnue :
+// « Could not find the 'is_free' column of 'sessions' in the schema cache ».
+// Une migration pas encore passée faisait donc échouer l'enregistrement complet
+// d'un créneau — qui restait affiché puis disparaissait au refetch suivant.
+// On retire la colonne fautive et on réessaie : la ligne est écrite avec ce que
+// la base connaît, au lieu de n'être écrite nulle part.
+
+/** Nom de la colonne inconnue, quand c'est bien de ça qu'il s'agit. */
+export function unknownColumnOf(message: string): string | null {
+  const m = /Could not find the '([^']+)' column/i.exec(message);
+  return m ? m[1] : null;
+}
+
+type WriteRun = (row: Record<string, unknown>) => PromiseLike<{ error: { message: string } | null }>;
+
+/**
+ * Lance l'écriture, en abandonnant une à une les colonnes que la base ne
+ * connaît pas encore. Renvoie `null` si la ligne est passée, sinon le message
+ * d'erreur final.
+ */
+async function writeWithSchemaFallback(
+  row: Record<string, unknown>,
+  run: WriteRun,
+): Promise<string | null> {
+  let patch = { ...row };
+  // Autant de tentatives que de colonnes, jamais plus : pas de boucle infinie.
+  for (let attempt = 0; attempt <= Object.keys(row).length; attempt++) {
+    const { error } = await run(patch);
+    if (!error) return null;
+
+    const missing = unknownColumnOf(error.message);
+    if (!missing || !(missing in patch)) return error.message;
+
+    console.warn(
+      `[db] colonne « ${missing} » absente de la base : écriture relancée sans elle. ` +
+        "Passez la migration correspondante depuis supabase/migrations/.",
+    );
+    delete patch[missing];
+    if (Object.keys(patch).length === 0) return error.message;
+  }
+  return "écriture refusée";
+}
+
+/** Une écriture refusée doit se VOIR : sans ça, la ligne semble enregistrée
+ *  jusqu'au prochain rechargement, où elle disparaît sans explication. */
+function reportWriteFailure(table: string, message: string): void {
+  useToast.getState().addToast({
+    type: "danger",
+    title: "Enregistrement refusé",
+    message: `La base a refusé l'écriture dans « ${table} » : ${message}. La modification n'a PAS été enregistrée.`,
+  });
+}
+
 export interface ScanResult {
   ok: boolean;
   studentId?: string;
@@ -570,10 +625,15 @@ export interface ScanResult {
   otherGroup?: boolean;
   /** the group he is actually enrolled in (only set when otherGroup) */
   ownGroupName?: string;
-  /** a "période gratuite" covered the séance: presence written, balance intact */
+  /** the séance was offered: presence written, balance intact. Set both by a
+   *  "période gratuite" and by a séance libre créneau flagged as offered. */
   free?: boolean;
   /** label of that free period */
   freePeriodName?: string;
+  /** the CRÉNEAU itself is a "séance libre offerte" (sessions.is_free): nothing
+   *  is debited, nothing is cashed by the school, and the teacher earns nothing
+   *  on it. Always comes with `free: true`. */
+  freeSeance?: boolean;
   /** the séance happened BEFORE the enrollment's start date: presence written,
    *  balance strictly untouched */
   preStart?: boolean;
@@ -744,14 +804,25 @@ export const useData = create<DataStore>((set, get) => ({
     if (data) set({ school: schoolMapper.fromRow(data) });
   },
 
+  // A refetch must never DESTROY what the screen already holds. A single table
+  // that answers with an error (network blip, RLS, a migration not applied yet)
+  // used to be replaced by an empty array — which is what made a subscription
+  // just saved "disappear again" a moment later, together with every timing.
+  // A failed table now keeps the rows already loaded.
   fetchAll: async () => {
     const supabase = createClient();
     const keys = Object.keys(TABLES) as Array<keyof typeof TABLES>;
+    const before = get();
     const results = await Promise.all(
       keys.map(async (key) => {
         const cfg = TABLES[key];
         const { data, error } = await supabase.from(cfg.table).select(cfg.select);
-        if (error || !data) return [key, []] as const;
+        if (error || !data) {
+          console.error(
+            `Failed to load ${cfg.table}: ${error?.message ?? "no data"} — les lignes déjà chargées sont conservées.`,
+          );
+          return [key, (before[key] as unknown[]) ?? []] as const;
+        }
         return [key, data.map(cfg.fromRow)] as const;
       }),
     );
@@ -1074,6 +1145,10 @@ export const useData = create<DataStore>((set, get) => ({
     return res;
   },
 
+  // The row is added locally first (so the screen answers instantly), then
+  // written. If the write is REFUSED, the optimistic row is taken back out:
+  // leaving it on screen was the whole reason a créneau or a subscription
+  // looked saved and then vanished on the next refetch.
   push: (key, item) => {
     set((state) => ({
       [key]: [...(state[key] as unknown[]), item],
@@ -1083,8 +1158,18 @@ export const useData = create<DataStore>((set, get) => ({
 
     const cfg = TABLES[key as Exclude<keyof Database, "school">];
     const supabase = createClient();
-    supabase.from(cfg.table).insert(cfg.toRow(item)).then(({ error }) => {
-      if (error) console.error(`Failed to insert into ${cfg.table}:`, error.message);
+    void writeWithSchemaFallback(cfg.toRow(item), (row) =>
+      supabase.from(cfg.table).insert(row),
+    ).then((error) => {
+      if (!error) return;
+      console.error(`Failed to insert into ${cfg.table}:`, error);
+      // Rollback: what the database refused must not linger on screen.
+      const id = (item as { id?: string }).id;
+      if (id === undefined) return;
+      set((state) => ({
+        [key]: (state[key] as Array<{ id: string }>).filter((x) => x.id !== id),
+      }) as Partial<DataStore>);
+      reportWriteFailure(cfg.table, error);
     });
   },
 
@@ -1111,44 +1196,76 @@ export const useData = create<DataStore>((set, get) => ({
         (sid) => dates[sid]?.subscribedAt || dates[sid]?.startDate || dates[sid]?.expiryDate,
       );
       const hasDiscounts = ids.some((sid) => (discounts[sid]?.value ?? 0) > 0);
-      supabase
-        .from("student_subscriptions")
-        .delete()
-        .eq("student_id", id)
-        .then(() => {
-          if (ids.length) {
-            supabase
-              .from("student_subscriptions")
-              .insert(
-                ids.map((subscription_id) => {
-                  // Only send the optional columns when they carry a value, so
-                  // cours-only enrollments still work before the migrations.
-                  const row: Record<string, unknown> = { student_id: id, subscription_id };
-                  if (hasDates) {
-                    row.subscribed_at = dates[subscription_id]?.subscribedAt ?? null;
-                    row.start_date = dates[subscription_id]?.startDate ?? null;
-                    row.expiry_date = dates[subscription_id]?.expiryDate ?? null;
-                  }
-                  if (hasDiscounts) {
-                    const d = discounts[subscription_id];
-                    row.discount_type = d && d.value > 0 ? d.type : null;
-                    row.discount_value = d && d.value > 0 ? d.value : 0;
-                  }
-                  return row;
-                }),
-              )
-              .then(({ error }) => {
-                if (error) console.error("Failed to sync student_subscriptions:", error.message);
-              });
+
+      // Les inscriptions sont réécrites en bloc (delete puis insert). Si
+      // l'insert échoue en silence, l'élève ressort SANS AUCUNE inscription au
+      // rechargement suivant, alors que l'écran affichait encore les siennes.
+      // On ne supprime donc l'ancien jeu que si le nouveau passe, et un échec
+      // est annoncé au lieu d'être avalé.
+      void (async () => {
+        const rows = ids.map((subscription_id) => {
+          // Only send the optional columns when they carry a value, so
+          // cours-only enrollments still work before the migrations.
+          const row: Record<string, unknown> = { student_id: id, subscription_id };
+          if (hasDates) {
+            row.subscribed_at = dates[subscription_id]?.subscribedAt ?? null;
+            row.start_date = dates[subscription_id]?.startDate ?? null;
+            row.expiry_date = dates[subscription_id]?.expiryDate ?? null;
           }
+          if (hasDiscounts) {
+            const d = discounts[subscription_id];
+            row.discount_type = d && d.value > 0 ? d.type : null;
+            row.discount_value = d && d.value > 0 ? d.value : 0;
+          }
+          return row;
         });
+
+        const { error: delError } = await supabase
+          .from("student_subscriptions")
+          .delete()
+          .eq("student_id", id);
+        if (delError) {
+          console.error("Failed to clear student_subscriptions:", delError.message);
+          reportWriteFailure("student_subscriptions", delError.message);
+          return;
+        }
+
+        if (rows.length === 0) return;
+
+        // Les colonnes optionnelles (dates, réductions) peuvent manquer si une
+        // migration n'est pas passée : on réessaie sans elles plutôt que de
+        // perdre les inscriptions.
+        let payload = rows;
+        for (let attempt = 0; attempt <= 6; attempt++) {
+          const { error } = await supabase.from("student_subscriptions").insert(payload);
+          if (!error) return;
+          const missing = unknownColumnOf(error.message);
+          if (!missing || !(missing in payload[0])) {
+            console.error("Failed to sync student_subscriptions:", error.message);
+            reportWriteFailure("student_subscriptions", error.message);
+            return;
+          }
+          console.warn(
+            `[db] colonne « ${missing} » absente de student_subscriptions : inscriptions réécrites sans elle.`,
+          );
+          payload = payload.map((r) => {
+            const next = { ...r };
+            delete next[missing];
+            return next;
+          });
+        }
+      })();
     }
 
     const cfg = TABLES[key as Exclude<keyof Database, "school">];
     const row = cfg.toRow(updatedFields);
     if (Object.keys(row).length === 0) return;
-    supabase.from(cfg.table).update(row).eq("id", id).then(({ error }) => {
-      if (error) console.error(`Failed to update ${cfg.table}:`, error.message);
+    void writeWithSchemaFallback(row, (patch) =>
+      supabase.from(cfg.table).update(patch).eq("id", id),
+    ).then((error) => {
+      if (!error) return;
+      console.error(`Failed to update ${cfg.table}:`, error);
+      reportWriteFailure(cfg.table, error);
     });
   },
 

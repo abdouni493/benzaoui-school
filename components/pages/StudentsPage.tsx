@@ -47,11 +47,11 @@ import type {
   BalanceTxType,
 } from "@/lib/types";
 import {
-  addMonths,
   classCascadeLabel,
   courseKeyOf,
   daysUntil,
   deskPaymentFor,
+  enrollmentExpiry,
   formatDateFr,
   formatDays,
   matchesAllWords,
@@ -66,7 +66,7 @@ import {
 import { useSettings } from "@/lib/store/settings";
 import { printHtmlDocument } from "@/lib/print";
 import { buildStudentPaymentsReport } from "@/lib/reports/studentPayments";
-import { speakMessage, speechCaseForScan } from "@/lib/speech";
+import { useScanProcessor } from "@/lib/useScanProcessor";
 import { useToast } from "@/lib/store/toast";
 import {
   WhatsAppMessageModal,
@@ -87,6 +87,11 @@ import {
  *  connecter à l'application : l'adresse est fabriquée, jamais une vraie boîte
  *  mail, d'où un domaine unique pour toute l'école. */
 const PORTAL_EMAIL_DOMAIN = "benzaoui.com";
+
+/** Destinataires par appel à /api/whatsapp/send. La route refuse au-delà : elle
+ *  temporise 3 à 7 s entre deux messages pour protéger le numéro WhatsApp de
+ *  l'école, et doit rendre la main avant la limite d'exécution de Vercel. */
+const WA_BATCH_SIZE = 8;
 
 /** Les trois écrans qui touchent au dossier d'un élève. « Ajouter un étudiant »
  *  et « Modifier l'étudiant » affichent exactement les mêmes blocs ; l'écran
@@ -126,7 +131,6 @@ export function StudentsPage() {
     payDebt,
     updateBalanceTx,
     deleteBalanceTx,
-    scanCard,
     cancelAttendance,
     updateAttendance,
     deleteAbsencePenalty,
@@ -135,6 +139,10 @@ export function StudentsPage() {
 
   const { language, autoSendWhatsapp, autoSendEmail, setAutoSendWhatsapp, setAutoSendEmail } = useSettings();
   const { addToast } = useToast();
+  // Le scan de cette page passe par EXACTEMENT le même pipeline que le lecteur
+  // physique (GlobalRFIDListener) : RPC scan_card, repli sur le badge
+  // travailleur, annonce vocale, toasts et alertes WhatsApp automatiques.
+  const processScan = useScanProcessor();
 
   // Search & Filtering
   const [searchQuery, setSearchQuery] = useState("");
@@ -185,6 +193,9 @@ export function StudentsPage() {
   // first render, and "fee1" may well be the one left at 0); `null` = the desk
   // said "aucun frais" out loud.
   const [createFeeKey, setCreateFeeKey] = useState<RegistrationFeeKey | null | undefined>(undefined);
+  /** La réception a choisi le tarif À LA MAIN : plus rien ne le change ensuite
+   *  (ni la règle « 3e année secondaire », ni un changement de scolarité). */
+  const [createFeeTouched, setCreateFeeTouched] = useState(false);
   const [createFeePayNow, setCreateFeePayNow] = useState(false);
 
   // Form: same choice on the EDIT screen, except that a student already carries
@@ -243,14 +254,20 @@ export function StudentsPage() {
   // Active overlay actions index
   const [overlayStudentId, setOverlayStudentId] = useState<string | null>(null);
 
-  // Scanner state
+  // Scanner state — le verdict détaillé affiché sous le champ. Le pipeline
+  // partagé (useScanProcessor) s'occupe du reste : voix, toasts, alertes.
   const [scanRfidInput, setScanRfidInput] = useState("");
+  const [scanBusy, setScanBusy] = useState(false);
   const [scanResult, setScanResult] = useState<{
     ok: boolean;
     studentName?: string;
     cost?: number;
+    waived?: number;
     newBalance?: number;
+    session?: string;
     msg?: string;
+    /** verdict neutre (ni succès ni échec) : déjà pointé, badge travailleur… */
+    neutral?: boolean;
   } | null>(null);
 
   // Tab state in Details modal
@@ -523,9 +540,15 @@ export function StudentsPage() {
       resetForm();
 
       const settled = settleRegistrationNow && !topupError;
+      // Alarme : la fiche part du guichet avec une inscription non réglée.
+      const unpaidRegistration = registrationDue > 0 && !settled;
       addToast({
-        type: topupError ? "warning" : "success",
-        title: topupError ? "Étudiant créé — versement en échec" : "Étudiant créé",
+        type: topupError || unpaidRegistration ? "warning" : "success",
+        title: topupError
+          ? "Étudiant créé — versement en échec"
+          : unpaidRegistration
+            ? "⚠️ Étudiant créé — FRAIS D'INSCRIPTION NON PAYÉS"
+            : "Étudiant créé",
         message: [
           `${studentName} a été enregistré.`,
           topupError
@@ -537,7 +560,7 @@ export function StudentsPage() {
           registrationDue > 0
             ? settled
               ? `${registrationLabel} : ${registrationDue} DA encaissés.`
-              : `${registrationLabel} : ${registrationDue} DA à régler.`
+              : `${registrationLabel} : ${registrationDue} DA RESTENT DUS — sa fiche est signalée « inscription impayée » jusqu'au règlement.`
             : "",
         ]
           .filter(Boolean)
@@ -867,37 +890,99 @@ export function StudentsPage() {
     closeAttModals();
   };
 
+  /**
+   * Scan depuis l'écran Étudiants.
+   *
+   * Il ne fait PLUS son propre appel RPC : il délègue à `processScan`, le
+   * pipeline unique partagé avec le lecteur physique. Il en tire donc, sans
+   * duplication, le repli sur le badge travailleur, l'annonce vocale, les
+   * toasts et les alertes WhatsApp automatiques — puis il affiche en plus son
+   * verdict détaillé sous le champ.
+   *
+   * Le code est normalisé (espaces retirés) avant l'envoi : un code collé ou
+   * saisi avec une espace parasite ne doit plus répondre « carte introuvable ».
+   */
   const handleScanCard = async () => {
-    if (!scanRfidInput) return;
-    const res = await scanCard(scanRfidInput);
-    const matchedStu = students.find((s) => s.rfid === scanRfidInput || s.id === scanRfidInput);
+    const code = scanRfidInput.trim();
+    if (!code || scanBusy) return;
 
-    // Voice verdict (good / low / expired) once the check-in RPC answered.
-    const speechCase = speechCaseForScan(res);
-    if (speechCase) {
-      speakMessage(speechCase, matchedStu ? `${matchedStu.firstName} ${matchedStu.lastName}` : "", language);
+    setScanBusy(true);
+    let res;
+    try {
+      res = await processScan(code);
+    } finally {
+      setScanBusy(false);
     }
 
-    if (res.ok && matchedStu) {
-      const seance = res.moduleName
-        ? ` — ${res.moduleName}${res.groupName ? ` (${res.groupName})` : ""}${res.sessionStart ? ` (${res.sessionStart} - ${res.sessionEnd})` : ""}`
-        : "";
-      // Attended another group of the same cours: allowed, billed normally.
+    // Le badge a été reconnu comme celui d'un TRAVAILLEUR (pointage) : le
+    // pipeline a déjà tout fait, on se contente de le dire ici aussi.
+    if (res.messageKey.startsWith("worker.")) {
+      const workerMsgs: Record<string, string> = {
+        "worker.clockIn": "Badge travailleur — arrivée pointée.",
+        "worker.clockOut": "Badge travailleur — départ pointé, journée clôturée.",
+        "worker.alreadyClosed": "Badge travailleur — journée déjà clôturée.",
+        "worker.frozen": "Badge travailleur — journée gelée, corrigez l'heure de fin sur sa fiche.",
+      };
+      setScanResult({
+        ok: res.ok,
+        neutral: true,
+        studentName: "Badge travailleur",
+        msg: workerMsgs[res.messageKey] ?? "Badge travailleur traité.",
+      });
+      setScanRfidInput("");
+      return;
+    }
+
+    // `students` du store peut dater d'avant le refetch déclenché par le scan :
+    // on résout l'élève par l'id renvoyé par le RPC en priorité, puis par son
+    // code de carte (comparaison insensible à la casse).
+    const matchedStu =
+      (res.studentId ? students.find((s) => s.id === res.studentId) : undefined) ??
+      students.find(
+        (s) => (s.rfid ?? "").trim().toLowerCase() === code.toLowerCase() || s.id === code,
+      );
+    const who = matchedStu ? `${matchedStu.firstName} ${matchedStu.lastName}` : undefined;
+
+    const seance = res.moduleName
+      ? `${res.moduleName}${res.groupName ? ` (${res.groupName})` : ""}${
+          res.sessionStart ? ` ${res.sessionStart}-${res.sessionEnd}` : ""
+        }`
+      : undefined;
+
+    if (res.ok) {
+      // Rattrapage : présent sur un autre groupe du même cours — accepté.
       const substitution = res.otherGroup
-        ? ` Rattrapage sur le groupe ${res.groupName ?? "suivi"}${res.ownGroupName ? ` (inscrit en ${res.ownGroupName})` : ""}.`
+        ? ` Rattrapage sur le groupe ${res.groupName ?? "suivi"}${
+            res.ownGroupName ? ` (inscrit en ${res.ownGroupName})` : ""
+          }.`
         : "";
+      // Séance offerte : période gratuite, créneau de séance libre offert, ou
+      // abonnement pas encore commencé — présence écrite, solde intact.
+      const offered = res.free
+        ? ` Séance OFFERTE${res.freePeriodName ? ` (${res.freePeriodName})` : ""} : aucun débit.`
+        : res.preStart
+          ? " Abonnement pas encore commencé : séance offerte, aucun débit."
+          : "";
+      const already = res.messageKey === "scan.alreadyPresent";
+
       setScanResult({
         ok: true,
-        studentName: `${matchedStu.firstName} ${matchedStu.lastName}`,
+        neutral: already,
+        studentName: who ?? "Élève",
         cost: res.cost,
+        waived: res.waived,
         newBalance: res.newBalance,
-        msg: (res.messageKey === "scan.alreadyPresent"
-          ? "Élève déjà marqué présent pour cette séance aujourd'hui (aucun débit)."
-          : res.messageKey === "scan.successDebt"
-          ? `Présence enregistrée${seance} — ATTENTION: le solde est passé en DETTE.`
-          : res.messageKey === "scan.successLate"
-          ? `Présence enregistrée (en retard)${seance}.`
-          : `Présence validée et solde débité${seance} !`) + substitution,
+        session: seance,
+        msg:
+          (already
+            ? "Élève déjà marqué présent sur cette séance aujourd'hui — aucun débit."
+            : res.messageKey === "scan.successLate"
+              ? "Présence enregistrée EN RETARD."
+              : res.debt
+                ? "Présence enregistrée — ATTENTION, le solde est passé en DETTE."
+                : "Présence validée.") +
+          substitution +
+          offered,
       });
     } else {
       const failureMsgs: Record<string, string> = {
@@ -909,15 +994,20 @@ export function StudentsPage() {
         "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui.",
         "scan.notEligible": "La séance en cours est d'un autre niveau ou d'un module non affecté à cet élève.",
         "scan.expired": "Solde épuisé — entrée refusée (aucune présence, aucune dette créée).",
-        "scan.cooldown": "Déjà enregistré sur cette séance — passage ignoré (moins de 30 min depuis le dernier scan sur ce créneau).",
         "scan.debtBlocked": "Élève EN DETTE — entrée refusée. Veuillez régler la dette.",
-        "scan.notFound": "Carte introuvable.",
-        "scan.error": "Erreur lors du scan — réessayez.",
+        "scan.notFound": `Aucun élève ni travailleur ne porte la carte « ${code} ». Vérifiez le code sur sa fiche.`,
+        "scan.error": "Le serveur n'a pas répondu au scan — vérifiez la connexion et réessayez.",
       };
+      // Le double passage n'est PAS un échec : la présence est déjà écrite.
+      const isCooldown = res.messageKey === "scan.cooldown";
       setScanResult({
         ok: false,
-        studentName: matchedStu ? `${matchedStu.firstName} ${matchedStu.lastName}` : "Étudiant inconnu",
-        msg: failureMsgs[res.messageKey] ?? "Carte introuvable.",
+        neutral: isCooldown,
+        studentName: who ?? "Carte inconnue",
+        session: seance,
+        msg: isCooldown
+          ? "Passage ignoré : moins de 30 min depuis le dernier scan accepté sur ce créneau. La présence précédente reste enregistrée, aucun second débit."
+          : failureMsgs[res.messageKey] ?? "Carte refusée — raison inconnue.",
       });
     }
     setScanRfidInput("");
@@ -948,6 +1038,7 @@ export function StudentsPage() {
     setInitialTopup(0);
     setInitialTopupDesc("Premier versement");
     setCreateFeeKey(undefined);
+    setCreateFeeTouched(false);
     setCreateFeePayNow(false);
     setEditFeeKey("current");
     setEditFeePayNow(false);
@@ -1065,8 +1156,13 @@ export function StudentsPage() {
 
   /** Alertes de solde en lot : notification dans l'application pour tous, plus
    *  un WhatsApp personnalisé par élève — au parent rattaché s'il en a un,
-   *  sinon à l'élève lui-même. Un seul appel API pour que la passerelle garde
-   *  l'espacement entre les messages. */
+   *  sinon à l'élève lui-même.
+   *
+   *  L'envoi est découpé en lots de WA_BATCH_SIZE et les lots partent
+   *  SÉQUENTIELLEMENT : la route temporise 3 à 7 s entre deux messages pour
+   *  protéger le numéro de l'école du bannissement, et doit rendre la main
+   *  avant la limite d'exécution de Vercel. Paralléliser annulerait le
+   *  bénéfice de cette temporisation. */
   const handleSendLowBalanceAlerts = async () => {
     const selected = selectedAlertStudentIds
       .map((id) => students.find((s) => s.id === id))
@@ -1089,11 +1185,10 @@ export function StudentsPage() {
     });
 
     const msgLang = language === "ar" ? "ar" : "fr";
-    // Même résolution destinataire + modèle que l'alerte automatique du scan
+    // Même résolution destinataire + texte que l'alerte automatique du scan
     // (lib/whatsapp/alert) : le parent rattaché s'il est joignable, sinon
     // l'élève. `low: true` — ce bouton EST l'alerte « solde faible », donc un
-    // solde positif encore faible part en modèle « solde bientôt épuisé » plutôt
-    // qu'en message libre : un message proactif exige un modèle approuvé par Meta.
+    // solde positif encore faible part avec le texte « solde bientôt épuisé ».
     const waRecipients = selected.flatMap((stu) => {
       const parent = parents.find((p) => p.id === stu.parentId);
       const payload = buildBalanceAlert({
@@ -1117,24 +1212,44 @@ export function StudentsPage() {
       return;
     }
 
-    try {
-      const response = await fetch("/api/whatsapp/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recipients: waRecipients }),
-      });
-      const payload = await response.json();
+    let sent = 0;
+    let failed = 0;
+    const queue = [...waRecipients];
 
-      if (!response.ok) {
-        addToast({
-          type: "danger",
-          title: "WhatsApp indisponible",
-          message: `${selected.length} notification(s) créée(s) dans l'application. Envoi WhatsApp impossible : ${payload?.error ?? "erreur inconnue"}`,
+    try {
+      while (queue.length > 0) {
+        const batch = queue.splice(0, WA_BATCH_SIZE);
+
+        const response = await fetch("/api/whatsapp/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ recipients: batch }),
         });
-        return;
+        const payload = await response.json();
+
+        if (!response.ok) {
+          addToast({
+            type: "danger",
+            title: "WhatsApp indisponible",
+            message: `${selected.length} notification(s) créée(s) dans l'application. ${sent} message(s) envoyé(s) avant l'interruption. Envoi WhatsApp impossible : ${payload?.error ?? "erreur inconnue"}`,
+          });
+          return;
+        }
+
+        const batchResult = payload as SendResponse;
+        if (batchResult.results.length === 0) break; // garde-fou anti-boucle
+
+        sent += batchResult.sent;
+        failed += batchResult.failed;
+
+        // Destinataires que la route n'a pas eu le temps de traiter avant sa
+        // limite d'exécution : ils repassent en tête de file.
+        if (batchResult.remaining?.length) {
+          const notDone = batch.filter((r) => batchResult.remaining!.includes(r.phone));
+          queue.unshift(...notDone);
+        }
       }
 
-      const { sent, failed } = payload as SendResponse;
       addToast({
         type: failed > 0 ? "warning" : "success",
         title: "Alertes envoyées",
@@ -1148,7 +1263,7 @@ export function StudentsPage() {
       addToast({
         type: "danger",
         title: "WhatsApp indisponible",
-        message: `${selected.length} notification(s) créée(s) dans l'application, mais le serveur n'a pas répondu pour l'envoi WhatsApp.`,
+        message: `${selected.length} notification(s) créée(s) dans l'application, mais la passerelle n'a pas répondu pour l'envoi WhatsApp.`,
       });
     } finally {
       setSendingAlerts(false);
@@ -1244,20 +1359,22 @@ export function StudentsPage() {
 
   /** Enrollment dates for EVERY module: the registration day (informative) and
    *  the day billing opens — a séance attended before it is recorded but never
-   *  charged. Formations additionally get an expiry derived from their period. */
+   *  charged. Formations additionally get an expiry derived from their period.
+   *
+   *  An expiry is written ONLY when the formation actually declares a duration.
+   *  A formation left without `periodMonths` used to get `addMonths(start, 0)`,
+   *  i.e. an expiry on its own start date: the inscription was born expired and
+   *  the card was refused with « abonnement expiré » from the next day on. */
   const buildEnrollmentDates = (ids: string[]) => {
     const subscriptionDates: Record<string, SubscriptionDates> = {};
     for (const subId of ids) {
       // Stages ("coursework") are not subscriptions — they carry no dates.
       if (!subscriptions.some((s) => s.id === subId)) continue;
       const startDate = assignStartDates[subId] || todayIso();
-      const formationSub = getFormationSub(subId);
       subscriptionDates[subId] = {
         subscribedAt: assignSubDates[subId] || todayIso(),
         startDate,
-        expiryDate: formationSub
-          ? addMonths(startDate, formationSub.periodMonths ?? 0)
-          : undefined,
+        expiryDate: enrollmentExpiry(startDate, getFormationSub(subId)?.periodMonths),
       };
     }
     return subscriptionDates;
@@ -1471,12 +1588,42 @@ export function StudentsPage() {
   // uniques »). Reception picks the one this student pays — a student on
   // "études gratuites" never pays any — and says whether he settles it now.
   const createFeeOptions = registrationFeeOptions(school);
+
+  /** The class one créneau belongs to (a séance libre can cover several: the
+   *  first one it names is the one that identifies its schooling). */
+  const classOfSubscription = (subId: string): SchoolClass | undefined => {
+    const sub = subscriptions.find((su) => su.id === subId);
+    const sess = sub ? sessions.find((se) => se.id === sub.sessionId) : undefined;
+    if (!sess) return undefined;
+    const ids = sess.classIds?.length ? sess.classIds : [sess.classId];
+    return classes.find((c) => ids.includes(c.id));
+  };
+
+  const isThirdYearSecondaryClass = (cls?: SchoolClass) =>
+    cls?.type === "cours" && cls.coursLevel === "lycee" && cls.year === "3eme";
+
+  /** L'étudiant est en 3e année secondaire — soit parce que la cascade de
+   *  l'écran pointe dessus, soit parce qu'un créneau déjà sélectionné en vient. */
+  const isThirdYearSecondary =
+    (createLevel === "lycee" && createYear === "3eme") ||
+    selectedAssignIds.some((id) => isThirdYearSecondaryClass(classOfSubscription(id)));
+
+  const hasSecondFee = createFeeOptions.some((o) => o.key === "fee2");
+
+  // Règle de l'école : une 3e année secondaire relève du frais d'inscription
+  // de TYPE 2. Ce n'est qu'une PRÉ-sélection : dès que la réception choisit un
+  // tarif elle-même (`createFeeTouched`), son choix l'emporte et plus rien ne
+  // le change — ni un ajout de créneau, ni un changement de scolarité.
+  const autoFeeKey: RegistrationFeeKey | undefined =
+    isThirdYearSecondary && hasSecondFee ? "fee2" : undefined;
+  const effectiveCreateFeeKey = createFeeTouched ? createFeeKey : autoFeeKey;
+
   /** The picked tariff, or undefined: « aucun frais », none offered, or free. */
   const createFeeOption = isFree
     ? undefined
-    : createFeeKey === undefined
+    : effectiveCreateFeeKey === undefined
       ? createFeeOptions[0]
-      : createFeeOptions.find((o) => o.key === createFeeKey);
+      : createFeeOptions.find((o) => o.key === effectiveCreateFeeKey);
   const createRegistrationFee = createFeeOption?.amount ?? 0;
   /** Settling only makes sense against a real fee. */
   const settleRegistrationOnCreate = createFeePayNow && createRegistrationFee > 0;
@@ -1639,11 +1786,18 @@ export function StudentsPage() {
     const payNow = editing ? editFeePayNow : createFeePayNow;
     const setPayNow = editing ? setEditFeePayNow : setCreateFeePayNow;
     const settles = editing ? settleRegistrationOnEdit : settleRegistrationOnCreate;
-    const pickKey = (key: RegistrationFeeKey | null) =>
-      editing ? setEditFeeKey(key) : setCreateFeeKey(key);
+    const pickKey = (key: RegistrationFeeKey | null) => {
+      if (editing) {
+        setEditFeeKey(key);
+        return;
+      }
+      // Choix explicite : il fait foi jusqu'à la fin de la création.
+      setCreateFeeTouched(true);
+      setCreateFeeKey(key);
+    };
     const isActiveKey = (key: RegistrationFeeKey) =>
       editing ? editFeeKey === key : createFeeOption?.key === key;
-    const noneActive = editing ? editFeeKey === null : !createFeeOption;
+    const noneActive = editing ? editFeeKey === null : !isFree && !createFeeOption;
     // A due amount matching none of the school's tariffs (an older file, or a
     // tariff changed since) stays offered as-is: saving must never re-price an
     // inscription the desk did not touch.
@@ -1792,6 +1946,28 @@ export function StudentsPage() {
                 </p>
               )}
             </div>
+
+            {/* ALARME : les frais d'inscription ne sont PAS réglés. Elle reste
+                affichée tant que la réception n'a pas coché « payé », pour
+                qu'aucune fiche ne parte du guichet avec une inscription
+                impayée sans que ce soit vu. */}
+            {fee > 0 && !payNow && (
+              <div className="flex items-start gap-2.5 rounded-xl border-2 border-danger bg-danger/10 p-3">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 animate-pulse text-danger" />
+                <div className="text-[11px] leading-relaxed">
+                  <strong className="block text-xs text-danger">
+                    ⚠️ Frais d&apos;inscription NON PAYÉS — {fee} DA
+                  </strong>
+                  <span className="text-muted">
+                    {feeLabel} reste{feeLabel.endsWith("s") ? "nt" : ""} dû à l&apos;école.
+                    L&apos;étudiant sera signalé <strong className="text-danger">« inscription impayée »</strong>{" "}
+                    sur sa fiche et dans la liste, jusqu&apos;à son règlement depuis
+                    «&nbsp;Recharge&nbsp;». Cochez «&nbsp;Oui, payé maintenant&nbsp;» s&apos;il règle au
+                    guichet.
+                  </span>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -3113,8 +3289,18 @@ export function StudentsPage() {
                         {stu.firstName.substring(0, 1)}{stu.lastName.substring(0, 1)}
                       </div>
                       <div>
-                        <h4 className="text-sm font-bold text-ink hover:text-primary transition-colors">
+                        <h4 className="flex items-center gap-1.5 text-sm font-bold text-ink transition-colors hover:text-primary">
                           {stu.firstName} {stu.lastName}
+                          {/* Alarme visible sans ouvrir la fiche : l'inscription
+                              n'a jamais été réglée. */}
+                          {(stu.registrationDue ?? 0) > 0 && (
+                            <span
+                              title={`Frais d'inscription impayés : ${stu.registrationDue} DA`}
+                              className="flex items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white"
+                            >
+                              <AlertTriangle className="h-2.5 w-2.5" /> Inscription impayée
+                            </span>
+                          )}
                         </h4>
                         <span className="text-[10px] text-muted block flex items-center gap-1">
                           <CreditCard className="h-3 w-3 inline" /> {stu.rfid}
@@ -3143,11 +3329,14 @@ export function StudentsPage() {
                     </div>
 
                     {stu.registrationDue && stu.registrationDue > 0 ? (
-                      <div className="flex justify-between items-center bg-danger/10 p-1.5 rounded-lg">
-                        <span className="text-danger text-[10px] font-bold">Frais d'inscription dus: {stu.registrationDue} DA</span>
+                      <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5">
+                        <span className="flex items-center gap-1 text-[10px] font-bold text-danger">
+                          <AlertTriangle className="h-3 w-3 animate-pulse" />
+                          Frais d&apos;inscription NON PAYÉS : {stu.registrationDue} DA
+                        </span>
                         <button
                           onClick={() => handleSettleRegistrationCost(stu)}
-                          className="text-[9px] bg-danger text-white px-2 py-0.5 rounded font-bold hover:bg-danger/80"
+                          className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
                         >
                           Régler
                         </button>
@@ -4360,36 +4549,61 @@ export function StudentsPage() {
       </Modal>
 
       {/* Card scanner Modal */}
-      <Modal open={isScanOpen} onClose={() => { setIsScanOpen(false); setScanResult(null); }} title="Scanner de carte RFID">
+      <Modal
+        open={isScanOpen}
+        onClose={() => { setIsScanOpen(false); setScanResult(null); setScanRfidInput(""); }}
+        title="Scanner de carte RFID"
+      >
         <div className="space-y-4">
           <p className="text-xs text-muted">
-            Scannez une carte RFID à l'aide d'un lecteur physique ou saisissez manuellement le code de la carte pour simuler.
+            Passez la carte devant le lecteur, ou saisissez son code à la main. Le traitement est
+            exactement celui du lecteur physique : présence, débit du solde, annonce vocale et
+            alerte automatique au parent.
           </p>
 
           <div className="flex gap-2">
             <Input
+              // Marqueur lu par GlobalRFIDListener : quand ce champ a le focus,
+              // l'écouteur global laisse le champ soumettre le code lui-même,
+              // au lieu de traiter le même passage une seconde fois (ce qui
+              // renvoyait « Échec du scan » sur le doublon).
+              data-scan-input="true"
               value={scanRfidInput}
               onChange={(e) => setScanRfidInput(e.target.value)}
               placeholder="RFID-XXXX"
-              className="flex-1 font-mono uppercase"
+              className="flex-1 font-mono"
               onKeyDown={(e) => e.key === "Enter" && handleScanCard()}
               autoFocus
             />
-            <Button onClick={handleScanCard}>Valider</Button>
+            <Button onClick={handleScanCard} disabled={scanBusy || !scanRfidInput.trim()}>
+              {scanBusy ? "..." : "Valider"}
+            </Button>
           </div>
 
           {scanResult && (
-            <div className={`p-4 rounded-xl border ${scanResult.ok ? "bg-success/10 border-success/30 text-success" : "bg-danger/10 border-danger/30 text-danger"} space-y-2 text-xs`}>
-              <h4 className="font-bold flex items-center gap-1.5">
-                {scanResult.ok ? "✔ Succès" : "❌ Échec"}
+            <div
+              className={`space-y-2 rounded-xl border p-4 text-xs ${
+                scanResult.neutral
+                  ? "border-primary/30 bg-primary/10 text-primary"
+                  : scanResult.ok
+                    ? "border-success/30 bg-success/10 text-success"
+                    : "border-danger/30 bg-danger/10 text-danger"
+              }`}
+            >
+              <h4 className="flex items-center gap-1.5 font-bold">
+                {scanResult.neutral ? "ℹ Info" : scanResult.ok ? "✔ Succès" : "❌ Échec"}
               </h4>
               <p><strong>Élève:</strong> {scanResult.studentName}</p>
+              {scanResult.session && <p><strong>Séance:</strong> {scanResult.session}</p>}
               <p>{scanResult.msg}</p>
-              {scanResult.ok && (
-                <>
-                  <p><strong>Prix séance débité:</strong> {scanResult.cost} DA</p>
-                  <p><strong>Nouveau solde:</strong> {scanResult.newBalance} DA</p>
-                </>
+              {scanResult.ok && (scanResult.cost ?? 0) > 0 && (
+                <p><strong>Prix séance débité:</strong> {scanResult.cost} DA</p>
+              )}
+              {scanResult.ok && (scanResult.cost ?? 0) === 0 && (scanResult.waived ?? 0) > 0 && (
+                <p><strong>Séance offerte:</strong> {scanResult.waived} DA non débités</p>
+              )}
+              {scanResult.ok && scanResult.newBalance !== undefined && (
+                <p><strong>Nouveau solde:</strong> {scanResult.newBalance} DA</p>
               )}
             </div>
           )}
@@ -4407,6 +4621,8 @@ export function StudentsPage() {
             Les étudiants suivants ont un solde presque épuisé (inférieur à 2 séances).
             Chaque élève sélectionné reçoit une notification dans l&apos;application et un message
             WhatsApp personnalisé — envoyé au parent rattaché, ou à l&apos;élève à défaut.
+            Les envois sont espacés pour protéger le numéro WhatsApp de l&apos;école :
+            comptez environ 5 secondes par destinataire.
           </p>
 
           {/* Automatic alert settings (Email & WhatsApp toggles) */}

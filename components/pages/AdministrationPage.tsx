@@ -764,6 +764,9 @@ export function AdministrationPage() {
           <div>
             <label className="block text-xs font-semibold text-muted mb-1 font-sans">Code de la carte</label>
             <Input
+              // Voir GlobalRFIDListener : tant que ce champ a le focus, l'écouteur
+              // global ne traite pas le passage une seconde fois.
+              data-scan-input="true"
               value={scanCode}
               onChange={(e) => setScanCode(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") handleScan(); }}

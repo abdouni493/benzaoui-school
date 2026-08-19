@@ -364,7 +364,10 @@ export function PlannerPage() {
     if (!openPeriodStart || !openPeriodEnd) return alert("Veuillez définir la date de début et la date de fin de la période.");
     if (openPeriodStart > openPeriodEnd) return alert("La date de début doit précéder la date de fin.");
     if (openDays.length === 0) return alert("Veuillez sélectionner au moins un jour d'étude dans cette période.");
-    if (openPrice <= 0) return alert("Veuillez saisir le prix d'une séance.");
+    // Un créneau OFFERT n'a pas de prix : on ne le demande pas, et le tarif
+    // écrit vaut 0 — rien n'est débité à l'élève, rien n'est encaissé par
+    // l'école, et l'enseignant n'est pas rémunéré dessus.
+    if (!openIsFree && openPrice <= 0) return alert("Veuillez saisir le prix d'une séance.");
     if (openTeacherMode === "existing" && !openTeacherId) return alert("Veuillez sélectionner un enseignant existant.");
     if (openTeacherMode === "passager" && !openPassagerName.trim()) return alert("Veuillez saisir le nom de l'enseignant passager.");
 
@@ -416,6 +419,10 @@ export function PlannerPage() {
       }
 
       const title = openTitleOverride.trim() || buildOpenTitle();
+      // Séance offerte => tarif 0 partout (créneau + abonnement auto), pour que
+      // même une base qui ne connaîtrait pas encore la colonne `is_free` ne
+      // débite jamais l'élève sur ce créneau.
+      const priceToWrite = openIsFree ? 0 : openPrice;
       const payload = {
         classId: openClassIds[0],
         moduleId: openModuleId,
@@ -432,21 +439,21 @@ export function PlannerPage() {
         classIds: openClassIds,
         groupIds: openGroupIds,
         salleIds: openSalleIds,
-        openPrice,
+        openPrice: priceToWrite,
         isFree: openIsFree,
       };
 
       if (editingOpenSession) {
         updateItem("sessions", editingOpenSession.id, payload);
         const sub = subscriptions.find((su) => su.sessionId === editingOpenSession.id);
-        if (sub) updateItem("subscriptions", sub.id, { pricePerSession: openPrice });
-        else push("subscriptions", { id: uid("sub"), sessionId: editingOpenSession.id, pricePerSession: openPrice });
+        if (sub) updateItem("subscriptions", sub.id, { pricePerSession: priceToWrite });
+        else push("subscriptions", { id: uid("sub"), sessionId: editingOpenSession.id, pricePerSession: priceToWrite });
       } else {
         const sessionId = uid("ses");
         push("sessions", { id: sessionId, ...payload });
         // Auto-created subscription: this is what makes the timing appear on
         // the Abonnements page as if it had been created there by hand.
-        push("subscriptions", { id: uid("sub"), sessionId, pricePerSession: openPrice } as Subscription);
+        push("subscriptions", { id: uid("sub"), sessionId, pricePerSession: priceToWrite } as Subscription);
       }
 
       setIsOpenSeanceModalOpen(false);
@@ -987,7 +994,14 @@ export function PlannerPage() {
                               </div>
                               <div className="flex items-center gap-2">
                                 <Users className="h-3.5 w-3.5 text-primary shrink-0" />
-                                <span>Tarif séance: <strong className="text-primary">{openSessionPrice(s)} DA</strong></span>
+                                <span>
+                                  Tarif séance:{" "}
+                                  {s.isFree ? (
+                                    <strong className="text-warning">Offerte — 0 DA</strong>
+                                  ) : (
+                                    <strong className="text-primary">{openSessionPrice(s)} DA</strong>
+                                  )}
+                                </span>
                               </div>
                             </>
                           )}
@@ -1291,24 +1305,10 @@ export function PlannerPage() {
               </div>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-muted mb-1 font-sans">Prix d&apos;une séance (DA) *</label>
-              <Input
-                type="number"
-                min={0}
-                value={openPrice || ""}
-                onChange={(e) => setOpenPrice(Number(e.target.value))}
-                placeholder="Ex: 800"
-              />
-              <p className="text-[10px] text-muted mt-1 leading-relaxed">
-                Un abonnement est créé automatiquement à ce tarif : le créneau apparaîtra dans
-                l&apos;interface <strong>Abonnements</strong> comme s&apos;il y avait été saisi à la main.
-              </p>
-            </div>
-
-            {/* Séance libre offerte : tout le créneau est gratuit — chaque
-                présence enregistrée dessus est offerte (ni débit, ni
-                encaissement, ni rémunération de l'enseignant). */}
+            {/* Séance libre OFFERTE — la question est posée AVANT le prix :
+                quand le créneau est offert, le prix n'est plus demandé du tout
+                (aucun débit élève, aucun encaissement école, aucune
+                rémunération enseignant sur ce créneau). */}
             <label
               className={`flex cursor-pointer items-start gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
                 openIsFree ? "border-warning/50 bg-warning/10" : "border-line bg-canvas/40 hover:bg-primary-50/40"
@@ -1317,19 +1317,41 @@ export function PlannerPage() {
               <input
                 type="checkbox"
                 checked={openIsFree}
-                onChange={(e) => setOpenIsFree(e.target.checked)}
+                onChange={(e) => {
+                  setOpenIsFree(e.target.checked);
+                  // Le prix saisi avant de cocher ne doit pas rester : un
+                  // créneau offert vaut 0 DA, partout.
+                  if (e.target.checked) setOpenPrice(0);
+                }}
                 className="mt-0.5 h-4 w-4 shrink-0"
               />
               <span>
                 <strong className="block text-ink">🎁 Séance libre offerte (gratuite)</strong>
                 <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
-                  Chaque présence enregistrée sur ce créneau est <strong>offerte</strong> : aucun solde élève
-                  n&apos;est débité, l&apos;école n&apos;encaisse rien et{" "}
-                  <strong>l&apos;enseignant n&apos;est pas rémunéré</strong>. La valeur d&apos;une séance
-                  ({openPrice || 0} DA) reste comptabilisée dans les rapports.
+                  Aucun prix n&apos;est demandé pour ce créneau. Chaque présence enregistrée dessus est{" "}
+                  <strong>offerte</strong> : le solde de l&apos;élève n&apos;est pas débité,
+                  l&apos;école n&apos;encaisse rien et{" "}
+                  <strong>l&apos;enseignant n&apos;est pas rémunéré</strong> sur cette séance.
                 </span>
               </span>
             </label>
+
+            {!openIsFree && (
+              <div>
+                <label className="block text-xs font-semibold text-muted mb-1 font-sans">Prix d&apos;une séance (DA) *</label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={openPrice || ""}
+                  onChange={(e) => setOpenPrice(Number(e.target.value))}
+                  placeholder="Ex: 800"
+                />
+                <p className="text-[10px] text-muted mt-1 leading-relaxed">
+                  Un abonnement est créé automatiquement à ce tarif : le créneau apparaîtra dans
+                  l&apos;interface <strong>Abonnements</strong> comme s&apos;il y avait été saisi à la main.
+                </p>
+              </div>
+            )}
 
             <div>
               <label className="block text-xs font-semibold text-muted mb-1 font-sans">Nom du créneau</label>
@@ -1685,7 +1707,11 @@ export function PlannerPage() {
                 <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
                   <div>
                     <span className="text-[10px] text-muted block uppercase">Tarif séance</span>
-                    <strong className="text-primary">{openSessionPrice(selectedSession)} DA</strong>
+                    {selectedSession.isFree ? (
+                      <strong className="text-warning">🎁 Offerte — 0 DA</strong>
+                    ) : (
+                      <strong className="text-primary">{openSessionPrice(selectedSession)} DA</strong>
+                    )}
                   </div>
                   <div>
                     <span className="text-[10px] text-muted block uppercase">Classes</span>

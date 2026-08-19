@@ -14,6 +14,8 @@ export function GlobalRFIDListener() {
 
   const bufferRef = useRef<string>("");
   const lastKeyTimeRef = useRef<number>(0);
+  /** Codes en cours de traitement — un même passage ne part jamais deux fois. */
+  const inFlightRef = useRef<Set<string>>(new Set());
 
   // Fetch the announcement clips once on mount so the first scan plays
   // instantly, even on the Vercel-hosted version.
@@ -22,6 +24,24 @@ export function GlobalRFIDListener() {
   }, []);
 
   useEffect(() => {
+    /** Le champ de saisie qui a le focus, s'il y en a un. */
+    const focusedField = (): HTMLElement | null => {
+      const el = document.activeElement;
+      if (!el) return null;
+      const isField =
+        el.tagName === "INPUT" ||
+        el.tagName === "TEXTAREA" ||
+        (el instanceof HTMLElement && el.contentEditable === "true");
+      return isField ? (el as HTMLElement) : null;
+    };
+
+    /** Champ de scan dédié (modale « Scanner RFID », pointage travailleur…).
+     *  Il soumet le code lui-même : l'écouteur global doit se taire, sinon le
+     *  MÊME passage est traité deux fois et le second renvoie « Échec du scan »
+     *  (garde anti double-badge du serveur). */
+    const isDedicatedScanField = (el: HTMLElement | null) =>
+      !!el && el.dataset.scanInput === "true";
+
     const handleKeyDown = (e: KeyboardEvent) => {
       // If Enter key is pressed, process buffer
       if (e.key === "Enter") {
@@ -29,21 +49,22 @@ export function GlobalRFIDListener() {
         bufferRef.current = "";
 
         if (code.length >= 4) {
-          const activeEl = document.activeElement;
-          const isInputField = activeEl && (
-            activeEl.tagName === "INPUT" ||
-            activeEl.tagName === "TEXTAREA" ||
-            (activeEl instanceof HTMLElement && activeEl.contentEditable === "true")
-          );
+          const field = focusedField();
+          if (isDedicatedScanField(field)) return;
 
           // We intercept if it looks like an RFID code (e.g. starts with RFID- or STU-)
           // OR if the user is not typing inside a form input field.
           const isRFID = code.toUpperCase().startsWith("RFID-") || code.toUpperCase().startsWith("STU-");
 
-          if (!isInputField || isRFID) {
+          if (!field || isRFID) {
             e.preventDefault();
             e.stopPropagation();
-            processScan(code);
+            // Anti-doublon local : le lecteur émet parfois deux trames pour un
+            // seul passage. Tant que le RPC n'a pas répondu, le même code est
+            // ignoré — sans quoi le second appel repartirait en « Échec ».
+            if (inFlightRef.current.has(code)) return;
+            inFlightRef.current.add(code);
+            void processScan(code).finally(() => inFlightRef.current.delete(code));
           }
         }
         return;
@@ -56,16 +77,16 @@ export function GlobalRFIDListener() {
       const timeDiff = now - lastKeyTimeRef.current;
       lastKeyTimeRef.current = now;
 
-      const activeEl = document.activeElement;
-      const isInputField = activeEl && (
-        activeEl.tagName === "INPUT" ||
-        activeEl.tagName === "TEXTAREA" ||
-        (activeEl instanceof HTMLElement && activeEl.contentEditable === "true")
-      );
+      const field = focusedField();
+      // Un champ de scan dédié gère sa propre saisie : rien à mettre en tampon.
+      if (isDedicatedScanField(field)) {
+        bufferRef.current = "";
+        return;
+      }
 
       // If user typing inside input, require very fast key entry (typical of RFID keyboards)
       // otherwise, accept slower keystrokes (manual input on screen)
-      if (isInputField && timeDiff > 80) {
+      if (field && timeDiff > 80) {
         bufferRef.current = e.key;
       } else {
         bufferRef.current += e.key;

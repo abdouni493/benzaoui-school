@@ -1,19 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { Menu, ScanLine } from "lucide-react";
+import { Menu } from "lucide-react";
 import { ThemeToggle } from "@/components/controls/ThemeToggle";
 import { LanguageSwitcher } from "@/components/controls/LanguageSwitcher";
-import { ScanModal } from "@/components/ScanModal";
-import { Button } from "@/components/ui/Button";
 import { useSession } from "@/lib/store/session";
 import { useTranslation } from "@/lib/i18n/useTranslation";
 
 export function Topbar({ onMenu }: { onMenu: () => void }) {
   const { t } = useTranslation();
   const user = useSession((s) => s.user);
-  const [scanOpen, setScanOpen] = useState(false);
-  const canScan = user?.role === "admin" || user?.role === "reception";
 
   const initials = (user?.name ?? "")
     .split(" ")
@@ -35,14 +30,10 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
         {t("common.appName")}
       </span>
 
+      {/* Le scanner de carte n'est plus dans la barre de navigation : il vit sur
+          l'écran Étudiants (« Scanner RFID »), et le lecteur physique reste
+          écouté en permanence par GlobalRFIDListener, sur toutes les pages. */}
       <div className="ms-auto flex items-center gap-2 md:gap-3">
-        {canScan && (
-          <Button size="sm" onClick={() => setScanOpen(true)} className="hidden sm:inline-flex">
-            <ScanLine className="h-4 w-4" />
-            {t("act.scanCard")}
-          </Button>
-        )}
-
         <LanguageSwitcher />
         <ThemeToggle />
 
@@ -56,8 +47,6 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
           </div>
         </div>
       </div>
-
-      <ScanModal open={scanOpen} onClose={() => setScanOpen(false)} />
     </header>
   );
 }

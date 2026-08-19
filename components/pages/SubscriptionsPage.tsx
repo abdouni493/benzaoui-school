@@ -136,6 +136,8 @@ export function SubscriptionsPage() {
       level: cls?.type === "cours" ? cls.coursLevel : cls?.formationLevel,
       isFormation: cls?.type === "formation",
       isOpen: !!s.isOpen,
+      /** créneau de séance libre coché « offert » : il n'a aucun tarif */
+      isOffered: !!s.isOpen && !!s.isFree,
       title: s.title,
       periodStart: s.periodStart,
       periodEnd: s.periodEnd,
@@ -247,6 +249,13 @@ export function SubscriptionsPage() {
     return list;
   };
 
+  /** Un créneau de séance libre coché « offert » n'a pas de tarif : 0 DA est sa
+   *  valeur légitime, pas une saisie oubliée. */
+  const isOfferedSession = (sesId: string) => {
+    const s = sessions.find((se) => se.id === sesId);
+    return !!s?.isOpen && !!s.isFree;
+  };
+
   /** One tariff written on EVERY group of the course, server-side. */
   const applyPrice = async (sessionId: string) => {
     const isFormation = isFormationSession(sessionId);
@@ -254,7 +263,7 @@ export function SubscriptionsPage() {
       alert("Veuillez saisir le prix du niveau et la période (en mois) de la formation.");
       return false;
     }
-    if (!isFormation && pricePerSession <= 0) {
+    if (!isFormation && !isOfferedSession(sessionId) && pricePerSession <= 0) {
       alert("Veuillez saisir un prix par séance valide.");
       return false;
     }
@@ -528,6 +537,11 @@ export function SubscriptionsPage() {
                               Séance Libre
                             </Badge>
                           )}
+                          {details.isOffered && (
+                            <Badge tone="warning" className="text-[9px] px-1.5 py-0">
+                              🎁 Offerte
+                            </Badge>
+                          )}
                         </div>
                         <span className="text-xs text-muted block truncate">
                           {details.isOpen ? details.class : `${details.class} - ${details.level}`}
@@ -619,7 +633,11 @@ export function SubscriptionsPage() {
                     ) : (
                       <div className="flex justify-between text-muted">
                         <span>Tarif Séance:</span>
-                        <strong className="text-primary">{sub.pricePerSession} DA</strong>
+                        {details.isOffered ? (
+                          <strong className="text-warning">🎁 Offerte — 0 DA</strong>
+                        ) : (
+                          <strong className="text-primary">{sub.pricePerSession} DA</strong>
+                        )}
                       </div>
                     )}
                   </div>
