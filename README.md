@@ -32,14 +32,17 @@ faible, frais d'inscription, ou message libre) via **[Evolution API](https://git
 une passerelle open source qui pilote une **vraie session WhatsApp Web** depuis le numéro de l'école.
 
 ```
-Navigateur → /api/whatsapp/send → passerelle Evolution (VPS) → WhatsApp de la famille
+Navigateur → /api/whatsapp/send → passerelle Evolution (hébergée) → WhatsApp de la famille
 WhatsApp → passerelle → /api/whatsapp/webhook → Supabase (statuts, messages entrants)
 ```
 
 > ### ⚠️ À lire avant de mettre en service
 >
-> - **La passerelle exige une machine allumée en permanence.** Vercel est serverless : il ne peut
->   pas l'héberger. Si le serveur est éteint, **aucun message ne part** — silencieusement.
+> - **La passerelle exige un processus allumé en permanence.** Vercel est serverless — chaque
+>   requête réveille une fonction qui s'éteint aussitôt — et ne peut donc pas maintenir la session
+>   WhatsApp ouverte. La passerelle tourne ailleurs ; **cela ne veut pas dire un VPS** : deux des
+>   trois options ci-dessous n'exigent aucun serveur à administrer. Si elle est arrêtée,
+>   **aucun message ne part** — silencieusement.
 > - **Le numéro utilisé peut être banni par WhatsApp**, sans préavis ni recours, en cas d'envoi
 >   massif ou de plaintes des destinataires. Utilisez un numéro dédié à l'école, jamais un numéro
 >   personnel. Ce risque n'existait pas avec un fournisseur officiel : c'est la contrepartie de la
@@ -51,24 +54,41 @@ texte libre FR/AR, modifiables immédiatement dans `lib/whatsapp/templates.ts` o
 fenêtre d'envoi. Plus de fenêtre de service client de 24 h : l'école écrit quand elle veut. Et le
 coût par message est nul, quel que soit le volume.
 
-### Installation de la passerelle
+### Où héberger la passerelle
 
-Procédure complète (VPS, Docker, Caddy, TLS) dans **[`evolution/README.md`](evolution/README.md)**.
-En résumé :
+Procédure complète, option par option, dans **[`evolution/README.md`](evolution/README.md)**.
+L'application est identique dans les trois cas : seule change la valeur de `EVOLUTION_BASE_URL`.
 
-1. Louer un VPS (2 vCPU / 2 Go suffisent — Hetzner CX22 ≈ 4 €/mois) sous Ubuntu 24.04.
-2. Pointer un sous-domaine (`wa.votre-domaine.dz`) en enregistrement **A** vers l'IP du VPS.
-3. Installer Docker, copier `evolution/docker-compose.yml` et `evolution/Caddyfile`, générer les
-   secrets dans `evolution/.env`, puis `docker compose up -d`.
-4. Vérifier que l'API répond et **noter l'URL de base exacte** — certaines installations servent
-   l'API sous `/api` :
-   ```bash
-   curl -s https://wa.votre-domaine.dz/instance/fetchInstances -H "apikey: VOTRE_CLE"
-   ```
+| | **Railway** *(recommandé)* | **Tunnel Cloudflare** | **VPS** |
+| --- | --- | --- | --- |
+| Serveur à administrer | aucun | aucun | oui |
+| Coût mensuel | ≈ 5 $ | **0 €** | ≈ 4 € |
+| Fonctionne PC éteint | **oui** | non | oui |
+| Il faut | une carte bancaire internationale | un domaine sur Cloudflare + un PC allumé | une carte + gérer un serveur |
+| Fichiers | [`evolution/railway/`](evolution/railway/) | [`evolution/docker-compose.tunnel.yml`](evolution/docker-compose.tunnel.yml) | [`evolution/docker-compose.yml`](evolution/docker-compose.yml) |
 
-Pour un essai **sans VPS**, `evolution/docker-compose.local.yml` fait tourner la même passerelle sur
-le poste de l'école. Pratique pour valider la chaîne avant de payer un serveur — mais les envois
-s'arrêtent dès que le PC est éteint.
+**Railway** exécute la même image Docker qu'en local, sans SSH ni certificat à gérer : on crée un
+Postgres, on déploie `evoapicloud/evolution-api`, on **attache un volume sur `/evolution/instances`**
+(sans lui, chaque redéploiement délie le téléphone), on génère un domaine, et on colle les variables
+de [`evolution/railway/env.example`](evolution/railway/env.example).
+
+**Le tunnel Cloudflare** garde la passerelle sur le poste du secrétariat et lui donne une adresse
+HTTPS publique, sans ouvrir le moindre port sur la box de l'école. C'est gratuit — mais PC éteint
+ou en veille, plus rien ne part.
+
+Avant tout hébergement, `evolution/docker-compose.local.yml` permet de valider la chaîne complète
+sur le PC de l'école, sans rien dépenser ni exposer.
+
+### Vérifier l'installation
+
+```powershell
+powershell -ExecutionPolicy Bypass -File evolution\check-gateway.ps1 `
+  -BaseUrl https://VOTRE-PASSERELLE -ApiKey VOTRE_CLE -AppUrl https://VOTRE-APP.vercel.app
+```
+
+Le script contrôle la joignabilité de la passerelle, la clé API, l'état de la session, le webhook
+déclaré, et le fait que l'application rejette bien les appels non signés — en indiquant pour chaque
+échec la manœuvre à faire. Il détecte aussi les installations qui servent l'API sous `/api`.
 
 ### Première connexion
 
@@ -119,9 +139,19 @@ Un envoi groupé est découpé en lots de 8 destinataires, envoyés séquentiell
    - Variables **WhatsApp** (facultatif — messages WhatsApp) : `EVOLUTION_BASE_URL`,
      `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE`, `EVOLUTION_WEBHOOK_TOKEN`
      (voir [`.env.example`](.env.example)). Aucune ne doit être préfixée `NEXT_PUBLIC_`.
+
+   > **Ne pas définir `EVOLUTION_WEBHOOK_URL` sur Vercel.** Laissée vide, l'application dérive
+   > l'adresse de rappel de son propre domaine de production. Renseignée avec une valeur locale
+   > (`localhost`, `host.docker.internal`) recopiée depuis `.env.local`, elle ferait rappeler par la
+   > passerelle une machine qui n'existe pas pour elle : les messages partiraient, mais aucun statut
+   > de remise ni aucune réponse de parent ne reviendrait — sans erreur visible.
+
 3. Déployer. Dans Supabase, ajouter l'URL Vercel aux **Auth → URL Configuration → Site URL / Redirect URLs**.
-4. Reconnecter la session depuis **Paramètres → WhatsApp** : l'instance de production est distincte
-   de celle utilisée en local, il faut rescanner le QR code.
+4. Reconnecter la session depuis **Paramètres → WhatsApp → Initialiser l'instance**, puis
+   **Connecter WhatsApp** : l'instance de production est distincte de celle utilisée en local, il
+   faut rescanner le QR code. « Initialiser » est aussi le geste à refaire après **tout changement
+   de domaine**, côté Vercel comme côté passerelle — c'est lui qui réenregistre l'adresse du webhook.
+5. Contrôler le tout avec `evolution\check-gateway.ps1` (voir plus haut).
 
 > Les variables d'environnement ne sont lues qu'au déploiement : après en avoir ajouté ou modifié
 > une, **redéployer** — un simple enregistrement ne suffit pas.

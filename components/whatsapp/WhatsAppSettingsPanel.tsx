@@ -161,8 +161,9 @@ export function WhatsAppSettingsPanel() {
                   local, variables d&apos;environnement Vercel en production) au minimum{" "}
                   <code className="text-ink">EVOLUTION_BASE_URL</code> et{" "}
                   <code className="text-ink">EVOLUTION_API_KEY</code>, puis redémarrer
-                  l&apos;application. La procédure complète (VPS, Docker, première connexion) est
-                  décrite dans le <code className="text-ink">README</code>.
+                  l&apos;application. La procédure complète — où héberger la passerelle (avec ou
+                  sans serveur), et comment la connecter — est décrite dans{" "}
+                  <code className="text-ink">evolution/README.md</code>.
                 </p>
               </div>
             )}

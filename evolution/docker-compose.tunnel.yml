@@ -1,0 +1,107 @@
+# =============================================================================
+# Passerelle WhatsApp — VERSION « PC DE L'ÉCOLE + TUNNEL CLOUDFLARE »
+#
+# Option GRATUITE et sans VPS : la passerelle tourne sur le PC de l'école (le
+# même que docker-compose.local.yml), mais un tunnel Cloudflare lui donne une
+# adresse HTTPS publique et stable. C'est ce qui la rend joignable depuis
+# Vercel — sans ouvrir le moindre port sur la box de l'école, sans IP fixe et
+# sans certificat à gérer.
+#
+#   Vercel  ──https──►  edge Cloudflare  ──tunnel sortant──►  PC de l'école
+#
+# Le conteneur `cloudflared` ouvre la connexion VERS Cloudflare : le routeur de
+# l'école n'a donc RIEN à laisser entrer. C'est aussi ce qui fait tenir le
+# montage derrière un partage de connexion 4G.
+#
+# LIMITE, à peser avant de choisir cette option : si le PC est éteint, en
+# veille, ou privé d'Internet, AUCUN message ne part. L'application le signale
+# (Paramètres → WhatsApp affiche « Passerelle injoignable »), mais personne
+# n'est prévenu automatiquement. Pour un fonctionnement 24 h/24 sans dépendre
+# d'un poste allumé, voir evolution/railway/ (hébergement géré, sans VPS).
+#
+# Prérequis (procédure détaillée dans README.md, section C) :
+#   1. un domaine géré par Cloudflare (l'offre gratuite suffit) ;
+#   2. un tunnel créé dans Zero Trust → Networks → Tunnels, dont le jeton est
+#      placé dans evolution/.env sous CLOUDFLARE_TUNNEL_TOKEN ;
+#   3. un « Public hostname » wa.votre-domaine → http://evolution:8080.
+#
+# Démarrer :  docker compose -f evolution/docker-compose.tunnel.yml up -d
+# Journaux :  docker compose -f evolution/docker-compose.tunnel.yml logs -f
+# Arrêter  :  docker compose -f evolution/docker-compose.tunnel.yml down
+# =============================================================================
+
+services:
+  evolution:
+    image: evoapicloud/evolution-api:latest
+    container_name: evolution-tunnel
+    restart: unless-stopped
+    # Pas de `ports:` — la passerelle n'est joignable QUE par le tunnel, sur le
+    # réseau interne de Docker. Rien n'est exposé sur le réseau de l'école.
+    expose:
+      - "8080"
+    environment:
+      # DOIT être le domaine public du tunnel, à l'identique de ce qui est
+      # configuré dans Vercel sous EVOLUTION_BASE_URL. C'est la valeur renvoyée
+      # dans le champ `server_url` des webhooks : une différence, et
+      # /api/whatsapp/webhook rejette tous les statuts de remise en 403.
+      - SERVER_URL=${TUNNEL_PUBLIC_URL:?definir dans evolution/.env, ex. https://wa.votre-domaine.dz}
+
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:?definir dans evolution/.env}
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=false
+
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution?schema=public
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      # Le journal de l'école est dans Supabase : on ne duplique pas les
+      # messages sur le disque du PC.
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=false
+      - DATABASE_SAVE_MESSAGE_UPDATE=false
+
+      - CACHE_REDIS_ENABLED=false
+      - CACHE_LOCAL_ENABLED=true
+
+      - CONFIG_SESSION_PHONE_CLIENT=BENZAOUI SCHOOL
+      - CONFIG_SESSION_PHONE_NAME=Chrome
+
+      - QRCODE_LIMIT=30
+      - LOG_LEVEL=ERROR
+      - DEL_INSTANCE=false
+      - WEBHOOK_GLOBAL_ENABLED=false
+    volumes:
+      # Identifiants de la session WhatsApp. Les perdre = rescanner le QR.
+      - evolution_instances:/evolution/instances
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: evolution-tunnel-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?definir dans evolution/.env}
+      - POSTGRES_DB=evolution
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: evolution-cloudflared
+    restart: unless-stopped
+    # `run --token` prend toute la configuration du tunnel dans le tableau de
+    # bord Cloudflare : aucun fichier de conf à maintenir sur le PC, et le
+    # routage se change sans redémarrer le conteneur.
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?jeton du tunnel, a definir dans evolution/.env}
+    depends_on:
+      - evolution
+
+volumes:
+  evolution_instances:
+  postgres_data:
