@@ -158,6 +158,18 @@ l'étape 1. Générer les deux valeurs aléatoires sous PowerShell :
 
 ### 6. Démarrer
 
+> **Arrêter d'abord le montage local**, s'il tourne encore :
+>
+> ```powershell
+> docker compose -f evolution/docker-compose.local.yml down
+> ```
+>
+> Les deux fichiers portent le même nom de projet Compose (`evolution`) et
+> **partagent donc les mêmes volumes**. C'est voulu : la session WhatsApp validée
+> en local est reprise telle quelle, sans nouveau scan du QR. Mais faire tourner
+> les deux montages en même temps ferait se disputer deux passerelles et deux
+> Postgres autour des mêmes données. `down` (sans `-v`) conserve les volumes.
+
 ```powershell
 docker compose -f evolution/docker-compose.funnel.yml up -d
 docker compose -f evolution/docker-compose.funnel.yml logs -f tailscale

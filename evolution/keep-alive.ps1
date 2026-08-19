@@ -170,6 +170,17 @@ if (-not $seen) {
   Write-Info "Demarrer : docker compose -f evolution/docker-compose.funnel.yml up -d"
 }
 
+# Les montages local et funnel partagent le meme nom de projet Compose, donc les
+# MEMES volumes. C'est ce qui permet de basculer sans rescanner le QR - mais les
+# faire tourner ensemble met deux passerelles et deux Postgres sur les memes
+# donnees. Le conflit de port masque souvent la vraie cause.
+$localRunning = & $dockerCli inspect -f "{{.State.Running}}" "evolution-local" 2>$null
+if ($localRunning -eq "true" -and $seen) {
+  Write-Bad "le montage local tourne EN MEME TEMPS que le montage funnel"
+  Write-Info "Les deux partagent les memes volumes. Arreter le local :"
+  Write-Info "docker compose -f evolution/docker-compose.local.yml down"
+}
+
 # ---------------------------------------------------------------------------
 # 4. A verifier a la main
 # ---------------------------------------------------------------------------
