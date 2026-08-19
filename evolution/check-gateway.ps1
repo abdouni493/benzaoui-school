@@ -91,8 +91,10 @@ if ($rootRes) {
   else { Write-Pass "repond" }
 } else {
   Write-Fail "aucune reponse : $($lastError.Exception.Message)"
+  Write-Hint "Passerelle sur le PC de l'ecole (options B et C) - la cause la plus frequente :"
+  Write-Hint "  docker compose -f evolution/docker-compose.funnel.yml ps"
+  Write-Hint "  powershell -File evolution\keep-alive.ps1     (veille, redemarrage de Docker)"
   Write-Hint "Railway : le service est-il deploye et non endormi (sleepApplication) ?"
-  Write-Hint "Tunnel  : le conteneur cloudflared tourne-t-il, et le PC est-il allume ?"
   Write-Hint "Verifier aussi que EVOLUTION_BASE_URL n'a pas de slash final."
   Write-Host ""
   Write-Host "Chaine interrompue des la premiere etape : rien d'autre ne peut etre teste." -ForegroundColor Red

@@ -57,31 +57,43 @@ coût par message est nul, quel que soit le volume.
 ### Où héberger la passerelle
 
 Procédure complète, option par option, dans **[`evolution/README.md`](evolution/README.md)**.
-L'application est identique dans les trois cas : seule change la valeur de `EVOLUTION_BASE_URL`.
+L'application est identique dans tous les cas : seule change la valeur de `EVOLUTION_BASE_URL`.
 
-| | **Railway** *(recommandé)* | **Tunnel Cloudflare** | **VPS** |
-| --- | --- | --- | --- |
-| Serveur à administrer | aucun | aucun | oui |
-| Coût mensuel | ≈ 5 $ | **0 €** | ≈ 4 € |
-| Fonctionne PC éteint | **oui** | non | oui |
-| Il faut | une carte bancaire internationale | un domaine sur Cloudflare + un PC allumé | une carte + gérer un serveur |
-| Fichiers | [`evolution/railway/`](evolution/railway/) | [`evolution/docker-compose.tunnel.yml`](evolution/docker-compose.tunnel.yml) | [`evolution/docker-compose.yml`](evolution/docker-compose.yml) |
+| | **Tailscale Funnel** *(retenu)* | **Cloudflare** | **Railway** | **VPS** |
+| --- | --- | --- | --- | --- |
+| Coût mensuel | **0 DA** | **0 DA** | 7–10 $ | ≈ 4 € |
+| Nom de domaine | **aucun** | obligatoire | aucun | obligatoire |
+| Serveur à administrer | aucun | aucun | aucun | oui |
+| Fonctionne PC éteint | non | non | oui | oui |
+| Fichiers | [`docker-compose.funnel.yml`](evolution/docker-compose.funnel.yml) | [`docker-compose.tunnel.yml`](evolution/docker-compose.tunnel.yml) | [`railway/`](evolution/railway/) | [`docker-compose.yml`](evolution/docker-compose.yml) |
 
-**Railway** exécute la même image Docker qu'en local, sans SSH ni certificat à gérer : on crée un
-Postgres, on déploie `evoapicloud/evolution-api`, on **attache un volume sur `/evolution/instances`**
-(sans lui, chaque redéploiement délie le téléphone), on génère un domaine, et on colle les variables
-de [`evolution/railway/env.example`](evolution/railway/env.example).
+**L'option retenue par l'école** fait tourner la passerelle sur le poste du secrétariat — le même
+que celui qui scanne les cartes RFID — et **Tailscale Funnel** lui donne une adresse HTTPS publique
+et stable (`https://benzaoui-wa.tailXXXX.ts.net`), fournie gratuitement avec le compte. Aucun port
+n'est ouvert sur la box de l'école : c'est le conteneur qui ouvre la connexion vers l'extérieur, ce
+qui fonctionne derrière une IP dynamique ou un partage 4G. Contrairement à Cloudflare, **aucun nom
+de domaine n'est nécessaire** — d'où ce choix.
 
-**Le tunnel Cloudflare** garde la passerelle sur le poste du secrétariat et lui donne une adresse
-HTTPS publique, sans ouvrir le moindre port sur la box de l'école. C'est gratuit — mais PC éteint
-ou en veille, plus rien ne part.
+> **La contrepartie, à assumer** : PC éteint, en veille, ou sans Internet = **aucun message ne
+> part**, et personne n'est prévenu automatiquement.
+> [`evolution/keep-alive.ps1`](evolution/keep-alive.ps1) supprime les causes évitables (mise en
+> veille, Docker non relancé après une coupure de courant) et signale ce qui reste à régler à la
+> main. À lancer une fois à l'installation, puis après chaque grosse mise à jour de Windows.
+
+**Railway** est la seule option qui continue d'envoyer quand le poste est éteint — utile si les
+alertes doivent partir le soir ou le week-end. Basculer plus tard est rapide : changer
+`EVOLUTION_BASE_URL`, redéployer, rescanner le QR.
 
 Avant tout hébergement, `evolution/docker-compose.local.yml` permet de valider la chaîne complète
-sur le PC de l'école, sans rien dépenser ni exposer.
+sur le PC de l'école, sans rien exposer.
 
 ### Vérifier l'installation
 
 ```powershell
+# Le poste est-il prêt à tenir le service jour et nuit ? (rapport seul)
+powershell -ExecutionPolicy Bypass -File evolution\keep-alive.ps1
+
+# La chaîne Vercel <-> passerelle est-elle complète ?
 powershell -ExecutionPolicy Bypass -File evolution\check-gateway.ps1 `
   -BaseUrl https://VOTRE-PASSERELLE -ApiKey VOTRE_CLE -AppUrl https://VOTRE-APP.vercel.app
 ```

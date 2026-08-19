@@ -1,0 +1,139 @@
+# =============================================================================
+# Passerelle WhatsApp — VERSION « PC DE L'ÉCOLE + TAILSCALE FUNNEL »
+#
+# L'option RETENUE par l'école : 24 h/24, sans VPS, et sans le moindre frais —
+# ni serveur à louer, ni nom de domaine à acheter.
+#
+# Tailscale Funnel donne à la passerelle une adresse HTTPS publique et stable
+# du type https://benzaoui-wa.tailXXXX.ts.net, fournie gratuitement avec le
+# compte. C'est ce qui la rend joignable depuis Vercel.
+#
+#   Vercel  ──https──►  edge Tailscale  ──tunnel sortant──►  PC de l'école
+#
+# Aucun port n'est ouvert sur la box de l'école : c'est le conteneur tailscale
+# qui ouvre la connexion VERS l'extérieur. Le montage tient donc derrière une
+# IP dynamique, un routeur d'opérateur, ou un partage de connexion 4G.
+#
+# Différence avec docker-compose.tunnel.yml (Cloudflare) : celui-ci exige un
+# nom de domaine. Le Funnel n'en demande aucun — d'où ce fichier.
+#
+# CE QU'IL FAUT ACCEPTER : le PC doit rester allumé. Éteint, en veille, ou sans
+# Internet, plus aucun message ne part. `keep-alive.ps1` verrouille les
+# réglages Windows qui font tenir le poste jour et nuit.
+#
+# Prérequis (procédure détaillée dans README.md, section B) :
+#   1. un compte Tailscale gratuit ;
+#   2. HTTPS activé et le Funnel autorisé dans la console d'administration ;
+#   3. une clé d'authentification placée dans evolution/.env.
+#
+# Démarrer :  docker compose -f evolution/docker-compose.funnel.yml up -d
+# Journaux :  docker compose -f evolution/docker-compose.funnel.yml logs -f
+# Arrêter  :  docker compose -f evolution/docker-compose.funnel.yml down
+# =============================================================================
+
+services:
+  evolution:
+    image: evoapicloud/evolution-api:v2.3.7
+    container_name: evolution-funnel
+    restart: unless-stopped
+    ports:
+      # Publié sur 127.0.0.1 UNIQUEMENT : de quoi diagnostiquer depuis le poste
+      # (check-gateway.ps1, qr.ps1) sans rien exposer au réseau de l'école.
+      # Le trafic public passe exclusivement par le Funnel.
+      - "127.0.0.1:8081:8080"
+    environment:
+      # DOIT être l'adresse publique du Funnel, identique à EVOLUTION_BASE_URL
+      # côté Vercel. C'est la valeur renvoyée dans le champ `server_url` des
+      # webhooks : la moindre différence et /api/whatsapp/webhook rejette tous
+      # les statuts de remise en 403.
+      - SERVER_URL=${TUNNEL_PUBLIC_URL:?definir dans evolution/.env, ex. https://benzaoui-wa.tailXXXX.ts.net}
+
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:?definir dans evolution/.env}
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=false
+
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution?schema=public
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      # Le journal de l'école vit dans Supabase (table whatsapp_messages) : on
+      # ne duplique pas les messages sur le disque du PC.
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=false
+      - DATABASE_SAVE_MESSAGE_UPDATE=false
+
+      - CACHE_REDIS_ENABLED=false
+      - CACHE_LOCAL_ENABLED=true
+
+      # Nom affiché dans WhatsApp → Appareils connectés, sur le téléphone.
+      - CONFIG_SESSION_PHONE_CLIENT=BENZAOUI SCHOOL
+      - CONFIG_SESSION_PHONE_NAME=Chrome
+
+      - QRCODE_LIMIT=30
+      - LOG_LEVEL=ERROR
+      # Une instance déconnectée n'est pas supprimée : la reconnexion se fait
+      # par un simple rescan, sans tout reconfigurer.
+      - DEL_INSTANCE=false
+
+      # Les webhooks sont déclarés PAR INSTANCE depuis l'application
+      # (Paramètres → WhatsApp → Initialiser), avec le jeton d'authentification.
+      - WEBHOOK_GLOBAL_ENABLED=false
+    volumes:
+      # Identifiants de la session WhatsApp. Les perdre = rescanner le QR.
+      - evolution_instances:/evolution/instances
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: evolution-funnel-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?definir dans evolution/.env}
+      - POSTGRES_DB=evolution
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Evolution démarre en erreur si Postgres n'accepte pas encore les
+      # connexions : on attend explicitement qu'il soit prêt.
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: evolution-tailscale
+    restart: unless-stopped
+    environment:
+      # Clé d'authentification generée dans la console Tailscale. La cocher
+      # « Reusable » évite d'en regénérer une à chaque recréation du conteneur.
+      - TS_AUTHKEY=${TAILSCALE_AUTHKEY:?cle d'authentification Tailscale, a definir dans evolution/.env}
+
+      # Détermine la première partie de l'adresse publique :
+      # https://<TS_HOSTNAME>.<votre-tailnet>.ts.net
+      # Le changer change l'URL — il faudrait alors reprendre TUNNEL_PUBLIC_URL,
+      # EVOLUTION_BASE_URL côté Vercel, et re-cliquer sur « Initialiser ».
+      - TS_HOSTNAME=${TAILSCALE_HOSTNAME:-benzaoui-wa}
+
+      # Publie la passerelle sur Internet (voir tailscale/funnel.json).
+      - TS_SERVE_CONFIG=/config/funnel.json
+
+      # Sans état persistant, le nœud se réenregistrerait à chaque redémarrage
+      # et Tailscale lui donnerait un nom suffixé (-1, -2…) : l'URL publique
+      # changerait, et plus rien n'arriverait de Vercel.
+      - TS_STATE_DIR=/var/lib/tailscale
+
+      # Mode « userspace » : pas besoin de /dev/net/tun ni de privilèges
+      # réseau, ce qui est exactement ce que permet Docker Desktop sur Windows.
+      - TS_USERSPACE=true
+    volumes:
+      - ./tailscale/funnel.json:/config/funnel.json:ro
+      - tailscale_state:/var/lib/tailscale
+    depends_on:
+      - evolution
+
+volumes:
+  evolution_instances:
+  postgres_data:
+  tailscale_state:

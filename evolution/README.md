@@ -11,17 +11,19 @@ Vercel (application)  ──HTTPS──►  passerelle Evolution  ──►  Wha
 Vercel (webhook)      ◄──HTTPS──  passerelle Evolution  ◄──  statuts, réponses
 ```
 
-**« Ailleurs » ne veut pas dire « VPS ».** Deux des trois options ci-dessous ne demandent aucun
-serveur à administrer.
+**« Ailleurs » ne veut dire ni « VPS », ni « payant ».** L'option retenue par l'école — section B —
+ne coûte rien du tout : ni serveur à louer, ni nom de domaine à acheter.
 
 | Fichier | Rôle |
 | --- | --- |
-| `docker-compose.local.yml` | Essai sur le PC de l'école, sans rien exposer — pour valider la chaîne |
-| `railway/` | **Hébergement géré, sans VPS** (recommandé) : image, `railway.json`, variables |
-| `docker-compose.tunnel.yml` | **PC de l'école + tunnel Cloudflare, sans VPS ni frais** |
-| `docker-compose.yml` | VPS classique : passerelle + Postgres + Redis + Caddy (HTTPS) |
-| `Caddyfile` | Reverse proxy et certificat Let's Encrypt, pour l'option VPS |
+| `docker-compose.funnel.yml` | **Option retenue** : PC de l'école + Tailscale Funnel — gratuit, sans domaine |
+| `tailscale/` | Configuration du Funnel (ce qui rend la passerelle publique) |
+| `keep-alive.ps1` | **Verrouille le poste en service continu** : veille, redémarrage de Docker |
 | `check-gateway.ps1` | **Diagnostic** : vérifie toute la chaîne Vercel ↔ passerelle depuis Windows |
+| `docker-compose.local.yml` | Essai sur le PC, sans rien exposer — pour valider la chaîne |
+| `docker-compose.tunnel.yml` | Variante gratuite avec Cloudflare, si l'école possède déjà un domaine |
+| `railway/` | Hébergement géré et payant, indépendant du PC de l'école |
+| `docker-compose.yml` + `Caddyfile` | VPS classique |
 | `qr.ps1` | Affiche un QR de connexion depuis Windows, sans passer par l'application |
 | `.env` | Secrets — **jamais commité** (couvert par `.gitignore`) |
 
@@ -29,27 +31,28 @@ serveur à administrer.
 
 ## Choisir l'hébergement
 
-|  | **B. Railway** (recommandé) | **C. Tunnel Cloudflare** | **D. VPS** |
-| --- | --- | --- | --- |
-| Serveur à administrer | aucun | aucun | oui (Ubuntu, SSH, mises à jour) |
-| Coût mensuel | ≈ 5 $ | **0 €** | ≈ 4 € |
-| Fonctionne PC éteint | **oui** | non | oui |
-| Il faut | une carte bancaire internationale | un domaine sur Cloudflare + un PC allumé | une carte + gérer un serveur |
-| HTTPS | fourni | fourni | Caddy (automatique) |
-| Mise en service | ~20 min | ~30 min | ~45 min |
+|  | **B. Tailscale Funnel** *(retenu)* | **C. Cloudflare** | **D. Railway** | **E. VPS** |
+| --- | --- | --- | --- | --- |
+| Coût mensuel | **0 DA** | **0 DA** | 7–10 $ | ≈ 4 € |
+| Nom de domaine | **aucun** | obligatoire | aucun | obligatoire |
+| Serveur à administrer | aucun | aucun | aucun | oui |
+| Fonctionne PC éteint | non | non | oui | oui |
+| Mise en service | ~30 min | ~30 min | ~20 min | ~45 min |
 
-**Le vrai critère** : si le secrétariat éteint son poste le soir, l'option C n'enverra plus rien
-la nuit ni le week-end — sans prévenir personne. Si les alertes doivent partir à toute heure,
-prendre l'option B.
+**Le seul vrai arbitrage** : les options gratuites font tourner la passerelle sur le PC du
+secrétariat. Tant qu'il est allumé, tout fonctionne, 24 h/24 s'il le faut. Éteint ou en veille,
+**aucun message ne part** — et personne n'est prévenu automatiquement. `keep-alive.ps1` supprime les
+causes évitables (veille, Docker non relancé après une coupure) ; il ne peut rien contre un poste
+débranché.
 
-Dans les trois cas, l'application est identique : seule change la valeur de `EVOLUTION_BASE_URL`.
+Dans tous les cas l'application est identique : seule change la valeur de `EVOLUTION_BASE_URL`.
 
 ---
 
-## A. Essai local (gratuit, ~20 min)
+## A. Essai local (~20 min)
 
-À faire **avant** tout hébergement : cela valide toute la chaîne sans rien dépenser et sans exposer
-quoi que ce soit sur Internet.
+À faire **avant** de publier quoi que ce soit : cela valide toute la chaîne sans rien exposer sur
+Internet.
 
 ```powershell
 docker compose -f evolution/docker-compose.local.yml up -d
@@ -79,179 +82,184 @@ EVOLUTION_WEBHOOK_URL=http://host.docker.internal:3000/api/whatsapp/webhook
 > `host.docker.internal` désigne le PC vu depuis le conteneur. C'est ce qui permet à la passerelle
 > de rappeler `npm run dev` **sans tunnel ni domaine**.
 
-Puis dans l'application : **Paramètres → WhatsApp → Initialiser → Connecter →** scanner le QR.
+Puis : **Paramètres → WhatsApp → Initialiser → Connecter →** scanner le QR.
 
 **Limite de ce mode** : rien n'est joignable depuis Vercel. C'est un banc d'essai, pas une mise en
-production.
+production — d'où la section suivante.
 
 ---
 
-## B. Railway — hébergement géré, sans VPS *(recommandé)*
+## B. PC de l'école + Tailscale Funnel — **l'option retenue**
 
-Railway exécute des conteneurs sans serveur à administrer : ni SSH, ni Ubuntu, ni certificat, ni
-mise à jour système. On y déploie **exactement la même image** qu'en local, et l'on obtient une
-adresse HTTPS publique et stable.
-
-**Prévoir** : une carte bancaire internationale (Visa/Mastercard). Le plan Hobby coûte 5 $/mois et
-inclut 5 $ de consommation ; la passerelle + Postgres consomment à peu près ce montant, donc
-compter **5 à 8 $/mois** selon le trafic. Sans carte utilisable, passer à l'option C.
-
-### 1. Créer le projet et sa base
-
-1. Créer un compte sur [railway.com](https://railway.com) (connexion par GitHub), puis activer le
-   plan **Hobby**.
-2. **New Project → Deploy PostgreSQL**. Railway crée un service `Postgres` ; ne rien y toucher, ses
-   identifiants seront injectés automatiquement.
-
-### 2. Ajouter le service de la passerelle
-
-Deux façons — la première est la plus simple, la seconde garde la version épinglée dans ce dépôt.
-
-**Depuis l'image Docker (le plus simple)**
-> **+ New → Docker Image**, saisir : `evoapicloud/evolution-api:v2.3.7`
-
-**Depuis ce dépôt (versions suivies dans Git)**
-> **+ New → GitHub Repo →** `abdouni493/benzaoui-school`, puis **Settings → Root Directory** =
-> `evolution/railway`.
-> Railway construit alors [`railway/Dockerfile`](railway/Dockerfile). Le fichier
-> [`railway/railway.json`](railway/railway.json) limite les redéploiements aux modifications de ce
-> dossier (`watchPatterns`) : pousser du code applicatif ne coupera pas la passerelle.
-
-### 3. Attacher un volume — **l'étape à ne pas sauter**
-
-**Service passerelle → Settings → Volumes → New Volume**, chemin de montage :
+Gratuit, sans VPS, et **sans nom de domaine**. Tailscale Funnel donne à la passerelle une adresse
+HTTPS publique et stable, du type `https://benzaoui-wa.tailXXXX.ts.net`, fournie avec le compte
+gratuit. C'est elle que Vercel appellera.
 
 ```
-/evolution/instances
+Vercel  ──https──►  edge Tailscale  ──tunnel sortant──►  PC de l'école
 ```
 
-C'est là que vit la session WhatsApp. **Sans volume, chaque redéploiement délie le téléphone** et
-il faut retourner scanner un QR code au secrétariat.
+Aucun port n'est ouvert sur la box : c'est le conteneur `tailscale` qui ouvre la connexion **vers
+l'extérieur**. Le montage tient donc derrière une IP dynamique, un routeur d'opérateur, et même un
+partage de connexion 4G.
 
-### 4. Générer le domaine public
+### 1. Créer le compte Tailscale
 
-**Settings → Networking → Public Networking → Generate Domain.** Railway renvoie une adresse du type
-`benzaoui-wa-production.up.railway.app`. La noter : c'est le `EVOLUTION_BASE_URL` de Vercel.
+Sur [tailscale.com](https://tailscale.com), créer un compte **gratuit** (plan Personal). Dans la
+console d'administration, relever le **nom du tailnet**, de la forme `tail1a2b3c.ts.net` : il forme
+la seconde moitié de l'adresse publique.
 
-### 5. Renseigner les variables
+### 2. Activer les certificats HTTPS
 
-**Variables → Raw Editor**, coller le contenu de [`railway/env.example`](railway/env.example), puis
-remplacer deux valeurs :
+Console → **DNS → HTTPS Certificates → Enable HTTPS.** Sans cela, le Funnel ne peut pas servir en
+HTTPS, et Vercel refusera de parler à la passerelle.
 
-- `SERVER_URL` → `https://` + le domaine de l'étape 4, **sans slash final** ;
-- `AUTHENTICATION_API_KEY` → une chaîne aléatoire, générée sous PowerShell :
+### 3. Autoriser le Funnel
+
+Console → **Access controls**, ajouter dans la politique (ou compléter `nodeAttrs` s'il existe) :
+
+```json
+"nodeAttrs": [
+  { "target": ["autogroup:member"], "attr": ["funnel"] }
+]
+```
+
+Sans cet attribut, le conteneur démarre mais refuse de publier : la passerelle reste privée et
+Vercel obtient un délai d'attente.
+
+### 4. Générer une clé d'authentification
+
+Console → **Settings → Keys → Generate auth key**. Cocher **Reusable** — sinon toute recréation du
+conteneur exigerait une nouvelle clé. Copier la valeur `tskey-auth-…`.
+
+### 5. Renseigner `evolution/.env`
+
+Ce fichier n'est **jamais commité** (couvert par `.gitignore`).
+
+```
+TAILSCALE_AUTHKEY=tskey-auth-...
+TAILSCALE_HOSTNAME=benzaoui-wa
+TUNNEL_PUBLIC_URL=https://benzaoui-wa.VOTRE-TAILNET.ts.net
+EVOLUTION_API_KEY=<chaîne aléatoire>
+POSTGRES_PASSWORD=<autre chaîne aléatoire>
+```
+
+L'adresse se déduit sans attendre : `https://` + `TAILSCALE_HOSTNAME` + `.` + le tailnet de
+l'étape 1. Générer les deux valeurs aléatoires sous PowerShell :
 
 ```powershell
 -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
 ```
 
-Laisser `${{Postgres.DATABASE_URL}}` tel quel : Railway le remplace tout seul.
+> `TUNNEL_PUBLIC_URL` devient le `SERVER_URL` de la passerelle. Il doit correspondre **au caractère
+> près** à `EVOLUTION_BASE_URL` côté Vercel : c'est la valeur inscrite dans le champ `server_url` de
+> chaque webhook, et `/api/whatsapp/webhook` compare les deux. Une différence, et tous les statuts
+> de remise sont rejetés en 403.
 
-> `SERVER_URL` doit correspondre **au caractère près** au domaine servi. C'est la valeur que la
-> passerelle inscrit dans le champ `server_url` de chaque webhook, et que `/api/whatsapp/webhook`
-> compare à `EVOLUTION_BASE_URL` : la moindre différence fait rejeter tous les statuts en 403.
-
-### 6. Interdire la mise en veille
-
-**Settings → Deploy →** vérifier que **Serverless / App Sleeping** est **désactivé**. Une passerelle
-endormie perd sa session WhatsApp : au réveil, plus rien ne part tant que personne n'a rescanné.
-(Le service déployé depuis le dépôt hérite déjà de `sleepApplication: false`.)
-
-### 7. Vérifier avant d'aller plus loin
+### 6. Démarrer
 
 ```powershell
-curl.exe -s https://VOTRE-DOMAINE.up.railway.app/
+docker compose -f evolution/docker-compose.funnel.yml up -d
+docker compose -f evolution/docker-compose.funnel.yml logs -f tailscale
 ```
 
-Doit répondre un JSON avec la version. Sinon, consulter **Deployments → Logs** dans Railway.
+Les journaux du conteneur `tailscale` affichent l'adresse publique réellement obtenue. Si elle
+diffère de `TUNNEL_PUBLIC_URL`, corriger `.env` et relancer `up -d` — sinon les webhooks seront
+rejetés.
 
-### 8. Configurer Vercel, puis connecter le téléphone
+### 7. Vérifier depuis Internet
 
-Suivre [« Variables Vercel »](#variables-vercel-communes-à-b-c-et-d) puis
+```powershell
+curl.exe -s https://benzaoui-wa.VOTRE-TAILNET.ts.net/
+```
+
+Doit répondre un JSON avec la version d'Evolution. Idéalement, refaire le test depuis un téléphone
+en 4G, hors du réseau de l'école : c'est la preuve que Vercel y arrivera aussi.
+
+### 8. Verrouiller le poste en service continu
+
+C'est l'étape qui fait la différence entre « ça marche aujourd'hui » et « ça marche encore dans six
+mois ».
+
+```powershell
+# Rapport, ne modifie rien :
+powershell -ExecutionPolicy Bypass -File evolution\keep-alive.ps1
+
+# Puis, dans un PowerShell ouvert en ADMINISTRATEUR :
+powershell -ExecutionPolicy Bypass -File evolution\keep-alive.ps1 -Apply
+```
+
+Le script désactive la mise en veille (qui suspend les conteneurs et fait tomber la session), crée
+le raccourci de démarrage de Docker Desktop (sans lui, après une coupure de courant, les conteneurs
+ne repartent pas malgré leur politique `unless-stopped`), et contrôle l'état des trois conteneurs.
+
+Il signale aussi deux réglages qu'il ne touche pas volontairement : l'**ouverture de session
+automatique** (elle exige de stocker un mot de passe — à n'activer que si le poste est physiquement
+protégé) et les **heures d'activité de Windows Update**, pour que les redémarrages tombent hors des
+heures de cours.
+
+### 9. Configurer Vercel, puis connecter le téléphone
+
+Suivre [« Variables Vercel »](#variables-vercel-communes-à-toutes-les-options) puis
 [« Première connexion »](#première-connexion) ci-dessous.
 
 ---
 
-## C. PC de l'école + tunnel Cloudflare — sans VPS et sans frais
+## C. PC de l'école + tunnel Cloudflare
 
-La passerelle reste sur le poste du secrétariat, mais un **tunnel Cloudflare** lui donne une adresse
-HTTPS publique et stable. Aucun port n'est ouvert sur la box de l'école : c'est le conteneur
-`cloudflared` qui ouvre la connexion **vers l'extérieur**. Cela fonctionne donc derrière une IP
-dynamique, un routeur d'opérateur, et même un partage de connexion 4G.
+Même principe et même gratuité que l'option B, mais **exige un nom de domaine** géré par Cloudflare.
+À retenir seulement si l'école en possède déjà un.
 
-> **La contrepartie, à assumer clairement** : PC éteint, en veille, ou sans Internet = **aucun
-> message ne part**. L'application affiche « Passerelle injoignable » dans Paramètres, mais personne
-> n'est alerté automatiquement.
-
-### 1. Mettre un domaine sur Cloudflare
-
-Ajouter le domaine de l'école sur [cloudflare.com](https://cloudflare.com) (offre gratuite) et
-pointer les serveurs de noms chez le registrar. Sans domaine, cette option n'est pas possible :
-prendre l'option B.
-
-### 2. Créer le tunnel
-
-**Cloudflare Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared.** Le nommer
-(`ecole-whatsapp`), puis **copier le jeton** affiché dans la commande d'installation — la longue
-chaîne après `--token`.
-
-### 3. Déclarer le nom public
-
-Dans l'onglet **Public Hostname** du tunnel :
-
-| Champ | Valeur |
-| --- | --- |
-| Subdomain | `wa` |
-| Domain | `votre-domaine.dz` |
-| Service Type | `HTTP` |
-| URL | `evolution:8080` |
-
-`evolution:8080` est le nom du conteneur sur le réseau Docker — c'est `cloudflared` qui le résout,
-pas Internet.
-
-### 4. Renseigner les secrets et démarrer
-
-Dans `evolution/.env` (jamais commité) :
-
-```
-CLOUDFLARE_TUNNEL_TOKEN=<le jeton de l'étape 2>
-TUNNEL_PUBLIC_URL=https://wa.votre-domaine.dz
-EVOLUTION_API_KEY=<chaîne aléatoire de 64 caractères>
-POSTGRES_PASSWORD=<autre chaîne aléatoire>
-```
-
-```powershell
-docker compose -f evolution/docker-compose.tunnel.yml up -d
-docker compose -f evolution/docker-compose.tunnel.yml logs -f cloudflared
-```
-
-Vérifier depuis n'importe quel réseau :
-
-```powershell
-curl.exe -s https://wa.votre-domaine.dz/
-```
-
-### 5. Empêcher le PC de s'endormir
-
-C'est ce qui fait la différence entre un service qui tient et un service qui tombe une nuit sur deux :
-
-```powershell
-# Ne jamais mettre en veille ni éteindre l'écran quand le PC est sur secteur
-powercfg /change standby-timeout-ac 0
-powercfg /change hibernate-timeout-ac 0
-```
-
-Puis, dans **Docker Desktop → Settings → General**, cocher **Start Docker Desktop when you log in**.
-Les conteneurs sont en `restart: unless-stopped` : ils repartiront seuls après une coupure de
-courant, à condition que la session Windows s'ouvre automatiquement.
-
-### 6. Configurer Vercel, puis connecter le téléphone
-
-Suivre les deux sections ci-dessous.
+1. Ajouter le domaine sur [cloudflare.com](https://cloudflare.com) (offre gratuite) et pointer les
+   serveurs de noms chez le registrar.
+2. **Zero Trust → Networks → Tunnels → Create a tunnel → Cloudflared.** Nommer le tunnel, puis
+   copier le **jeton** affiché dans la commande d'installation (la longue chaîne après `--token`).
+3. Onglet **Public Hostname** : sous-domaine `wa`, domaine de l'école, type `HTTP`, URL
+   `evolution:8080` — c'est le nom du conteneur sur le réseau Docker, résolu par `cloudflared` et
+   non par Internet.
+4. Dans `evolution/.env` :
+   ```
+   CLOUDFLARE_TUNNEL_TOKEN=<le jeton de l'étape 2>
+   TUNNEL_PUBLIC_URL=https://wa.votre-domaine.dz
+   EVOLUTION_API_KEY=<chaîne aléatoire>
+   POSTGRES_PASSWORD=<autre chaîne aléatoire>
+   ```
+5. Démarrer, puis vérifier :
+   ```powershell
+   docker compose -f evolution/docker-compose.tunnel.yml up -d
+   curl.exe -s https://wa.votre-domaine.dz/
+   ```
+6. Appliquer l'étape 8 de la section B (`keep-alive.ps1`) : la dépendance au PC est identique.
 
 ---
 
-## D. VPS (~4 €/mois)
+## D. Railway — hébergement géré (payant)
+
+La seule option de cette page qui continue d'envoyer **quand le PC de l'école est éteint**. Ni SSH,
+ni Ubuntu, ni certificat à gérer — mais une carte bancaire internationale et **7 à 10 $/mois**
+(abonnement Hobby à 5 $ incluant 5 $ d'usage, dépassé par une passerelle et un Postgres qui tournent
+en continu).
+
+1. Compte sur [railway.com](https://railway.com), plan **Hobby**, puis **New Project → Deploy
+   PostgreSQL**.
+2. **+ New → Docker Image** : `evoapicloud/evolution-api:v2.3.7`.
+   *Variante suivie dans Git* : **+ New → GitHub Repo**, puis **Settings → Root Directory** =
+   `evolution/railway`. Railway construit alors [`railway/Dockerfile`](railway/Dockerfile), et
+   [`railway/railway.json`](railway/railway.json) limite les redéploiements à ce dossier — pousser
+   du code applicatif ne coupera pas WhatsApp.
+3. **Settings → Volumes → New Volume**, chemin `/evolution/instances`. **À ne pas sauter** : sans
+   volume, chaque redéploiement délie le téléphone et impose un nouveau scan.
+4. **Settings → Networking → Generate Domain**, noter l'adresse.
+5. **Variables → Raw Editor** : coller [`railway/env.example`](railway/env.example), puis renseigner
+   `SERVER_URL` (le domaine de l'étape 4, sans slash final) et `AUTHENTICATION_API_KEY` (aléatoire).
+   Laisser `${{Postgres.DATABASE_URL}}` tel quel.
+6. **Settings → Deploy** : vérifier que **Serverless / App Sleeping** est **désactivé** — une
+   passerelle endormie perd sa session.
+7. Vérifier : `curl.exe -s https://VOTRE-DOMAINE.up.railway.app/`
+
+---
+
+## E. VPS (~4 €/mois)
 
 L'option classique, conservée pour mémoire : elle demande d'administrer un serveur Linux.
 
@@ -300,21 +308,24 @@ pas obtenu son certificat, vérifier que les ports 80 et 443 sont ouverts et que
 
 ---
 
-## Variables Vercel (communes à B, C et D)
+## Variables Vercel (communes à toutes les options)
 
 **Vercel → Settings → Environment Variables**, en Production *et* Preview :
 
 | Variable | Valeur |
 | --- | --- |
-| `EVOLUTION_BASE_URL` | l'adresse HTTPS de la passerelle, **sans slash final** |
+| `EVOLUTION_BASE_URL` | l'adresse HTTPS publique de la passerelle, **sans slash final** |
 | `EVOLUTION_API_KEY` | la clé de la passerelle (`AUTHENTICATION_API_KEY`), à l'identique |
 | `EVOLUTION_INSTANCE` | `benzaoui` |
 | `EVOLUTION_WEBHOOK_TOKEN` | une **nouvelle** valeur aléatoire, différente de la clé API |
 
+Avec l'option B, `EVOLUTION_BASE_URL` vaut exactement le `TUNNEL_PUBLIC_URL` de `evolution/.env`.
+
 > **Ne PAS définir `EVOLUTION_WEBHOOK_URL` sur Vercel.** Laissée vide, l'application dérive
-> l'adresse de son propre domaine de production. Renseignée par erreur avec une valeur locale
-> (`localhost`, `host.docker.internal`), elle demanderait à la passerelle de rappeler une machine
-> qui n'existe pas pour elle : les messages partiraient, mais aucun statut ne reviendrait jamais.
+> l'adresse de son propre domaine de production. Renseignée par erreur avec la valeur locale
+> (`host.docker.internal`) recopiée depuis `.env.local`, elle demanderait à la passerelle de
+> rappeler une machine qui n'existe pas pour elle : les messages partiraient, mais aucun statut ni
+> aucune réponse de parent ne reviendrait — sans erreur visible.
 
 Aucune de ces variables ne doit être préfixée `NEXT_PUBLIC_` : ce préfixe les publierait dans le
 navigateur de chaque visiteur, clé de la passerelle comprise.
@@ -326,8 +337,7 @@ Puis **redéployer** : les variables ne sont lues qu'au déploiement, les enregi
 ## Première connexion
 
 1. **Paramètres → WhatsApp → Initialiser l'instance** — crée la session sur la passerelle et y
-   enregistre l'adresse du webhook. À refaire après tout changement de domaine (Railway, tunnel,
-   ou Vercel).
+   enregistre l'adresse du webhook. À refaire après tout changement de domaine.
 2. **Connecter WhatsApp** — un QR code s'affiche.
 3. Sur le téléphone de l'école : WhatsApp → ⋮ → **Appareils connectés** → **Connecter un appareil**
    → scanner. Le badge passe au vert et le numéro lié s'affiche.
@@ -345,7 +355,7 @@ Depuis le poste de l'école, sans rien modifier :
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File evolution\check-gateway.ps1 `
-  -BaseUrl https://VOTRE-DOMAINE.up.railway.app `
+  -BaseUrl https://benzaoui-wa.VOTRE-TAILNET.ts.net `
   -ApiKey  VOTRE_CLE `
   -AppUrl  https://benzaoui-school.vercel.app
 ```
@@ -362,29 +372,30 @@ Sans paramètres, il relit `.env.local` — pratique pour contrôler le montage 
 
 ### Commandes utiles
 
-Sur le PC de l'école (options A et C) :
-
 ```powershell
-docker compose -f evolution/docker-compose.tunnel.yml logs -f evolution   # journaux
-docker compose -f evolution/docker-compose.tunnel.yml restart evolution   # redémarrer
-docker compose -f evolution/docker-compose.tunnel.yml down                # arrêter
+docker compose -f evolution/docker-compose.funnel.yml logs -f evolution   # journaux passerelle
+docker compose -f evolution/docker-compose.funnel.yml logs -f tailscale   # journaux du Funnel
+docker compose -f evolution/docker-compose.funnel.yml restart evolution   # redémarrer
+docker compose -f evolution/docker-compose.funnel.yml pull                # mettre à jour l'image
+docker compose -f evolution/docker-compose.funnel.yml down                # arrêter (volumes conservés)
 ```
 
-Sur Railway (option B) : **Deployments → Logs** pour les journaux, **Restart** pour redémarrer.
+La session WhatsApp survit aux redémarrages : elle vit dans le volume `evolution_instances`. Un
+`docker compose down -v` la détruirait — il faudrait alors rescanner.
 
-La session WhatsApp survit aux redémarrages : elle est stockée dans le volume `evolution_instances`
-(ou le volume Railway monté sur `/evolution/instances`). Un `docker compose down -v`, ou la
-suppression du volume Railway, la détruirait — il faudrait alors rescanner.
+Le volume `tailscale_state` est tout aussi important : sans lui, le nœud se réenregistrerait à
+chaque démarrage et Tailscale lui donnerait un nom suffixé (`-1`, `-2`…). **L'adresse publique
+changerait**, et plus rien n'arriverait de Vercel.
 
 ### Sauvegarde
 
-Le volume contient les identifiants de session. Sans lui, il faut rescanner le QR code — ce n'est
-pas dramatique, mais c'est un déplacement au secrétariat.
-
-```bash
-docker run --rm -v evolution_evolution_instances:/data -v $(pwd):/backup \
+```powershell
+docker run --rm -v evolution_evolution_instances:/data -v ${PWD}:/backup `
   alpine tar czf /backup/whatsapp-session.tar.gz -C /data .
 ```
+
+Sans cette sauvegarde, une perte du volume impose un nouveau scan du QR au secrétariat — gênant,
+mais pas dramatique.
 
 ### Protéger le numéro
 
@@ -401,12 +412,15 @@ Un numéro banni par WhatsApp l'est **sans recours**. Utilisez un numéro dédi�
 
 | Symptôme | Cause probable |
 | --- | --- |
-| « Passerelle WhatsApp injoignable » | Service arrêté ou endormi, PC éteint, ou `EVOLUTION_BASE_URL` erroné |
+| « Passerelle WhatsApp injoignable » | PC éteint ou en veille, Docker non démarré, ou `EVOLUTION_BASE_URL` erroné |
+| Tout marchait, plus rien le lendemain | Le poste s'est mis en veille — lancer `keep-alive.ps1 -Apply` |
+| Plus rien après une coupure de courant | Docker Desktop ne s'est pas relancé — `keep-alive.ps1 -Apply` |
+| L'adresse `.ts.net` a changé | Volume `tailscale_state` perdu : reprendre `TUNNEL_PUBLIC_URL`, `EVOLUTION_BASE_URL`, puis **Initialiser** |
+| Le Funnel refuse de publier | Attribut `funnel` absent des ACL, ou HTTPS non activé (section B, étapes 2 et 3) |
 | « Clé API refusée » | `EVOLUTION_API_KEY` différent entre Vercel et la passerelle |
 | « Instance introuvable » | Cliquer sur **Initialiser l'instance** dans Paramètres |
 | « WhatsApp n'est pas connecté » | Session tombée : rescanner le QR code |
 | Statuts bloqués sur `queued` | Le webhook n'arrive pas : jeton, URL, ou HTTPS non joignable |
-| Session perdue à chaque déploiement | Volume absent sur `/evolution/instances` (Railway, étape 3) |
 | 403 en boucle dans les journaux | `SERVER_URL` de la passerelle ≠ `EVOLUTION_BASE_URL` de Vercel |
 | 401 en boucle dans les journaux | `EVOLUTION_WEBHOOK_TOKEN` différent entre Vercel et l'instance — recliquer sur **Initialiser** |
 
