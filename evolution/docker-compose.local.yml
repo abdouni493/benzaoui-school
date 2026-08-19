@@ -1,0 +1,92 @@
+# =============================================================================
+# Passerelle WhatsApp Evolution API — VERSION LOCALE (poste de l'école / dev)
+#
+# Sert UNIQUEMENT à valider la chaîne complète avant de louer un VPS :
+# pas de Caddy, pas de domaine, pas de TLS, pas de Redis. Tout tourne sur
+# ce PC et n'est joignable que depuis ce PC (http://localhost:8080).
+#
+# La version de production est dans docker-compose.yml (Caddy + HTTPS + Redis).
+#
+# Démarrer :  docker compose -f evolution/docker-compose.local.yml up -d
+# Journaux :  docker compose -f evolution/docker-compose.local.yml logs -f evolution
+# Arrêter  :  docker compose -f evolution/docker-compose.local.yml down
+#
+# Les secrets sont lus depuis evolution/.env (jamais commité — voir .gitignore).
+# =============================================================================
+
+services:
+  evolution:
+    image: evoapicloud/evolution-api:latest
+    container_name: evolution-local
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      # URL par laquelle la passerelle se désigne elle-même. C'est la valeur
+      # renvoyée dans le champ `server_url` des webhooks : la route
+      # /api/whatsapp/webhook vérifie qu'elle correspond à EVOLUTION_BASE_URL.
+      - SERVER_URL=http://localhost:8081
+
+      # Clé d'accès à l'API. DOIT être identique à EVOLUTION_API_KEY de .env.local.
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:?definir dans evolution/.env}
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=false
+
+      # Evolution v2 exige Postgres (Prisma) — pas de mode sans base.
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution?schema=public
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      # On ne duplique pas le contenu des messages : le journal de l'école est
+      # dans Supabase (whatsapp_messages), pas ici.
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=false
+      - DATABASE_SAVE_MESSAGE_UPDATE=false
+
+      # En local, cache mémoire : inutile de faire tourner un Redis de plus.
+      - CACHE_REDIS_ENABLED=false
+      - CACHE_LOCAL_ENABLED=true
+
+      # Nom affiché dans WhatsApp > Appareils connectés, sur le téléphone.
+      - CONFIG_SESSION_PHONE_CLIENT=BENZAOUI SCHOOL
+      - CONFIG_SESSION_PHONE_NAME=Chrome
+
+      # Nombre de QR régénérés avant abandon. Ne pas descendre trop bas : chaque
+      # clic sur « Nouveau QR code » en consomme un.
+      - QRCODE_LIMIT=30
+
+      - LOG_LEVEL=ERROR
+      - DEL_INSTANCE=false
+
+      # Les webhooks sont configurés PAR INSTANCE depuis l'application
+      # (Paramètres > WhatsApp > Initialiser), avec le jeton d'authentification.
+      - WEBHOOK_GLOBAL_ENABLED=false
+    extra_hosts:
+      # Permet au conteneur de rappeler le `npm run dev` qui tourne sur ce PC,
+      # via http://host.docker.internal:3000 — c'est ce qui évite tout tunnel.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: evolution-local-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?definir dans evolution/.env}
+      - POSTGRES_DB=evolution
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Evolution démarre en erreur si Postgres n'accepte pas encore les
+      # connexions : on attend explicitement qu'il soit prêt.
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  evolution_instances:
+  postgres_data:

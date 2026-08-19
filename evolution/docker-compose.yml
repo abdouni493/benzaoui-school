@@ -1,0 +1,117 @@
+# =============================================================================
+# Passerelle WhatsApp Evolution API — VERSION PRODUCTION (VPS)
+#
+# Quatre services : la passerelle, sa base Postgres, un cache Redis, et Caddy
+# qui termine le TLS (certificat Let's Encrypt obtenu et renouvele tout seul).
+#
+# Prerequis :
+#   - un VPS Ubuntu 24.04, 2 vCPU / 2 Go minimum
+#   - un sous-domaine en enregistrement A vers l'IP du VPS
+#   - Docker installe :  curl -fsSL https://get.docker.com | sh
+#
+# Mise en service :
+#   mkdir -p /opt/evolution && cd /opt/evolution
+#   # y copier ce fichier + Caddyfile, puis :
+#   echo "EVOLUTION_API_KEY=$(openssl rand -hex 32)"   >  .env
+#   echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"   >> .env
+#   chmod 600 .env && cat .env      # noter la cle : elle ira dans Vercel
+#   docker compose up -d
+#
+# Voir README.md de ce dossier pour la procedure detaillee.
+# =============================================================================
+
+services:
+  evolution:
+    image: evoapicloud/evolution-api:latest
+    container_name: evolution
+    restart: always
+    # Pas de `ports:` — la passerelle n'est JAMAIS exposee directement sur
+    # Internet. Seul Caddy lui parle, sur le reseau interne de Docker.
+    expose:
+      - "8080"
+    environment:
+      # Doit correspondre EXACTEMENT au domaine servi par Caddy : c'est la
+      # valeur renvoyee dans le champ `server_url` des webhooks, que la route
+      # /api/whatsapp/webhook compare a EVOLUTION_BASE_URL.
+      - SERVER_URL=${SERVER_URL:?definir dans .env, ex. https://wa.votre-domaine.dz}
+
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY:?definir dans .env}
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=false
+
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://evolution:${POSTGRES_PASSWORD}@postgres:5432/evolution?schema=public
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      # Le contenu des messages n'est pas duplique ici : le journal de l'ecole
+      # vit dans Supabase (table whatsapp_messages).
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=false
+      - DATABASE_SAVE_MESSAGE_UPDATE=false
+
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/6
+      - CACHE_LOCAL_ENABLED=false
+
+      # Nom affiche dans WhatsApp > Appareils connectes, sur le telephone.
+      - CONFIG_SESSION_PHONE_CLIENT=BENZAOUI SCHOOL
+      - CONFIG_SESSION_PHONE_NAME=Chrome
+
+      - QRCODE_LIMIT=30
+      - LOG_LEVEL=ERROR
+      # Une instance deconnectee n'est PAS supprimee : la reconnexion se fait
+      # par un simple rescan, sans tout reconfigurer.
+      - DEL_INSTANCE=false
+
+      # Les webhooks sont declares PAR INSTANCE depuis l'application
+      # (Parametres > WhatsApp > Initialiser), avec le jeton d'authentification.
+      - WEBHOOK_GLOBAL_ENABLED=false
+    volumes:
+      - evolution_instances:/evolution/instances
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: evolution-postgres
+    restart: always
+    environment:
+      - POSTGRES_USER=evolution
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?definir dans .env}
+      - POSTGRES_DB=evolution
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: evolution-redis
+    restart: always
+    volumes:
+      - redis_data:/data
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: evolution-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - evolution
+
+volumes:
+  evolution_instances:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

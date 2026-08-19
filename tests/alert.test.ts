@@ -33,22 +33,20 @@ describe("buildBalanceAlert — résolution du destinataire", () => {
     phone: "0555111222",
   };
 
-  it("privilégie le parent joignable et vise un modèle Meta", () => {
+  it("privilégie le parent joignable et produit un message texte", () => {
     const parent = { firstName: "Karim", lastName: "Meziane", phone: "0661333444" };
     const out = buildBalanceAlert({ student, parent, school, lang: "fr", low: false });
     expect(out).not.toBeNull();
     expect(out!.phone).toBe("0661333444");
     expect(out!.name).toBe("Karim Meziane");
-    // Message proactif : un MODÈLE approuvé, jamais du texte libre.
-    expect(out!.message.kind).toBe("template");
-    if (out!.message.kind === "template") {
-      expect(out!.message.templateId).toBe("debt");
-      expect(out!.message.language).toBe("fr");
-      // {{1}} = nom élève, {{2}} = montant, {{3}} = école
-      expect(out!.message.variables[0]).toBe("Yacine Meziane");
-      expect(out!.message.variables[1]).toContain("200");
-      expect(out!.message.variables[2]).toBe("École Benzaoui");
-    }
+
+    // Evolution API envoie du texte libre : plus aucun descripteur de modèle.
+    expect(out!.message.kind).toBe("text");
+    // Le message envoyé EST l'aperçu affiché — aucun écart possible.
+    expect(out!.message.text).toBe(out!.previewText);
+    expect(out!.message.text).toContain("Yacine Meziane");
+    expect(out!.message.text).toContain("200");
+    expect(out!.message.text).toContain("École Benzaoui");
   });
 
   it("bascule sur l'élève si le parent n'a pas de numéro exploitable", () => {
@@ -65,21 +63,20 @@ describe("buildBalanceAlert — résolution du destinataire", () => {
   });
 });
 
-describe("buildBalanceAlert — modèle et aperçu", () => {
-  it("solde faible positif → modèle balance_low", () => {
+describe("buildBalanceAlert — contenu du message", () => {
+  it("solde faible positif → texte « solde bientôt épuisé »", () => {
     const out = buildBalanceAlert({
       student: { firstName: "Sara", lastName: "Bakhti", balance: 700, phone: "0555000111" },
       lang: "fr",
       low: true,
     });
-    expect(out!.message.kind).toBe("template");
-    if (out!.message.kind === "template") expect(out!.message.templateId).toBe("balance_low");
-    // L'aperçu lisible reste construit pour le journal / l'affichage.
+    expect(out!.message.kind).toBe("text");
     expect(out!.previewText).toContain("épuisement");
     expect(out!.previewText).toContain("Sara Bakhti");
+    expect(out!.message.text).toBe(out!.previewText);
   });
 
-  it("dette → l'aperçu mentionne le montant dû et le nom de l'école", () => {
+  it("dette → le message mentionne le montant dû et le nom de l'école", () => {
     const out = buildBalanceAlert({
       student: { firstName: "Sara", lastName: "Bakhti", balance: -1500, phone: "0555000111" },
       school,
@@ -89,14 +86,15 @@ describe("buildBalanceAlert — modèle et aperçu", () => {
     expect(out!.previewText).toContain("École Benzaoui");
   });
 
-  it("langue arabe : variables + aperçu, code langue « ar »", () => {
+  it("langue arabe : le message est bien en arabe", () => {
     const out = buildBalanceAlert({
       student: { firstName: "Sara", lastName: "Bakhti", balance: -1500, phone: "0555000111" },
       school,
       lang: "ar",
     });
-    if (out!.message.kind === "template") expect(out!.message.language).toBe("ar");
+    expect(out!.message.kind).toBe("text");
     expect(/[؀-ۿ]/.test(out!.previewText)).toBe(true);
+    expect(out!.message.text).toBe(out!.previewText);
   });
 
   it("situation saine sans modèle explicite → null (aucun envoi)", () => {
@@ -107,7 +105,7 @@ describe("buildBalanceAlert — modèle et aperçu", () => {
     expect(out).toBeNull();
   });
 
-  it("modèle « custom » forcé → message texte libre (aperçu = formule d'adresse)", () => {
+  it("modèle « custom » forcé → message texte (aperçu = formule d'adresse)", () => {
     const out = buildBalanceAlert({
       student: { firstName: "Sara", lastName: "Bakhti", balance: 9000, phone: "0555000111" },
       lang: "fr",
@@ -115,6 +113,6 @@ describe("buildBalanceAlert — modèle et aperçu", () => {
     });
     expect(out).not.toBeNull();
     expect(out!.message.kind).toBe("text");
-    if (out!.message.kind === "text") expect(out!.message.text.trim()).toBe("Bonjour Sara Bakhti,");
+    expect(out!.message.text.trim()).toBe("Bonjour Sara Bakhti,");
   });
 });

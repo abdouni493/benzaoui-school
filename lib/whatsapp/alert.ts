@@ -3,19 +3,15 @@
  *  Fichier volontairement pur : aucune dépendance serveur (`server-only`), React
  *  ou navigateur. Il est partagé par le scan RFID (useScanProcessor) et l'envoi
  *  groupé de la fiche élève, pour qu'une SEULE logique décide à qui l'on écrit et
- *  avec quel modèle — l'envoi lui-même reste, lui, derrière /api/whatsapp/send,
- *  seul endroit où le jeton d'accès Meta est lu.
+ *  avec quel texte — l'envoi lui-même reste, lui, derrière /api/whatsapp/send,
+ *  seul endroit où la clé de la passerelle est lue.
  *
- *  Les alertes automatiques sont des messages d'entreprise PROACTIFS : elles
- *  partent donc en MODÈLE approuvé par Meta, jamais en texte libre. Ce module
- *  construit le descripteur de modèle (identifiant + variables ordonnées) ; la
- *  correspondance vers le nom approuvé côté Meta est faite au moment de l'envoi. */
+ *  Depuis le passage à Evolution API, l'alerte part en TEXTE : le message envoyé
+ *  et l'aperçu affiché sont donc le même contenu, sans écart possible. */
 
 import { isSendablePhone } from "./phone";
 import {
-  META_TEMPLATE_CONFIG,
   getTemplate,
-  isAlertTemplate,
   type MessageLanguage,
   type TemplateContext,
   type WhatsAppTemplateId,
@@ -52,7 +48,7 @@ export interface AlertRecipientPayload {
   name: string;
   studentId?: string;
   parentId?: string;
-  /** message à envoyer (modèle Meta pour une alerte, texte pour un libre forcé) */
+  /** message à envoyer — toujours du texte, identique à `previewText` */
   message: OutgoingMessage;
   /** aperçu lisible du message, pour le journal et l'affichage */
   previewText: string;
@@ -121,14 +117,9 @@ export function buildBalanceAlert(params: {
 
   const previewText = getTemplate(templateId).build(ctx, lang);
 
-  const message: OutgoingMessage = isAlertTemplate(templateId)
-    ? {
-        kind: "template",
-        templateId,
-        variables: META_TEMPLATE_CONFIG[templateId].buildVariables(ctx),
-        language: lang,
-      }
-    : { kind: "text", text: previewText };
+  // Aperçu et message envoyé sont volontairement le MÊME texte : ce que la
+  // réception lit à l'écran est exactement ce que la famille recevra.
+  const message: OutgoingMessage = { kind: "text", text: previewText };
 
   return {
     phone: target.phone,

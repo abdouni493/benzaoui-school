@@ -1,11 +1,11 @@
-/** Normalisation des numéros vers le MSISDN international attendu par Meta.
+/** Normalisation des numéros vers le MSISDN international.
  *
  *  Les numéros saisis dans l'application n'ont aucun format imposé : on croise
- *  du "+213 555 12 34 56", du "0555123456", du "213555123456". L'API WhatsApp
- *  Cloud de Meta attend, elle, le numéro en chiffres bruts avec indicatif pays
- *  et SANS "+" (ex. "213555123456") — c'est ce MSISDN qui part dans le champ
- *  `to` de l'appel Graph. Aucun identifiant de discussion "@c.us" ici : c'était
- *  une spécificité de l'ancienne passerelle WhatsApp Web, Meta n'en veut pas. */
+ *  du "+213 555 12 34 56", du "0555123456", du "213555123456". La passerelle
+ *  Evolution attend, elle, le numéro en chiffres bruts avec indicatif pays et
+ *  SANS "+" (ex. "213555123456") — c'est ce MSISDN qui part dans le champ
+ *  `number` de l'appel. Aucun suffixe de JID ("@s.whatsapp.net", "@c.us") ici :
+ *  la passerelle l'ajoute elle-même. */
 
 /** Indicatif appliqué à un numéro saisi en format national (Algérie par défaut). */
 export const DEFAULT_COUNTRY_CODE = "213";
@@ -15,7 +15,7 @@ const DZ_NATIONAL_LENGTH = 9;
 
 export interface NormalizedPhone {
   /** chiffres uniquement, indicatif pays inclus, sans "+" — ex. "213555123456".
-   *  C'est la valeur envoyée à Meta dans le champ `to`. */
+   *  C'est la valeur envoyée à la passerelle dans le champ `number`. */
   msisdn: string;
   /** rendu lisible pour l'interface — ex. "+213 555 123 456" */
   display: string;

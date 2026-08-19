@@ -25,72 +25,89 @@ npm run dev
 2. Exécuter ensuite chaque fichier de `supabase/migrations/` (dans l'ordre des dates).
 3. Créer le premier compte admin depuis la page de connexion (« Créer un compte admin »).
 
-## Messages WhatsApp (Meta Cloud API)
+## Messages WhatsApp (Evolution API — passerelle auto-hébergée)
 
 Les fiches élèves et parents envoient des messages WhatsApp (alerte de dette, solde épuisé, solde
-faible, frais d'inscription, ou message libre) via l'**API Cloud officielle de Meta** (WhatsApp
-Business Platform). Plus de service auto-hébergé, plus de session WhatsApp Web, plus de QR code :
-tout est hébergé par Meta et joignable directement depuis les routes Next.js.
+faible, frais d'inscription, ou message libre) via **[Evolution API](https://github.com/EvolutionAPI/evolution-api)**,
+une passerelle open source qui pilote une **vraie session WhatsApp Web** depuis le numéro de l'école.
 
 ```
-Navigateur → /api/whatsapp/send → Graph API Meta → WhatsApp de la famille
-WhatsApp → Webhook Meta → /api/whatsapp/webhook → Supabase
+Navigateur → /api/whatsapp/send → passerelle Evolution (VPS) → WhatsApp de la famille
+WhatsApp → passerelle → /api/whatsapp/webhook → Supabase (statuts, messages entrants)
 ```
 
-**Politique de messagerie.** Meta distingue deux cas :
+> ### ⚠️ À lire avant de mettre en service
+>
+> - **La passerelle exige une machine allumée en permanence.** Vercel est serverless : il ne peut
+>   pas l'héberger. Si le serveur est éteint, **aucun message ne part** — silencieusement.
+> - **Le numéro utilisé peut être banni par WhatsApp**, sans préavis ni recours, en cas d'envoi
+>   massif ou de plaintes des destinataires. Utilisez un numéro dédié à l'école, jamais un numéro
+>   personnel. Ce risque n'existait pas avec un fournisseur officiel : c'est la contrepartie de la
+>   gratuité.
+> - Une mise à jour de WhatsApp peut casser la passerelle quelques jours. C'est rare, mais possible.
 
-- **Messages proactifs** (alertes automatiques du scan RFID, envois groupés, boutons d'alerte des
-  fiches) → **modèles approuvés** par Meta, toujours délivrables.
-- **Message libre** (« Message libre » dans la fenêtre d'envoi) → autorisé **uniquement** si la
-  famille a écrit à l'école dans les dernières 24 h (fenêtre de service client). Hors fenêtre,
-  l'envoi échoue avec un message explicite. La fenêtre est déterminée par les messages entrants
-  réels remontés par le webhook — aucun minuteur local fictif.
+**Ce que la migration a apporté.** Plus aucun modèle à faire approuver : les quatre alertes sont du
+texte libre FR/AR, modifiables immédiatement dans `lib/whatsapp/templates.ts` ou directement dans la
+fenêtre d'envoi. Plus de fenêtre de service client de 24 h : l'école écrit quand elle veut. Et le
+coût par message est nul, quel que soit le volume.
 
-### Configuration Meta (à faire une fois)
+### Installation de la passerelle
 
-1. Créer un compte développeur Meta : <https://developers.facebook.com>.
-2. Créer une **application** Meta (type *Business*).
-3. Ajouter le produit **WhatsApp** à l'application.
-4. Configurer / sélectionner le **WhatsApp Business Account (WABA)**.
-5. Ajouter et **vérifier le numéro** de téléphone professionnel de l'école.
-6. Relever le **Phone Number ID** (identifiant numérique, ≠ le numéro affiché) dans WhatsApp Manager.
-7. Relever le **WABA ID** (WhatsApp Business Account ID).
-8. Créer un **jeton d'accès permanent** via un *System User* (Business Settings → System Users),
-   avec les permissions `whatsapp_business_messaging` et `whatsapp_business_management`.
-9. Configurer le **webhook** (voir ci-dessous) et s'abonner au champ `messages`.
-10. Renseigner les variables d'environnement (`.env.local` en local, Vercel en production) — voir
-    [`.env.example`](.env.example). Aucun secret ne doit être préfixé par `NEXT_PUBLIC_`.
-11. Créer et faire **approuver les modèles** de message (voir ci-dessous), puis mettre leurs noms
-    exacts dans `WHATSAPP_TEMPLATE_*`.
-12. Tester l'envoi depuis une fiche élève, et vérifier l'état dans **Paramètres → WhatsApp**.
+Procédure complète (VPS, Docker, Caddy, TLS) dans **[`evolution/README.md`](evolution/README.md)**.
+En résumé :
+
+1. Louer un VPS (2 vCPU / 2 Go suffisent — Hetzner CX22 ≈ 4 €/mois) sous Ubuntu 24.04.
+2. Pointer un sous-domaine (`wa.votre-domaine.dz`) en enregistrement **A** vers l'IP du VPS.
+3. Installer Docker, copier `evolution/docker-compose.yml` et `evolution/Caddyfile`, générer les
+   secrets dans `evolution/.env`, puis `docker compose up -d`.
+4. Vérifier que l'API répond et **noter l'URL de base exacte** — certaines installations servent
+   l'API sous `/api` :
+   ```bash
+   curl -s https://wa.votre-domaine.dz/instance/fetchInstances -H "apikey: VOTRE_CLE"
+   ```
+
+Pour un essai **sans VPS**, `evolution/docker-compose.local.yml` fait tourner la même passerelle sur
+le poste de l'école. Pratique pour valider la chaîne avant de payer un serveur — mais les envois
+s'arrêtent dès que le PC est éteint.
+
+### Première connexion
+
+1. Renseigner les variables d'environnement (voir [`.env.example`](.env.example)).
+2. Dans l'application : **Paramètres → WhatsApp**.
+3. **Initialiser l'instance** — crée la session sur la passerelle et y enregistre l'adresse du
+   webhook. À refaire après tout changement de domaine.
+4. **Connecter WhatsApp** — un QR code s'affiche.
+5. Sur le téléphone de l'école : WhatsApp → ⋮ → **Appareils connectés** → **Connecter un appareil**
+   → scanner. Le badge passe au vert et le numéro lié s'affiche.
+
+Le QR expire en moins d'une minute ; le bouton **Nouveau QR code** en génère un autre.
 
 ### Webhook
 
-- **URL de rappel** : `https://VOTRE-DOMAINE/api/whatsapp/webhook`
-- **Verify token** : la valeur de `WHATSAPP_WEBHOOK_VERIFY_TOKEN`
-- **Champ abonné** : `messages`
+L'adresse est enregistrée automatiquement par « Initialiser l'instance ». Elle est dérivée
+**uniquement de la configuration serveur** (`EVOLUTION_WEBHOOK_URL`, `NEXT_PUBLIC_SITE_URL`, ou
+l'URL Vercel) — jamais d'un en-tête de la requête, qui serait falsifiable par l'appelant.
 
-Le endpoint répond au GET de vérification de Meta et valide chaque POST par la **signature
-`X-Hub-Signature-256`** (HMAC de l'App Secret) : les requêtes non signées sont refusées. Il met à
-jour les statuts (`sent` → `delivered` → `read` | `failed`) et enregistre les messages entrants
-(fenêtre de service client). En local, exposer le port via un tunnel HTTPS (ex. `ngrok`) le temps
-des tests.
+La passerelle ne signant pas ses appels, `/api/whatsapp/webhook` les authentifie par un **jeton
+partagé** (`EVOLUTION_WEBHOOK_TOKEN`, comparé en temps constant) et vérifie que le champ
+`server_url` du corps désigne bien la passerelle configurée. Toute requête qui échoue à l'un des
+deux contrôles est rejetée en 401/403. Le endpoint met à jour les statuts
+(`queued` → `sent` → `delivered` → `read` | `failed`) et enregistre les messages entrants.
 
-### Modèles de message requis
+### Règles d'exploitation
 
-Créer ces modèles dans **WhatsApp Manager → Message templates** (catégorie *Utility*), en français
-**et** en arabe si les deux langues sont utilisées, puis renseigner leurs noms exacts :
+Ce sont elles qui décident si le numéro de l'école survit :
 
-| Variable d'environnement             | Rôle                    | Variables du corps                                   |
-| ------------------------------------ | ----------------------- | ---------------------------------------------------- |
-| `WHATSAPP_TEMPLATE_BALANCE_DEBT`     | Alerte de dette         | `{{1}}` nom élève · `{{2}}` montant · `{{3}}` école |
-| `WHATSAPP_TEMPLATE_BALANCE_EMPTY`    | Solde épuisé            | `{{1}}` nom élève · `{{2}}` montant · `{{3}}` école |
-| `WHATSAPP_TEMPLATE_BALANCE_LOW`      | Solde bientôt épuisé    | `{{1}}` nom élève · `{{2}}` montant · `{{3}}` école |
-| `WHATSAPP_TEMPLATE_REGISTRATION_DUE` | Frais d'inscription dus | `{{1}}` nom élève · `{{2}}` montant · `{{3}}` école |
+- n'écrire qu'aux **familles inscrites**, jamais à une liste importée ou achetée ;
+- monter en charge progressivement : ~50 messages/jour la première semaine, ~200/jour ensuite ;
+- **ne jamais retirer la temporisation** de `app/api/whatsapp/send/route.ts` (3 à 7 s entre deux
+  messages, avec jitter) — c'est la principale protection contre le bannissement ;
+- si des parents bloquent ou signalent les messages, arrêter et revoir le texte : c'est le signal
+  qui précède le bannissement ;
+- garder le téléphone lié connecté à Internet régulièrement, sinon WhatsApp délie l'appareil.
 
-Tant qu'un nom de modèle n'est pas configuré, l'alerte correspondante échoue avec une erreur claire
-(elle n'est jamais envoyée en texte libre à la place). Sans aucune configuration WhatsApp, les
-boutons affichent une erreur explicite et le reste de l'application fonctionne normalement.
+Un envoi groupé est découpé en lots de 8 destinataires, envoyés séquentiellement. Comptez environ
+5 secondes par destinataire : 40 élèves ≈ 3 à 4 minutes, fenêtre ouverte.
 
 ## Déploiement sur Vercel
 
@@ -99,15 +116,15 @@ boutons affichent une erreur explicite et le reste de l'application fonctionne n
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
    - `SUPABASE_SERVICE_ROLE_KEY` (secret — requis par `/api/admin/users` et le journal WhatsApp)
-   - Variables **WhatsApp Cloud API** (facultatif — messages WhatsApp) : `META_APP_ID`,
-     `META_APP_SECRET`, `WHATSAPP_BUSINESS_ACCOUNT_ID`, `WHATSAPP_PHONE_NUMBER_ID`,
-     `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN`, `WHATSAPP_API_VERSION`, et les
-     `WHATSAPP_TEMPLATE_*` (voir [`.env.example`](.env.example))
+   - Variables **WhatsApp** (facultatif — messages WhatsApp) : `EVOLUTION_BASE_URL`,
+     `EVOLUTION_API_KEY`, `EVOLUTION_INSTANCE`, `EVOLUTION_WEBHOOK_TOKEN`
+     (voir [`.env.example`](.env.example)). Aucune ne doit être préfixée `NEXT_PUBLIC_`.
 3. Déployer. Dans Supabase, ajouter l'URL Vercel aux **Auth → URL Configuration → Site URL / Redirect URLs**.
+4. Reconnecter la session depuis **Paramètres → WhatsApp** : l'instance de production est distincte
+   de celle utilisée en local, il faut rescanner le QR code.
 
-> L'API Cloud de Meta est hébergée par Meta : **aucun** service séparé, VPS, Docker, Caddy, tunnel
-> permanent ni session WhatsApp Web n'est nécessaire. Le webhook `/api/whatsapp/webhook` fonctionne
-> directement en serverless — il suffit qu'il soit joignable en HTTPS public (l'URL Vercel).
+> Les variables d'environnement ne sont lues qu'au déploiement : après en avoir ajouté ou modifié
+> une, **redéployer** — un simple enregistrement ne suffit pas.
 
 Le favicon et le logo affichés dans l'application suivent le logo téléversé dans **Paramètres** ;
 les fichiers statiques `app/icon.png` / `app/favicon.ico` servent de secours avant le chargement.

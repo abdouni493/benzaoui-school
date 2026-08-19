@@ -11,13 +11,10 @@ import { useToast } from "@/lib/store/toast";
 import { normalizePhone } from "@/lib/whatsapp/phone";
 import {
   MAX_MESSAGE_LENGTH,
-  META_TEMPLATE_CONFIG,
   WHATSAPP_TEMPLATES,
   getTemplate,
-  isAlertTemplate,
   suggestTemplate,
   type MessageLanguage,
-  type TemplateContext,
   type WhatsAppAudience,
   type WhatsAppTemplateId,
 } from "@/lib/whatsapp/templates";
@@ -38,6 +35,11 @@ export interface WhatsAppStudentContext {
   balance: number;
   registrationDue?: number;
 }
+
+/** Destinataires par appel à /api/whatsapp/send. La route refuse au-delà : elle
+ *  temporise 3 à 7 s entre deux messages pour protéger le numéro de l'école, et
+ *  doit rendre la main avant la limite d'exécution de Vercel. */
+const BATCH_SIZE = 8;
 
 /** Formule d'adresse à retenir pour un ensemble de destinataires. Sans élève de
  *  référence, ou quand élève et parent sont visés ensemble, aucune des deux
@@ -101,6 +103,7 @@ export function WhatsAppMessageModal({
   const [templateId, setTemplateId] = useState<WhatsAppTemplateId>(initialTemplate);
   const [lang, setLang] = useState<MessageLanguage>(initialLang);
   const [sending, setSending] = useState(false);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [results, setResults] = useState<SendResult[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -160,72 +163,75 @@ export function WhatsAppMessageModal({
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
-  /** Contexte de l'élève sélectionné, pour construire les variables du modèle
-   *  Meta (nom, montant, école). L'audience ne change que l'aperçu, pas les
-   *  variables — un modèle approuvé porte sa propre formule d'adresse. */
-  const templateContext = (): TemplateContext => {
-    const student = students.find((s) => s.id === studentId) ?? null;
-    return {
-      studentName: student?.name ?? "",
-      balance: student?.balance ?? 0,
-      registrationDue: student?.registrationDue,
-      schoolName: school?.name || "L'établissement",
-      schoolPhone: school?.phone,
-      audience: audienceFor(recipients, selectedIds, students.length > 0),
-    };
-  };
-
-  /** Message à envoyer : modèle Meta approuvé pour une alerte, texte libre pour
-   *  « Message libre » (soumis à la fenêtre de service client de 24 h). */
-  const buildOutgoing = (): OutgoingMessage => {
-    if (isAlertTemplate(templateId)) {
-      return {
-        kind: "template",
-        templateId,
-        variables: META_TEMPLATE_CONFIG[templateId].buildVariables(templateContext()),
-        language: lang,
-      };
-    }
-    return { kind: "text", text: text.trim() };
-  };
-
   const stripId = (id: string) => id.replace(/^(student|parent)-/, "");
 
+  /** Envoi par LOTS SÉQUENTIELS. Jamais en parallèle : ce serait exactement le
+   *  comportement en rafale que la temporisation côté serveur cherche à éviter,
+   *  et c'est le premier motif de bannissement d'un numéro par WhatsApp. */
   const handleSend = async () => {
     const chosen = sendable.filter((r) => selectedIds.includes(r.id) && r.normalized);
-    if (chosen.length === 0) return;
-    // Le message libre exige un texte ; un modèle porte son propre contenu.
-    if (!isAlertTemplate(templateId) && !text.trim()) return;
+    if (chosen.length === 0 || !text.trim()) return;
 
     setSending(true);
     setError(null);
     setResults(null);
+    setProgress({ done: 0, total: chosen.length });
+
+    const message: OutgoingMessage = { kind: "text", text: text.trim() };
+    const collected: SendResult[] = [];
+    const queue = [...chosen];
 
     try {
-      const message = buildOutgoing();
-      const response = await fetch("/api/whatsapp/send", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          recipients: chosen.map((r) => ({
-            phone: r.phone,
-            name: r.name,
-            studentId: r.role === "student" ? stripId(r.id) : studentId || undefined,
-            parentId: r.role === "parent" ? stripId(r.id) : undefined,
-          })),
-        }),
-      });
+      while (queue.length > 0) {
+        const batch = queue.splice(0, BATCH_SIZE);
 
-      const payload = await response.json();
+        const response = await fetch("/api/whatsapp/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message,
+            recipients: batch.map((r) => ({
+              phone: r.phone,
+              name: r.name,
+              studentId: r.role === "student" ? stripId(r.id) : studentId || undefined,
+              parentId: r.role === "parent" ? stripId(r.id) : undefined,
+            })),
+          }),
+        });
 
-      if (!response.ok) {
-        setError(payload?.error ?? "L'envoi a échoué.");
-        return;
+        const payload = await response.json();
+
+        if (!response.ok) {
+          // Erreur globale (passerelle injoignable, session tombée) : les lots
+          // suivants échoueraient pareil. On garde les résultats déjà obtenus.
+          setError(payload?.error ?? "L'envoi a échoué.");
+          if (collected.length > 0) setResults([...collected]);
+          return;
+        }
+
+        const { results: batchResults, remaining } = payload as SendResponse;
+
+        if (batchResults.length === 0) {
+          setError("La passerelle n'a traité aucun destinataire. Réessayer dans un instant.");
+          if (collected.length > 0) setResults([...collected]);
+          return;
+        }
+
+        collected.push(...batchResults);
+        // Affichage rafraîchi APRÈS CHAQUE LOT : l'utilisateur voit l'avancement
+        // plutôt qu'un écran figé pendant plusieurs minutes.
+        setResults([...collected]);
+        setProgress({ done: collected.length, total: chosen.length });
+
+        // Destinataires que le serveur n'a pas eu le temps de traiter avant sa
+        // limite d'exécution : ils repassent en tête de file.
+        if (remaining?.length) {
+          queue.unshift(...batch.filter((r) => remaining.includes(r.phone)));
+        }
       }
 
-      const { sent, failed, results: sendResults } = payload as SendResponse;
-      setResults(sendResults);
+      const sent = collected.filter((r) => r.ok).length;
+      const failed = collected.length - sent;
 
       if (sent > 0) {
         addToast({
@@ -242,16 +248,15 @@ export function WhatsAppMessageModal({
       }
     } catch {
       setError("Impossible de joindre le serveur.");
+      if (collected.length > 0) setResults([...collected]);
     } finally {
       setSending(false);
+      setProgress(null);
     }
   };
 
   const selectedCount = selectedIds.length;
-  const isTemplate = isAlertTemplate(templateId);
-  // La limite de longueur ne concerne que le message libre ; un modèle porte
-  // son propre contenu approuvé par Meta.
-  const tooLong = !isTemplate && text.length > MAX_MESSAGE_LENGTH;
+  const tooLong = text.length > MAX_MESSAGE_LENGTH;
 
   return (
     <Modal open onClose={onClose} title="Envoyer un message WhatsApp" wide>
@@ -302,6 +307,13 @@ export function WhatsAppMessageModal({
               );
             })}
           </div>
+
+          {selectedCount > BATCH_SIZE && (
+            <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
+              L&apos;envoi sera découpé en plusieurs lots, avec une pause entre chaque message pour
+              protéger le numéro de l&apos;école. Comptez environ 5 secondes par destinataire.
+            </p>
+          )}
         </div>
 
         {/* Élève concerné — utile depuis une fiche parent à plusieurs enfants */}
@@ -367,28 +379,24 @@ export function WhatsAppMessageModal({
               ))}
             </div>
           </div>
+          {/* Éditable pour TOUS les modèles : un modèle ne fait que pré-remplir
+              le texte, la réception l'ajuste ensuite si besoin. */}
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={8}
-            readOnly={isTemplate}
             dir={lang === "ar" ? "rtl" : "ltr"}
             placeholder="Saisissez votre message..."
-            className={`w-full rounded-xl border border-line p-3 text-sm text-ink outline-none focus:border-primary ${
-              isTemplate ? "bg-canvas/40 cursor-default" : "bg-surface"
-            }`}
+            className="w-full rounded-xl border border-line bg-surface p-3 text-sm text-ink outline-none focus:border-primary"
           />
           <div className="mt-1 flex justify-between gap-3 text-[10px]">
             <span className="text-muted">
-              {isTemplate
-                ? "Alerte envoyée via un modèle WhatsApp approuvé par Meta. Ce texte est un aperçu ; le contenu exact est défini par le modèle approuvé."
-                : "Message libre : possible uniquement si la famille a écrit à l'école dans les dernières 24 h (fenêtre de service client)."}
+              Le message est envoyé tel quel depuis le numéro WhatsApp de l&apos;école. Vous pouvez
+              le modifier avant l&apos;envoi.
             </span>
-            {!isTemplate && (
-              <span className={tooLong ? "shrink-0 font-bold text-danger" : "shrink-0 text-muted"}>
-                {text.length} / {MAX_MESSAGE_LENGTH}
-              </span>
-            )}
+            <span className={tooLong ? "shrink-0 font-bold text-danger" : "shrink-0 text-muted"}>
+              {text.length} / {MAX_MESSAGE_LENGTH}
+            </span>
           </div>
         </div>
 
@@ -434,11 +442,15 @@ export function WhatsAppMessageModal({
             </Button>
             <Button
               onClick={handleSend}
-              disabled={sending || selectedCount === 0 || (!isTemplate && !text.trim()) || tooLong}
+              disabled={sending || selectedCount === 0 || !text.trim() || tooLong}
               className="flex items-center gap-2"
             >
               <Send className="h-4 w-4" />
-              {sending ? "Envoi en cours..." : "Envoyer"}
+              {sending
+                ? progress
+                  ? `Envoi en cours… ${progress.done}/${progress.total}`
+                  : "Envoi en cours…"
+                : "Envoyer"}
             </Button>
           </div>
         </div>

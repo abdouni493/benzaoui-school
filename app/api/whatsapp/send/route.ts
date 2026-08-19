@@ -2,16 +2,55 @@ import { NextResponse } from "next/server";
 import { assertCanSendWhatsApp } from "@/lib/whatsapp/auth";
 import {
   WhatsAppError,
+  filterWhatsAppNumbers,
   getConfig,
-  metaLanguageCode,
-  resolveTemplateName,
-  sendTemplateMessage,
+  getConnectionState,
   sendTextMessage,
 } from "@/lib/whatsapp/client";
 import { logOutgoingMessage } from "@/lib/whatsapp/log";
 import { normalizePhone } from "@/lib/whatsapp/phone";
-import { MAX_MESSAGE_LENGTH, isAlertTemplate } from "@/lib/whatsapp/templates";
+import { MAX_MESSAGE_LENGTH } from "@/lib/whatsapp/templates";
 import type { OutgoingMessage, SendResult } from "@/lib/whatsapp/types";
+
+/** Envoi WhatsApp par la passerelle Evolution.
+ *
+ *  POURQUOI CETTE ROUTE EST LENTE — ET POURQUOI IL NE FAUT PAS L'ACCÉLÉRER
+ *  ----------------------------------------------------------------------
+ *  Les messages partent d'une session WhatsApp Web ordinaire, depuis le numéro
+ *  de l'école. Envoyer en rafale depuis une telle session est le premier motif
+ *  de bannissement d'un numéro par WhatsApp — et un bannissement est sans
+ *  recours : ni support, ni appel, ni délai de grâce. On temporise donc
+ *  volontairement entre deux destinataires, avec un délai ALÉATOIRE : une
+ *  cadence parfaitement régulière est elle-même un signal d'automatisation.
+ *
+ *  Retirer cette temporisation « pour aller plus vite » ferait perdre le numéro
+ *  WhatsApp de l'école. C'est un choix délibéré, pas une maladresse.
+ *
+ *  Conséquence : un lot est borné par le TEMPS, pas seulement par un nombre. La
+ *  route s'arrête d'elle-même avant la limite d'exécution de Vercel et rend les
+ *  destinataires non traités dans `remaining` ; l'interface enchaîne alors un
+ *  second appel. Être coupé en plein vol laisserait des messages partis sans
+ *  trace en base — et l'utilisateur les renverrait en double. */
+
+/** Limite d'exécution de la fonction serverless, en secondes. */
+export const maxDuration = 60;
+
+/** Plafond dur de destinataires par appel. L'interface découpe au-delà. */
+const MAX_RECIPIENTS = 8;
+
+/** On rend la main avant d'être coupé : ~15 s de marge sous `maxDuration`, de
+ *  quoi terminer l'envoi en cours, le journaliser et sérialiser la réponse. */
+const TIME_BUDGET_MS = 45_000;
+
+/** Bornes du tirage aléatoire de la pause entre deux destinataires. */
+const GAP_MIN_MS = 3_000;
+const GAP_MAX_MS = 7_000;
+
+/** Frappe simulée par la passerelle avant chaque envoi (comportement humain). */
+const TYPING_DELAY_MS = 1_200;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const randomGap = () => GAP_MIN_MS + Math.floor(Math.random() * (GAP_MAX_MS - GAP_MIN_MS + 1));
 
 interface Recipient {
   phone: string;
@@ -32,30 +71,23 @@ interface SendBody {
   text?: string;
 }
 
-/** Nombre de destinataires acceptés en un appel. Garde-fou contre un envoi massif
- *  accidentel depuis l'interface ; au-delà, découper en plusieurs envois. */
-const MAX_RECIPIENTS = 50;
-
 /** Résout le message effectif d'un destinataire (propre, sinon global, sinon
  *  texte de compat), ou `null` si rien n'est fourni. */
 function resolveMessage(recipient: Recipient, body: SendBody): OutgoingMessage | null {
-  if (recipient.message) return recipient.message;
+  if (recipient.message?.text?.trim()) return recipient.message;
   if (recipient.text?.trim()) return { kind: "text", text: recipient.text.trim() };
-  if (body.message) return body.message;
+  if (body.message?.text?.trim()) return body.message;
   if (body.text?.trim()) return { kind: "text", text: body.text.trim() };
   return null;
 }
 
-/** Valide un message avant tout envoi : le lot est vérifié en entier d'abord,
+/** Valide un message avant tout envoi : le lot est vérifié EN ENTIER d'abord,
  *  pour ne pas partir à moitié puis se bloquer à mi-course. */
 function validateMessage(msg: OutgoingMessage): string | null {
-  if (msg.kind === "text") {
-    if (!msg.text.trim()) return "Le message est vide.";
-    if (msg.text.length > MAX_MESSAGE_LENGTH) return `Le message dépasse ${MAX_MESSAGE_LENGTH} caractères.`;
-    return null;
+  if (!msg.text.trim()) return "Le message est vide.";
+  if (msg.text.length > MAX_MESSAGE_LENGTH) {
+    return `Le message dépasse ${MAX_MESSAGE_LENGTH} caractères.`;
   }
-  if (!isAlertTemplate(msg.templateId)) return "Modèle inconnu.";
-  if (!Array.isArray(msg.variables)) return "Variables de modèle invalides.";
   return null;
 }
 
@@ -63,10 +95,13 @@ export async function POST(request: Request) {
   try {
     await assertCanSendWhatsApp();
 
-    // Configuration serveur absente : inutile de tenter 50 envois.
-    if (!getConfig()) {
+    const config = getConfig();
+    if (!config) {
       return NextResponse.json(
-        { error: "WhatsApp non configuré. Renseigner les identifiants Meta côté serveur (voir README)." },
+        {
+          error:
+            "WhatsApp non configuré. Renseigner EVOLUTION_BASE_URL et EVOLUTION_API_KEY côté serveur (voir README).",
+        },
         { status: 503 },
       );
     }
@@ -79,7 +114,9 @@ export async function POST(request: Request) {
     }
     if (recipients.length > MAX_RECIPIENTS) {
       return NextResponse.json(
-        { error: `Maximum ${MAX_RECIPIENTS} destinataires par envoi.` },
+        {
+          error: `Maximum ${MAX_RECIPIENTS} destinataires par envoi. L'interface découpe automatiquement les envois plus grands.`,
+        },
         { status: 400 },
       );
     }
@@ -94,12 +131,33 @@ export async function POST(request: Request) {
       if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
     }
 
-    const results: SendResult[] = [];
+    // Session tombée (téléphone éteint, QR jamais scanné, passerelle
+    // redémarrée) : inutile d'enchaîner huit échecs identiques et d'attendre
+    // 40 secondes pour l'apprendre.
+    const { state } = await getConnectionState();
+    if (state !== "open") {
+      return NextResponse.json(
+        {
+          error:
+            "WhatsApp n'est pas connecté. Ouvrir Paramètres → WhatsApp et scanner le QR code avec le téléphone de l'école.",
+        },
+        { status: 503 },
+      );
+    }
 
-    // Séquentiel, sans temporisation artificielle : l'API Cloud de Meta ne
-    // demande aucune « cadence humaine » (contrairement à l'ancienne passerelle).
-    for (const { recipient, message } of resolved) {
-      const msg = message!; // garanti non-null par la validation ci-dessus
+    // Numéros réellement joignables sur WhatsApp. `null` = vérification
+    // indisponible : on tente alors l'envoi pour tout le monde, comme avant.
+    const msisdns = resolved
+      .map((r) => normalizePhone(r.recipient.phone)?.msisdn)
+      .filter((v): v is string => Boolean(v));
+    const reachable = await filterWhatsAppNumbers(msisdns);
+
+    const results: SendResult[] = [];
+    const remaining: string[] = [];
+    const started = Date.now();
+
+    for (let i = 0; i < resolved.length; i++) {
+      const { recipient, message } = resolved[i];
       const name = recipient.name?.trim() || recipient.phone;
       const normalized = normalizePhone(recipient.phone);
 
@@ -109,39 +167,77 @@ export async function POST(request: Request) {
         recipientName: name,
         studentId: recipient.studentId,
         parentId: recipient.parentId,
-        messageType: msg.kind === "template" ? msg.templateId : "text",
-        templateName: msg.kind === "template" ? resolveTemplateName(msg.templateId) : null,
-        templateLanguage: msg.kind === "template" ? metaLanguageCode(msg.language) : null,
+        messageType: "text",
+        instance: config.instance,
       };
 
       if (!normalized) {
-        results.push({ name, phone: recipient.phone, ok: false, error: "Numéro invalide" });
-        void logOutgoingMessage({ ...logMeta, status: "failed", errorMessage: "Numéro invalide" });
+        const error = "Numéro invalide";
+        results.push({ name, phone: recipient.phone, ok: false, status: "failed", error });
+        await logOutgoingMessage({ ...logMeta, status: "failed", errorMessage: error });
+        continue;
+      }
+
+      // Numéro bien formé mais sans compte WhatsApp : la passerelle accepterait
+      // l'envoi sans broncher et le message partirait dans le vide. Meta, lui,
+      // refusait explicitement — on rétablit ce garde-fou.
+      if (reachable && !reachable.has(normalized.msisdn)) {
+        const error = "Aucun compte WhatsApp sur ce numéro";
+        results.push({ name, phone: normalized.display, ok: false, status: "failed", error });
+        await logOutgoingMessage({ ...logMeta, status: "failed", errorMessage: error });
         continue;
       }
 
       try {
-        const result = await sendOne(normalized.msisdn, msg);
-        results.push({ name, phone: normalized.display, ok: true, messageId: result.messageId, status: "accepted" });
-        void logOutgoingMessage({ ...logMeta, messageId: result.messageId, status: "accepted" });
+        const { messageId } = await sendTextMessage(normalized.msisdn, message!.text, {
+          delayMs: TYPING_DELAY_MS,
+        });
+        results.push({ name, phone: normalized.display, ok: true, messageId, status: "queued" });
+        await logOutgoingMessage({ ...logMeta, messageId, status: "queued" });
       } catch (err) {
-        // Erreurs globales (config absente, jeton invalide, Meta injoignable) :
-        // tout le lot échouera pareil — inutile d'enchaîner 50 tentatives.
+        // Panne globale (passerelle injoignable, clé refusée, session tombée) :
+        // tout le lot échouerait pareil, on arrête plutôt que d'insister.
         if (err instanceof WhatsAppError && (err.status === 503 || err.status === 502)) throw err;
 
         const errorMessage = err instanceof Error ? err.message : "Échec de l'envoi";
-        results.push({ name, phone: normalized.display, ok: false, status: "failed", error: errorMessage });
-        void logOutgoingMessage({
+        results.push({
+          name,
+          phone: normalized.display,
+          ok: false,
+          status: "failed",
+          error: errorMessage,
+        });
+        await logOutgoingMessage({
           ...logMeta,
           status: "failed",
-          errorCode: err instanceof WhatsAppError && err.metaCode ? String(err.metaCode) : null,
+          errorCode:
+            err instanceof WhatsAppError && err.providerCode ? String(err.providerCode) : null,
           errorMessage,
         });
       }
+
+      // Pause avant le PROCHAIN destinataire — jamais après le dernier.
+      if (i === resolved.length - 1) break;
+
+      const gap = randomGap();
+      if (Date.now() - started + gap > TIME_BUDGET_MS) {
+        // Plus le temps de traiter la suite sereinement : on rend la main avec
+        // le reliquat plutôt que de se faire couper en plein envoi.
+        for (let j = i + 1; j < resolved.length; j++) {
+          remaining.push(resolved[j].recipient.phone);
+        }
+        break;
+      }
+      await sleep(gap);
     }
 
     const sent = results.filter((r) => r.ok).length;
-    return NextResponse.json({ sent, failed: results.length - sent, results });
+    return NextResponse.json({
+      sent,
+      failed: results.length - sent,
+      results,
+      ...(remaining.length > 0 ? { remaining } : {}),
+    });
   } catch (err) {
     if (err instanceof WhatsAppError) {
       return NextResponse.json({ error: err.message }, { status: err.status });
@@ -151,21 +247,4 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
-}
-
-/** Envoie un message unique. Les modèles approuvés partent toujours (message
- *  proactif). Pour un texte libre, c'est Meta qui arbitre la fenêtre de service
- *  client de 24 h : on tente l'envoi et, hors fenêtre, Meta répond 131047,
- *  traduit par le client en une erreur claire. On ne bloque plus localement sur
- *  notre propre suivi des messages entrants, qui peut être incomplet tant que le
- *  webhook n'alimente pas whatsapp_contacts. */
-async function sendOne(to: string, message: OutgoingMessage): Promise<{ messageId: string }> {
-  if (message.kind === "template") {
-    return sendTemplateMessage(to, {
-      templateId: message.templateId,
-      variables: message.variables,
-      language: message.language,
-    });
-  }
-  return sendTextMessage(to, message.text);
 }

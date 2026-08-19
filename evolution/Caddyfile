@@ -1,0 +1,27 @@
+# Terminaison TLS de la passerelle WhatsApp.
+#
+# Caddy obtient et renouvelle seul le certificat Let's Encrypt : rien a faire
+# apres le premier demarrage, a condition que le domaine pointe deja vers l'IP
+# du VPS et que les ports 80 et 443 soient ouverts.
+#
+# REMPLACER le domaine ci-dessous par le votre, puis :
+#   docker compose restart caddy
+
+wa.votre-domaine.dz {
+	reverse_proxy evolution:8080
+
+	# La passerelle expose une interface web (/manager) protegee par la seule
+	# cle API. Elle n'est pas necessaire au fonctionnement de l'ecole : la
+	# bloquer reduit la surface exposee. Commenter ce bloc pour y acceder.
+	@manager path /manager*
+	respond @manager 404
+
+	encode gzip
+
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+	}
+}

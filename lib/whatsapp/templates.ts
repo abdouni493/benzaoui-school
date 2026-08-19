@@ -1,18 +1,14 @@
 /** Modèles de messages WhatsApp.
  *
- *  Deux usages, portés par le même identifiant local :
- *   1. Un APERÇU lisible (français / arabe) affiché dans la fenêtre d'envoi et
- *      journalisé — c'est ce que `build()` produit.
- *   2. Un ENVOI RÉEL via l'API Cloud de Meta. Les messages d'entreprise
- *      proactifs (dette, solde épuisé/faible, inscription) partent en tant que
- *      MODÈLES APPROUVÉS par Meta : on n'envoie pas le texte libre ci-dessous,
- *      mais le nom du modèle approuvé + ses variables ordonnées ({{1}}, {{2}}…).
+ *  Depuis le passage à Evolution API, ces modèles n'ont plus qu'un seul rôle :
+ *  PRÉ-RÉDIGER le texte (français / arabe) que la réception voit dans la fenêtre
+ *  d'envoi, peut ajuster, puis envoie tel quel. Ce que `build()` produit est
+ *  exactement ce qui part sur WhatsApp — il n'y a plus d'écart possible entre
+ *  l'aperçu et le message réel, contrairement aux modèles approuvés par Meta.
  *
  *  Ce fichier reste pur (aucun `server-only`, aucune lecture d'`env`) pour être
- *  importable côté navigateur : la fenêtre d'envoi y construit l'aperçu et la
- *  liste des variables. La CORRESPONDANCE identifiant local → nom de modèle
- *  approuvé par Meta est résolue côté serveur (voir lib/whatsapp/client.ts), à
- *  partir de variables d'environnement — jamais en dur, jamais dans le bundle. */
+ *  importable côté navigateur : la fenêtre d'envoi y construit le texte, et
+ *  l'alerte automatique du scan RFID s'en sert aussi. */
 
 export type WhatsAppTemplateId =
   | "debt"
@@ -21,8 +17,7 @@ export type WhatsAppTemplateId =
   | "registration"
   | "custom";
 
-/** Modèles proactifs qui exigent un modèle approuvé par Meta (tout sauf le
- *  message libre, qui ne part qu'en fenêtre de service client). */
+/** Alertes pré-rédigées, par opposition au message entièrement libre. */
 export type AlertTemplateId = Exclude<WhatsAppTemplateId, "custom">;
 
 /** À qui l'on parle : cela change la formule d'adresse de l'aperçu. `mixed`
@@ -50,29 +45,7 @@ export interface TemplateDefinition {
   build: (ctx: TemplateContext, lang: MessageLanguage) => string;
 }
 
-/** Métadonnées d'un modèle d'alerte pour l'envoi Meta.
- *  `envKey` nomme la variable d'environnement qui porte le nom EXACT du modèle
- *  approuvé côté Meta (ex. WHATSAPP_TEMPLATE_BALANCE_DEBT=solde_dette). */
-export interface MetaTemplateConfig {
-  envKey: string;
-  /** catégorie Meta du modèle — les alertes de compte sont « UTILITY ». */
-  category: "UTILITY" | "MARKETING" | "AUTHENTICATION";
-  /** construit les paramètres ordonnés du corps ({{1}}, {{2}}, {{3}}). L'ordre
-   *  DOIT correspondre au modèle soumis à Meta (voir README, section modèles). */
-  buildVariables: (ctx: TemplateContext) => string[];
-}
-
 const money = (amount: number) => `${Math.round(amount).toLocaleString("fr-FR")} DA`;
-
-/** Montant destiné à une VARIABLE de modèle Meta. Meta rejette les tabulations,
- *  les sauts de ligne et les espaces multiples dans un paramètre : on groupe
- *  donc les milliers avec des espaces simples ordinaires, sans locale exotique. */
-export function formatAmountVar(amount: number): string {
-  const grouped = Math.round(Math.abs(amount))
-    .toString()
-    .replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-  return `${grouped} DA`;
-}
 
 /** Formule d'adresse selon le destinataire. Le corps des modèles nomme toujours
  *  l'élève, donc la variante `mixed` peut rester neutre sans perdre en clarté. */
@@ -187,48 +160,18 @@ export const WHATSAPP_TEMPLATES: TemplateDefinition[] = [
   {
     id: "custom",
     labelFr: "Message libre",
-    hintFr: "Rédiger entièrement le message (fenêtre de service client requise).",
+    hintFr: "Rédiger entièrement le message.",
     // Uniquement la formule d'adresse : le reste est saisi par l'utilisateur.
     build: (ctx, lang) => `${opening(ctx, lang)}\n\n`,
   },
 ];
 
-/** Correspondance identifiant local → configuration du modèle Meta. Le nom
- *  approuvé n'est PAS ici : il est lu côté serveur via `envKey`. Les variables,
- *  elles, ne sont pas sensibles et se construisent partout (aperçu compris). */
-export const META_TEMPLATE_CONFIG: Record<AlertTemplateId, MetaTemplateConfig> = {
-  debt: {
-    envKey: "WHATSAPP_TEMPLATE_BALANCE_DEBT",
-    category: "UTILITY",
-    buildVariables: (ctx) => [
-      ctx.studentName,
-      formatAmountVar(Math.abs(Math.min(ctx.balance, 0))),
-      ctx.schoolName,
-    ],
-  },
-  balance_empty: {
-    envKey: "WHATSAPP_TEMPLATE_BALANCE_EMPTY",
-    category: "UTILITY",
-    buildVariables: (ctx) => [ctx.studentName, formatAmountVar(ctx.balance), ctx.schoolName],
-  },
-  balance_low: {
-    envKey: "WHATSAPP_TEMPLATE_BALANCE_LOW",
-    category: "UTILITY",
-    buildVariables: (ctx) => [ctx.studentName, formatAmountVar(ctx.balance), ctx.schoolName],
-  },
-  registration: {
-    envKey: "WHATSAPP_TEMPLATE_REGISTRATION_DUE",
-    category: "UTILITY",
-    buildVariables: (ctx) => [
-      ctx.studentName,
-      formatAmountVar(ctx.registrationDue ?? 0),
-      ctx.schoolName,
-    ],
-  },
-};
-
-/** `true` si l'identifiant correspond à un modèle d'alerte (envoi via modèle
- *  Meta), par opposition au message libre. */
+/** `true` si l'identifiant correspond à une alerte PRÉ-RÉDIGÉE, par opposition
+ *  au message entièrement libre.
+ *
+ *  Ne distingue plus « modèle Meta » de « texte » : tout part en texte depuis le
+ *  passage à Evolution API. Sert désormais à l'interface seule (pré-remplissage
+ *  du champ de saisie, choix du modèle suggéré), plus au transport. */
 export function isAlertTemplate(id: WhatsAppTemplateId): id is AlertTemplateId {
   return id !== "custom";
 }
@@ -248,7 +191,7 @@ export function suggestTemplate(ctx: {
   return "custom";
 }
 
-/** Longueur maximale d'un corps de message texte (Meta plafonne `text.body` à
- *  4096 caractères). Ne concerne que le message libre : les modèles ont leurs
- *  propres limites, validées à l'approbation. */
+/** Longueur maximale d'un message WhatsApp (4096 caractères). C'est la limite
+ *  du protocole lui-même, plus une contrainte de fournisseur : elle s'applique
+ *  donc à TOUS les messages, alertes pré-rédigées comprises. */
 export const MAX_MESSAGE_LENGTH = 4096;
