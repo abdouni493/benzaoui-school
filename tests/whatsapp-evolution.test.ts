@@ -9,6 +9,7 @@ import {
   WhatsAppError,
   createInstance,
   getConfig,
+  getWebhookInfo,
   getConnectionState,
   isKnownServerUrl,
   mapEvolutionStatus,
@@ -421,5 +422,59 @@ describe("passerelle injoignable — le message porte l'hôte et le code", () =>
     const fetchMock = fetchThatFails("ECONNREFUSED");
     await expect(getConnectionState()).rejects.toBeInstanceOf(WhatsAppError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Le webhook REELLEMENT enregistre sur la passerelle
+// ---------------------------------------------------------------------------
+
+/** La reponse d'Evolution a /webhook/find/{instance}. */
+const webhookRow = (token: string | null, url = "https://ecole.example/api/whatsapp/webhook") => ({
+  enabled: true,
+  url,
+  events: ["MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE"],
+  headers: token === null ? {} : { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+});
+
+describe("getWebhookInfo — la panne muette", () => {
+  it("confirme un jeton identique des deux côtés", async () => {
+    mockFetchOnce(webhookRow(WEBHOOK_TOKEN));
+    await expect(getWebhookInfo()).resolves.toEqual({
+      url: "https://ecole.example/api/whatsapp/webhook",
+      tokenMatches: true,
+    });
+  });
+
+  it("détecte un jeton divergent — messages partis, aucun accusé revenu", async () => {
+    // Le cas constaté en production : la variable a été régénérée côté
+    // hébergeur sans réenregistrer le webhook. L'écran affichait « prête ».
+    mockFetchOnce(webhookRow("UN-AUTRE-JETON-DE-64-CARACTERES"));
+    const info = await getWebhookInfo();
+    expect(info.tokenMatches).toBe(false);
+    expect(info.url).toBe("https://ecole.example/api/whatsapp/webhook");
+  });
+
+  it("compte un webhook sans en-tête Authorization comme divergent", async () => {
+    mockFetchOnce(webhookRow(null));
+    expect((await getWebhookInfo()).tokenMatches).toBe(false);
+  });
+
+  it("lit aussi la forme imbriquée sous `webhook`", async () => {
+    mockFetchOnce({ webhook: webhookRow(WEBHOOK_TOKEN) });
+    expect((await getWebhookInfo()).tokenMatches).toBe(true);
+  });
+
+  it("ne lève jamais : une passerelle muette laisse l'écran affichable", async () => {
+    fetchThatFails("ECONNRESET");
+    await expect(getWebhookInfo()).resolves.toEqual({ url: null, tokenMatches: null });
+  });
+
+  it("ne conclut rien quand l'application n'a pas de jeton configuré", async () => {
+    // Sans EVOLUTION_WEBHOOK_TOKEN, aucun événement ne peut être authentifié :
+    // la comparaison doit dire « non », pas « oui ».
+    vi.stubEnv("EVOLUTION_WEBHOOK_TOKEN", "");
+    mockFetchOnce(webhookRow("N-IMPORTE-QUOI"));
+    expect((await getWebhookInfo()).tokenMatches).toBe(false);
   });
 });

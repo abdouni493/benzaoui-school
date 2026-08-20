@@ -11,6 +11,7 @@ import {
   getConfig,
   getConnectionState,
   getInstanceInfo,
+  getWebhookInfo,
   isLocalHost,
   maskId,
 } from "./client";
@@ -149,6 +150,8 @@ export async function sessionState(): Promise<WhatsAppSessionState> {
       instanceMasked: null,
       baseUrlHost: null,
       webhookConfigured: false,
+      webhookTokenMatches: null,
+      webhookUrlOnGateway: null,
       error: null,
       diagnostics: diagnose(null, null, null),
     };
@@ -172,16 +175,24 @@ export async function sessionState(): Promise<WhatsAppSessionState> {
 
   try {
     const { state } = await getConnectionState();
-    // Le numéro lié n'a de sens que sur une session ouverte.
-    const info =
-      state === "open" ? await getInstanceInfo() : { ownerNumber: null, profileName: null };
+    const open = state === "open";
+    // Le numéro lié n'a de sens que sur une session ouverte ; le webhook
+    // enregistré, lui, mérite d'être relu à ce moment précis — c'est le seul
+    // endroit d'où l'on peut constater que la passerelle et l'application ne
+    // partagent plus le même jeton.
+    const [info, webhook] = await Promise.all([
+      open ? getInstanceInfo() : Promise.resolve({ ownerNumber: null, profileName: null }),
+      open ? getWebhookInfo() : Promise.resolve({ url: null, tokenMatches: null }),
+    ]);
 
     return {
       ...base,
       state,
-      connected: state === "open",
+      connected: open,
       linkedNumber: info.ownerNumber,
       profileName: info.profileName,
+      webhookTokenMatches: webhook.tokenMatches,
+      webhookUrlOnGateway: webhook.url,
       error: null,
       diagnostics: diagnose(config.baseUrl, config.baseUrlNote ?? null, null),
     };
@@ -192,6 +203,8 @@ export async function sessionState(): Promise<WhatsAppSessionState> {
       connected: false,
       linkedNumber: null,
       profileName: null,
+      webhookTokenMatches: null,
+      webhookUrlOnGateway: null,
       error: err instanceof WhatsAppError ? err.message : "Passerelle WhatsApp injoignable.",
       diagnostics: diagnose(
         config.baseUrl,

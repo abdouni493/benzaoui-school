@@ -543,6 +543,56 @@ export async function getInstanceInfo(): Promise<InstanceInfo> {
   }
 }
 
+export interface WebhookInfo {
+  /** adresse que la passerelle rappellera, telle qu'ELLE la connaît */
+  url: string | null;
+  /** le jeton qu'elle enverra est bien celui que cette application attend.
+   *  `null` = la passerelle n'a pas répondu, on ne sait pas. */
+  tokenMatches: boolean | null;
+}
+
+/** Ce que la passerelle a RÉELLEMENT enregistré comme webhook.
+ *
+ *  Sans cette lecture, l'écran Paramètres ne pouvait qu'affirmer « le jeton est
+ *  configuré côté serveur » — ce qui ne dit rien de ce que la passerelle, elle,
+ *  enverra. Les deux divergent dès qu'on régénère la variable dans l'hébergeur
+ *  sans réenregistrer le webhook, ou qu'on l'enregistre depuis le poste de
+ *  développement. L'application refuse alors chaque événement en 401 : les
+ *  messages partent, aucun accusé ne revient, et rien à l'écran ne le dit.
+ *
+ *  Purement informatif : ne lève jamais. */
+export async function getWebhookInfo(): Promise<WebhookInfo> {
+  const empty: WebhookInfo = { url: null, tokenMatches: null };
+  try {
+    const config = requireConfig();
+    const res = await evolutionRequest<unknown>(
+      `/webhook/find/${encodeURIComponent(config.instance)}`,
+    );
+    if (!res || typeof res !== "object") return empty;
+
+    const outer = res as Record<string, unknown>;
+    // Selon la version, la réponse est plate ou imbriquée sous `webhook`.
+    const node = (
+      outer.webhook && typeof outer.webhook === "object" ? outer.webhook : outer
+    ) as Record<string, unknown>;
+
+    const url = typeof node.url === "string" && node.url.trim() ? node.url.trim() : null;
+
+    const headers = (node.headers ?? {}) as Record<string, unknown>;
+    const auth = headers.Authorization ?? headers.authorization;
+
+    return {
+      url,
+      // Comparaison en temps constant, et contre une donnée venue du réseau :
+      // on réutilise la vérification des événements entrants plutôt que d'en
+      // écrire une seconde, forcément moins soignée.
+      tokenMatches: typeof auth === "string" ? verifyWebhookToken(auth) : false,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 export interface ConnectResult {
   /** QR en data-URI prêt pour un `<img src>`, ou `null` si déjà connecté */
   qrBase64: string | null;

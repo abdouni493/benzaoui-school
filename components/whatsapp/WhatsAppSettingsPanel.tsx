@@ -248,8 +248,20 @@ export function WhatsAppSettingsPanel() {
                   <InfoRow label="Serveur" value={state.baseUrlHost ?? "—"} />
                   <InfoRow
                     label="Webhook"
-                    value={state.webhookConfigured ? "Jeton configuré" : "Non configuré"}
-                    tone={state.webhookConfigured ? "success" : "warning"}
+                    value={
+                      !state.webhookConfigured
+                        ? "Non configuré"
+                        : state.webhookTokenMatches === false
+                          ? "Jeton divergent"
+                          : state.webhookTokenMatches === true
+                            ? "Jeton vérifié"
+                            : "Jeton configuré"
+                    }
+                    tone={
+                      state.webhookConfigured && state.webhookTokenMatches !== false
+                        ? "success"
+                        : "warning"
+                    }
                   />
                   <InfoRow
                     label="État brut"
@@ -318,12 +330,7 @@ export function WhatsAppSettingsPanel() {
                         CETTE application, les messages partent mais aucun accusé ne revient,
                         et les statuts restent bloqués sur « queued » sans rien expliquer.
                         Annoncer « prête » dans ce cas serait faux. */}
-                    {state.webhookConfigured ? (
-                      <p className="flex items-center gap-2 text-xs text-success">
-                        <CheckCircle2 className="h-4 w-4" /> La passerelle est prête : les alertes
-                        et les envois groupés fonctionnent.
-                      </p>
-                    ) : (
+                    {!state.webhookConfigured ? (
                       <p className="flex items-start gap-2 text-xs text-warning">
                         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                         <span>
@@ -331,6 +338,26 @@ export function WhatsAppSettingsPanel() {
                           webhook ne pointe pas vers cette application. Cliquer sur «&nbsp;Réenregistrer
                           le webhook&nbsp;» ci-dessous. La session reste ouverte.
                         </span>
+                      </p>
+                    ) : state.webhookTokenMatches === false ? (
+                      /* La panne muette : tout a l'air normal, la session est
+                         ouverte, le jeton est bien configuré ici — mais la
+                         passerelle en enverra un AUTRE, et l'application
+                         refusera chacun de ses événements en 401. */
+                      <p className="flex items-start gap-2 text-xs text-warning">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>
+                          <strong>Le webhook enregistré sur la passerelle utilise un autre jeton.</strong>{" "}
+                          Les messages partent normalement, mais l&apos;application refuse chacun de
+                          ses retours : les statuts resteront sur «&nbsp;En attente&nbsp;» et les
+                          réponses des parents n&apos;arriveront jamais. Cliquer sur
+                          «&nbsp;Réenregistrer le webhook&nbsp;» ci-dessous — la session reste ouverte.
+                        </span>
+                      </p>
+                    ) : (
+                      <p className="flex items-center gap-2 text-xs text-success">
+                        <CheckCircle2 className="h-4 w-4" /> La passerelle est prête : les alertes
+                        et les envois groupés fonctionnent.
                       </p>
                     )}
 

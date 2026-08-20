@@ -140,6 +140,14 @@ export interface WhatsAppSessionState {
   baseUrlHost: string | null;
   /** le jeton d'authentification des webhooks est configuré (présence seule) */
   webhookConfigured: boolean;
+  /** le webhook enregistré SUR LA PASSERELLE enverra bien le jeton que cette
+   *  application attend. `null` = pas encore vérifiable (session fermée, ou
+   *  passerelle muette). `false` est la panne muette : les messages partent,
+   *  aucun accusé ne revient. */
+  webhookTokenMatches: boolean | null;
+  /** adresse que la passerelle rappellera, telle qu'elle l'a enregistrée —
+   *  à ne pas confondre avec celle que l'application déduirait aujourd'hui */
+  webhookUrlOnGateway: string | null;
   /** message d'erreur lisible si l'interrogation de la passerelle a échoué */
   error: string | null;
   /** de quoi agir sur cette erreur sans ouvrir les journaux du serveur */

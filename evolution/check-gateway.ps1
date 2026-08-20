@@ -9,6 +9,11 @@
 #
 # A lancer chaque fois que "Parametres > WhatsApp" affiche une erreur, et une
 # fois apres chaque changement de domaine (Railway, tunnel, ou Vercel).
+#
+# Deux controles meritent d'etre connus, parce qu'ils attrapent des pannes
+# MUETTES - celles ou tout a l'air normal a l'ecran :
+#   etape 6 : le jeton de la passerelle est-il celui qu'attend l'application ?
+#   etape 7 : la cle du noeud Tailscale expire-t-elle bientot ?
 # =============================================================================
 
 param(
@@ -168,10 +173,16 @@ if ($state -eq "open") {
 # --- 4. Le webhook est-il enregistre, et vers la bonne adresse ? -------------
 Write-Host "4. Webhook declare sur la passerelle"
 $hookUrl = $null
+$hookAuth = $null
 try {
   $w = Invoke-RestMethod -Uri "$api/webhook/find/$Instance" -Headers $headers -TimeoutSec 20
   $hookUrl = $w.url
   if (-not $hookUrl -and $w.webhook) { $hookUrl = $w.webhook.url }
+  # Le jeton que la passerelle enverra REELLEMENT. On ne l'affiche jamais : il
+  # ne sert qu'a rejouer un appel authentique a l'etape 6.
+  $node = $w
+  if (-not $node.headers -and $w.webhook) { $node = $w.webhook }
+  if ($node.headers) { $hookAuth = $node.headers.Authorization }
 } catch { }
 
 if (-not $hookUrl) {
@@ -240,6 +251,88 @@ if ($AppUrl) {
   }
 } else {
   Write-Warn "non teste : relancer avec -AppUrl https://votre-app.vercel.app"
+}
+
+# --- 6. Le jeton de la passerelle est-il celui qu'attend l'application ? -----
+# C'est LE test que l'etape 5 ne fait pas. Elle POSTe sans jeton et se contente
+# d'une 401 : elle prouve que la route est protegee, pas que la passerelle sait
+# ouvrir la porte. Les deux valeurs peuvent parfaitement diverger - une variable
+# regeneree dans Vercel, un webhook enregistre depuis le poste de developpement
+# - et rien ne le signale : les messages partent, aucun accuse ne revient, les
+# statuts restent bloques sur "En attente".
+#
+# On rejoue donc un appel authentique, avec le jeton que la passerelle utilise,
+# et un evenement inconnu que la route ignore (branche 'default') : rien n'est
+# ecrit nulle part, seule l'authentification est mise a l'epreuve.
+Write-Host "6. Jeton du webhook (passerelle <-> application)"
+if (-not $AppUrl) {
+  Write-Warn "non teste : relancer avec -AppUrl https://votre-app.vercel.app"
+} elseif (-not $hookAuth) {
+  Write-Warn "la passerelle n'envoie aucun en-tete Authorization"
+  Write-Hint "L'application refusera tous les evenements. Parametres > WhatsApp > Reenregistrer le webhook."
+} else {
+  $probe = '{"event":"CHECK_GATEWAY","instance":"' + $Instance + '"}'
+  try {
+    Invoke-RestMethod -Uri "$AppUrl/api/whatsapp/webhook" -Method Post `
+      -Headers @{ Authorization = $hookAuth } -Body $probe `
+      -ContentType "application/json" -TimeoutSec 20 | Out-Null
+    Write-Pass "accepte : la passerelle et l'application partagent le meme jeton"
+  } catch {
+    $code = Get-HttpStatus $_
+    if ($code -eq 401) {
+      Write-Fail "REFUSE (401) : le jeton de la passerelle n'est pas celui de l'application"
+      Write-Hint "C'est la panne silencieuse par excellence : les messages partent, aucun accuse ne revient."
+      Write-Hint "Corriger en UN clic : Parametres > WhatsApp > Reenregistrer le webhook."
+      Write-Hint "Ce bouton reecrit sur la passerelle le jeton EVOLUTION_WEBHOOK_TOKEN de Vercel."
+      Write-Hint "Verifier d'abord que la variable est bien definie cote Vercel, et le deploiement a jour."
+    } elseif ($code -eq 403) {
+      Write-Fail "REFUSE (403) : server_url inattendu"
+      Write-Hint "SERVER_URL de la passerelle doit egaler EVOLUTION_BASE_URL de Vercel."
+    } elseif ($code -eq 0) {
+      Write-Fail "application injoignable : $($_.Exception.Message)"
+    } else {
+      Write-Warn "reponse inattendue (HTTP $code)"
+    }
+  }
+}
+
+# --- 7. La cle du noeud Tailscale expire-t-elle ? ----------------------------
+# Le compte rendu de mise en service (SESSION-WHATSAPP.md, section 7) le
+# signalait comme "le seul point encore arme" : sans le clic "Disable key
+# expiry", le noeud se deconnecte au bout de ~6 mois et les envois s'arretent
+# SANS AUCUN AVERTISSEMENT. Ce controle est cet avertissement.
+Write-Host "7. Expiration de la cle du noeud Tailscale"
+$dockerExe = "docker"
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+  $candidate = "$env:LOCALAPPDATA\Programs\DockerDesktop\resources\bin\docker.exe"
+  if (Test-Path $candidate) { $dockerExe = $candidate } else { $dockerExe = $null }
+}
+if (-not $dockerExe) {
+  Write-Warn "docker introuvable : controle ignore (normal hors du poste qui heberge la passerelle)"
+} else {
+  $raw = & $dockerExe exec evolution-tailscale tailscale status --json 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $raw) {
+    Write-Warn "conteneur evolution-tailscale absent : controle ignore (montage sans Funnel)"
+  } else {
+    try {
+      $self = ($raw -join "") | ConvertFrom-Json | Select-Object -ExpandProperty Self
+      if (-not $self.KeyExpiry) {
+        Write-Pass "expiration desactivee : le noeud ne se deconnectera pas tout seul"
+      } else {
+        $days = [int]([datetime]$self.KeyExpiry - (Get-Date)).TotalDays
+        $when = ([datetime]$self.KeyExpiry).ToString("yyyy-MM-dd")
+        if ($days -le 21) {
+          Write-Fail "la cle expire le $when (dans $days j) : les envois s'arreteront ce jour-la"
+        } else {
+          Write-Warn "la cle expire le $when (dans $days j)"
+        }
+        Write-Hint "Console Tailscale > Machines > benzaoui-wa > ... > Disable key expiry."
+        Write-Hint "Un seul clic, definitif, et la seule protection contre un arret sans preavis."
+      }
+    } catch {
+      Write-Warn "etat Tailscale illisible : $($_.Exception.Message)"
+    }
+  }
 }
 
 # --- Verdict -----------------------------------------------------------------
