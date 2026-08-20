@@ -12,6 +12,8 @@ import {
   isKnownServerUrl,
   mapEvolutionStatus,
   maskId,
+  networkErrorCode,
+  normalizeBaseUrl,
   sendTextMessage,
   verifyWebhookToken,
 } from "@/lib/whatsapp/client";
@@ -272,5 +274,120 @@ describe("maskId", () => {
     // Le masque est plafonné à 6 points, quelle que soit la longueur.
     expect(maskId("instance-tres-longue")).toBe("••••••ngue");
     expect(maskId(null)).toBeNull();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// EVOLUTION_BASE_URL — les deux fautes de saisie qui se déguisaient en panne
+// ---------------------------------------------------------------------------
+
+describe("normalizeBaseUrl", () => {
+  it("ajoute https:// quand le schéma a été oublié", () => {
+    const out = normalizeBaseUrl("wa.exemple.dz");
+    expect(out?.baseUrl).toBe("https://wa.exemple.dz");
+    expect(out?.note).toMatch(/https/);
+  });
+
+  it("relève http:// en https:// vers un hôte public (un tunnel ne publie que le 443)", () => {
+    const out = normalizeBaseUrl("http://benzaoui-wa.tail6ac334.ts.net");
+    expect(out?.baseUrl).toBe("https://benzaoui-wa.tail6ac334.ts.net");
+    expect(out?.note).toMatch(/https/);
+  });
+
+  it("laisse http:// intact sur localhost et sur le réseau local", () => {
+    expect(normalizeBaseUrl("http://localhost:8080")?.baseUrl).toBe("http://localhost:8080");
+    expect(normalizeBaseUrl("http://192.168.1.10:8080")?.baseUrl).toBe("http://192.168.1.10:8080");
+    expect(normalizeBaseUrl("http://127.0.0.1:8080")?.note).toBeUndefined();
+  });
+
+  it("retire les slashs finaux sans toucher au chemin", () => {
+    expect(normalizeBaseUrl("https://wa.exemple.dz///")?.baseUrl).toBe("https://wa.exemple.dz");
+    expect(normalizeBaseUrl("https://wa.exemple.dz/evo/")?.baseUrl).toBe(
+      "https://wa.exemple.dz/evo",
+    );
+  });
+
+  it("null sur une valeur vide ou inexploitable", () => {
+    expect(normalizeBaseUrl("")).toBeNull();
+    expect(normalizeBaseUrl(undefined)).toBeNull();
+    expect(normalizeBaseUrl("ftp://wa.exemple.dz")).toBeNull();
+  });
+
+  it("getConfig signale la correction appliquée", () => {
+    vi.stubEnv("EVOLUTION_BASE_URL", "http://wa.exemple.dz");
+    const cfg = getConfig();
+    expect(cfg?.baseUrl).toBe("https://wa.exemple.dz");
+    expect(cfg?.baseUrlNote).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cause réelle d'un échec réseau
+// ---------------------------------------------------------------------------
+
+/** `fetch` masque tout derrière « TypeError: fetch failed » : la vraie cause
+ *  vit dans `cause.code`. */
+function fetchThatFails(code: string | undefined, ...thenResolves: unknown[]) {
+  let call = 0;
+  const fn = vi.fn(async () => {
+    if (call++ === 0 || thenResolves.length === 0) {
+      const err = new TypeError("fetch failed");
+      (err as { cause?: unknown }).cause = code ? Object.assign(new Error("boom"), { code }) : undefined;
+      throw err;
+    }
+    return { ok: true, status: 200, json: async () => thenResolves[0] };
+  });
+  vi.stubGlobal("fetch", fn);
+  return fn;
+}
+
+describe("networkErrorCode", () => {
+  it("descend la chaîne des causes jusqu'au code système", () => {
+    const inner = Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    const outer = Object.assign(new TypeError("fetch failed"), { cause: inner });
+    expect(networkErrorCode(outer)).toBe("ECONNREFUSED");
+  });
+
+  it("traduit un abandon sur délai en ETIMEDOUT", () => {
+    const err = new Error("timed out");
+    err.name = "TimeoutError";
+    expect(networkErrorCode(err)).toBe("ETIMEDOUT");
+  });
+
+  it("null quand aucune cause n'est exploitable", () => {
+    expect(networkErrorCode(new Error("rien"))).toBeNull();
+  });
+
+  it("ne boucle pas sur une chaîne de causes circulaire", () => {
+    const a: { cause?: unknown } = {};
+    a.cause = a;
+    expect(networkErrorCode(a)).toBeNull();
+  });
+});
+
+describe("passerelle injoignable — le message porte l'hôte et le code", () => {
+  it("expose le code système et l'hôte visé, jamais la clé API", async () => {
+    fetchThatFails("ECONNREFUSED");
+    const err = await getConnectionState().catch((e) => e);
+
+    expect(err).toBeInstanceOf(WhatsAppError);
+    expect((err as WhatsAppError).status).toBe(503);
+    expect((err as WhatsAppError).networkCode).toBe("ECONNREFUSED");
+    expect((err as WhatsAppError).message).toContain("wa.exemple.dz");
+    expect((err as WhatsAppError).message).toContain("ECONNREFUSED");
+    expect((err as WhatsAppError).message).not.toContain(API_KEY);
+  });
+
+  it("rejoue UNE lecture après une coupure passagère", async () => {
+    const fetchMock = fetchThatFails("ECONNRESET", { instance: { state: "open" } });
+    await expect(getConnectionState()).resolves.toEqual({ state: "open" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("ne rejoue JAMAIS un envoi : un message posté deux fois est pire qu'un échec", async () => {
+    const fetchMock = fetchThatFails("ECONNRESET");
+    await expect(sendTextMessage("213555111222", "Bonjour")).rejects.toBeInstanceOf(WhatsAppError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

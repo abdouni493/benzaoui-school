@@ -13,6 +13,10 @@ import { resolveWebhookUrl, sessionState } from "@/lib/whatsapp/session";
 import type { WhatsAppSessionResponse } from "@/lib/whatsapp/types";
 
 export const dynamic = "force-dynamic";
+/** Une demande de QR laisse la passerelle réfléchir jusqu'à 30 s. Sans cette
+ *  ligne la fonction était coupée par l'hébergeur AVANT son propre délai, et le
+ *  navigateur recevait une 504 opaque au lieu du message de la route. */
+export const maxDuration = 60;
 
 /** Gestion de la session WhatsApp pour Paramètres → WhatsApp.
  *

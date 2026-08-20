@@ -15,7 +15,12 @@ import {
   RotateCw,
   ShieldCheck,
 } from "lucide-react";
-import type { FlushOutcome, OutboxResponse, WhatsAppSessionResponse } from "@/lib/whatsapp/types";
+import type {
+  FlushOutcome,
+  OutboxResponse,
+  WhatsAppDiagnostics,
+  WhatsAppSessionResponse,
+} from "@/lib/whatsapp/types";
 
 /** Actions pilotant la session, côté /api/whatsapp/session. */
 type Action = "setup" | "connect" | "logout" | "restart";
@@ -253,6 +258,13 @@ export function WhatsAppSettingsPanel() {
                   />
                 </dl>
 
+                {/* Diagnostic — n'apparaît que quand il y a réellement quelque
+                    chose à corriger. Une panne WhatsApp a deux familles de
+                    causes (« le poste est éteint » / « une variable serveur
+                    manque ou est fausse ») qui rendaient jusqu'ici la MÊME
+                    phrase : impossible de savoir laquelle sans les journaux. */}
+                <Diagnostics diagnostics={state.diagnostics} connected={state.connected} />
+
                 {/* ---- File d'attente ----
                     N'apparait que s'il y a quelque chose dedans : une file vide
                     n'est pas une information, et un encart permanent finirait
@@ -483,6 +495,71 @@ export function WhatsAppSettingsPanel() {
         )}
       </CardBody>
     </Card>
+  );
+}
+
+/** Ce qu'il faut corriger, et où. Rendu uniquement s'il y a une anomalie :
+ *  un encart permanent finirait par ne plus être lu. */
+function Diagnostics({
+  diagnostics,
+  connected,
+}: {
+  diagnostics: WhatsAppDiagnostics;
+  connected: boolean;
+}) {
+  const { missingEnv, baseUrlNote, errorCode, webhookUrl, webhookUrlError } = diagnostics;
+  const hasAnomaly =
+    missingEnv.length > 0 || Boolean(baseUrlNote) || Boolean(errorCode) || Boolean(webhookUrlError);
+  if (!hasAnomaly) return null;
+
+  return (
+    <div className="space-y-2 rounded-xl border border-line bg-canvas/40 p-4 text-[11px] leading-relaxed">
+      <strong className="block text-xs text-ink">Diagnostic</strong>
+
+      {missingEnv.length > 0 && (
+        <p className="text-warning">
+          <strong>Variables absentes côté serveur :</strong>{" "}
+          <code className="font-mono">{missingEnv.join(", ")}</code>. Les ajouter dans Vercel →
+          Settings → Environment Variables (environnement <em>Production</em>), puis{" "}
+          <strong>redéployer</strong> : les variables ne sont lues qu&apos;au déploiement.
+        </p>
+      )}
+
+      {baseUrlNote && (
+        <p className="text-muted">
+          <strong className="text-ink">EVOLUTION_BASE_URL</strong> a été corrigée à la volée :{" "}
+          {baseUrlNote}. Corriger la variable elle-même évite de dépendre de ce rattrapage.
+        </p>
+      )}
+
+      {errorCode && (
+        <p className="text-muted">
+          <strong className="text-ink">Cause réseau :</strong>{" "}
+          <code className="font-mono text-danger">{errorCode}</code>
+          {errorCode === "ETIMEDOUT" || errorCode === "ECONNREFUSED" ? (
+            <>
+              {" "}
+              — vérifier que le poste qui héberge la passerelle est allumé et que les conteneurs
+              tournent (<code className="font-mono">docker compose ps</code>).
+            </>
+          ) : null}
+        </p>
+      )}
+
+      {webhookUrlError ? (
+        <p className="text-warning">
+          <strong>Adresse du webhook indéterminable :</strong> {webhookUrlError}
+        </p>
+      ) : (
+        webhookUrl && (
+          <p className="text-muted">
+            <strong className="text-ink">Webhook déclaré vers :</strong>{" "}
+            <code className="font-mono break-all">{webhookUrl}</code>
+            {connected ? "" : " (enregistré au prochain « Initialiser l'instance »)"}
+          </p>
+        )
+      )}
+    </div>
   );
 }
 

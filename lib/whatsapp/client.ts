@@ -37,6 +37,10 @@ export class WhatsAppError extends Error {
     message: string,
     readonly status: number,
     readonly providerCode?: number,
+    /** code système de l'échec réseau ("ECONNREFUSED", "ENOTFOUND"…), quand la
+     *  requête n'a même pas pu atteindre la passerelle. C'est LUI qui distingue
+     *  un poste éteint d'une variable d'environnement mal saisie. */
+    readonly networkCode?: string,
   ) {
     super(message);
     this.name = "WhatsAppError";
@@ -49,20 +53,83 @@ export interface EvolutionConfig {
   apiKey: string;
   instance: string;
   webhookToken?: string;
+  /** ce que la normalisation a dû corriger dans EVOLUTION_BASE_URL, s'il y a
+   *  lieu. Affiché dans le diagnostic : une variable mal saisie se voit alors,
+   *  au lieu de se déguiser en « passerelle injoignable ». */
+  baseUrlNote?: string;
+}
+
+/** Hôtes pour lesquels `http://` reste légitime : un poste de développement ou
+ *  une passerelle sur le réseau local de l'école n'a pas de certificat TLS. */
+function isLocalHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    h === "localhost" ||
+    h === "::1" ||
+    h === "host.docker.internal" ||
+    h.endsWith(".local") ||
+    h.endsWith(".localhost") ||
+    /^127\./.test(h) ||
+    /^10\./.test(h) ||
+    /^192\.168\./.test(h) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+  );
+}
+
+/** Normalise EVOLUTION_BASE_URL. `null` si elle est inexploitable.
+ *
+ *  Deux fautes de saisie coûtaient jusqu'ici une demi-journée de diagnostic,
+ *  parce qu'elles se présentaient toutes les deux comme « passerelle
+ *  injoignable » alors que la passerelle allait très bien :
+ *   - le schéma oublié (`wa.exemple.dz`) : `fetch` refuse l'URL ;
+ *   - `http://` vers un hôte public : un tunnel (Tailscale Funnel, Cloudflare)
+ *     ne publie QUE le port 443, la connexion est donc refusée.
+ *
+ *  On corrige les deux, et on dit ce qui a été corrigé (`note`). */
+export function normalizeBaseUrl(raw: string | undefined | null): {
+  baseUrl: string;
+  note?: string;
+} | null {
+  const trimmed = raw?.trim().replace(/\/+$/, "");
+  if (!trimmed) return null;
+
+  let note: string | undefined;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)
+    ? trimmed
+    : ((note = "schéma absent : https:// ajouté"), `https://${trimmed}`);
+
+  let url: URL;
+  try {
+    url = new URL(withScheme);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+
+  // Un hôte public en http:// ne peut pas répondre derrière un tunnel : on
+  // relève en https:// plutôt que d'échouer sur un ECONNREFUSED opaque.
+  if (url.protocol === "http:" && !isLocalHost(url.hostname)) {
+    url.protocol = "https:";
+    note = "http:// relevé en https:// (hôte public)";
+  }
+
+  const path = url.pathname.replace(/\/+$/, "");
+  return { baseUrl: `${url.origin}${path}`, ...(note ? { note } : {}) };
 }
 
 /** Configuration minimale pour ENVOYER : URL de la passerelle + clé API.
  *  `null` si l'une manque — les routes renvoient alors une 503 explicite. */
 export function getConfig(): EvolutionConfig | null {
-  const baseUrl = process.env.EVOLUTION_BASE_URL?.trim().replace(/\/+$/, "");
+  const normalized = normalizeBaseUrl(process.env.EVOLUTION_BASE_URL);
   const apiKey = process.env.EVOLUTION_API_KEY?.trim();
-  if (!baseUrl || !apiKey) return null;
+  if (!normalized || !apiKey) return null;
 
   return {
-    baseUrl,
+    baseUrl: normalized.baseUrl,
     apiKey,
     instance: process.env.EVOLUTION_INSTANCE?.trim() || DEFAULT_INSTANCE,
     webhookToken: process.env.EVOLUTION_WEBHOOK_TOKEN?.trim() || undefined,
+    ...(normalized.note ? { baseUrlNote: normalized.note } : {}),
   };
 }
 
@@ -125,6 +192,73 @@ function extractError(payload: unknown, fallback: string): string {
   return fallback;
 }
 
+/** Remonte la chaîne des `cause` jusqu'au vrai code système. `fetch` masque
+ *  tout derrière un « TypeError: fetch failed » : sans cela, un DNS qui ne
+ *  résout pas, un port fermé et un poste éteint rendent le MÊME message, et le
+ *  diagnostic repart de zéro à chaque fois. */
+export function networkErrorCode(err: unknown): string | null {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && code) return code;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return err instanceof Error && err.name === "TimeoutError" ? "ETIMEDOUT" : null;
+}
+
+/** Ce que chaque code veut dire, en clair : le message affiché dans Paramètres
+ *  doit dire QUOI FAIRE, pas seulement que ça ne marche pas. */
+const NETWORK_HINTS: Record<string, string> = {
+  ENOTFOUND: "le nom de la passerelle ne se résout pas (DNS) — vérifier EVOLUTION_BASE_URL",
+  EAI_AGAIN: "résolution DNS temporairement impossible — réessayer dans un instant",
+  ECONNREFUSED:
+    "connexion refusée par l'hôte — port fermé, ou EVOLUTION_BASE_URL en http:// alors que le tunnel ne publie que le 443",
+  ECONNRESET: "connexion coupée en cours de route",
+  ENETUNREACH: "réseau injoignable — adresse IPv6 sans route depuis l'hébergeur",
+  EHOSTUNREACH: "hôte injoignable",
+  ETIMEDOUT:
+    "aucune réponse — le poste qui héberge la passerelle est éteint, en veille ou sans Internet",
+  UND_ERR_CONNECT_TIMEOUT: "la connexion n'a pas pu s'établir à temps",
+  CERT_HAS_EXPIRED: "le certificat TLS de la passerelle a expiré",
+  DEPTH_ZERO_SELF_SIGNED_CERT:
+    "certificat TLS auto-signé : la passerelle doit servir un vrai certificat",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: "certificat TLS invérifiable",
+  ERR_INVALID_URL: "EVOLUTION_BASE_URL n'est pas une URL valide",
+};
+
+/** Échecs qui peuvent disparaître au coup suivant. On ne rejoue QUE des
+ *  lectures : rejouer un envoi après une coupure risquerait de poster deux fois
+ *  le même message à une famille. */
+const TRANSIENT_CODES = new Set([
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/** Bascule la résolution DNS en IPv4 d'abord, une seule fois par processus.
+ *
+ *  La passerelle est publiée par un tunnel qui annonce A **et** AAAA. Un
+ *  hébergeur sans route IPv6 tente alors l'AAAA et échoue en ENETUNREACH, alors
+ *  que l'IPv4 juste à côté répond. On ne touche à l'ordre de résolution que
+ *  lorsque ce cas se produit réellement — jamais par précaution. */
+let ipv4Forced = false;
+async function forceIpv4Once(): Promise<void> {
+  if (ipv4Forced) return;
+  ipv4Forced = true;
+  try {
+    const dns = await import("node:dns");
+    dns.setDefaultResultOrder("ipv4first");
+    console.error("[whatsapp] IPv6 injoignable : résolution DNS basculée en ipv4first.");
+  } catch {
+    /* environnement sans node:dns : on retentera simplement à l'identique */
+  }
+}
+
 async function evolutionRequest<T>(
   path: string,
   init: {
@@ -136,9 +270,8 @@ async function evolutionRequest<T>(
   const config = requireConfig();
   const { method = "GET", body, timeoutMs = REQUEST_TIMEOUT_MS } = init;
 
-  let response: Response;
-  try {
-    response = await fetch(`${config.baseUrl}${path}`, {
+  const attempt = () =>
+    fetch(`${config.baseUrl}${path}`, {
       method,
       headers: {
         apikey: config.apiKey,
@@ -148,14 +281,30 @@ async function evolutionRequest<T>(
       signal: AbortSignal.timeout(timeoutMs),
       cache: "no-store",
     });
+
+  let response: Response;
+  try {
+    response = await attempt();
   } catch (err) {
-    const timedOut = err instanceof Error && err.name === "TimeoutError";
-    throw new WhatsAppError(
-      timedOut
-        ? "La passerelle WhatsApp n'a pas répondu à temps."
-        : "Passerelle WhatsApp injoignable. Vérifier que le serveur Evolution est démarré et que EVOLUTION_BASE_URL est correct.",
-      503,
-    );
+    const code = networkErrorCode(err);
+    const ipv6Dead = code === "ENETUNREACH" || code === "EHOSTUNREACH";
+    // Une seule reprise, et sous deux conditions : une LECTURE (voir
+    // TRANSIENT_CODES), et un délai ordinaire — rejouer un appel long (la
+    // demande de QR en attend 30) ferait dépasser `maxDuration`, et l'hébergeur
+    // couperait la fonction avant qu'elle ait pu expliquer quoi que ce soit.
+    const canRetry =
+      method === "GET" &&
+      timeoutMs <= REQUEST_TIMEOUT_MS &&
+      (code === null || TRANSIENT_CODES.has(code));
+
+    if (!canRetry) throw unreachable(config, code);
+
+    if (ipv6Dead) await forceIpv4Once();
+    try {
+      response = await attempt();
+    } catch (retryErr) {
+      throw unreachable(config, networkErrorCode(retryErr) ?? code);
+    }
   }
 
   const payload = (await response.json().catch(() => null)) as T | null;
@@ -192,6 +341,28 @@ async function evolutionRequest<T>(
   }
 
   return payload as T;
+}
+
+/** Message d'échec réseau : toujours l'hôte visé ET le code système, jamais la
+ *  clé API. C'est le seul moyen, depuis l'écran Paramètres, de distinguer « le
+ *  poste est éteint » de « la variable Vercel est fausse ». */
+function unreachable(config: EvolutionConfig, code: string | null): WhatsAppError {
+  let host = config.baseUrl;
+  try {
+    host = new URL(config.baseUrl).host;
+  } catch {
+    /* baseUrl est déjà normalisée : ce cas ne devrait pas se produire */
+  }
+  const hint = code ? NETWORK_HINTS[code] : undefined;
+  const detail = [code, hint].filter(Boolean).join(" — ");
+  console.error(`[whatsapp] passerelle injoignable (${code ?? "cause inconnue"}) sur ${host}`);
+
+  return new WhatsAppError(
+    `Passerelle WhatsApp injoignable sur ${host}${detail ? ` : ${detail}` : "."}`,
+    503,
+    undefined,
+    code ?? undefined,
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -91,6 +91,32 @@ export interface OutboxResponse {
   entries: OutboxEntry[];
 }
 
+/** Diagnostic de la passerelle, rendu à l'écran Paramètres quand elle ne
+ *  répond pas.
+ *
+ *  Il existe parce qu'une panne WhatsApp a exactement deux familles de causes —
+ *  « le poste qui héberge la passerelle est éteint » et « une variable
+ *  d'environnement est absente ou mal saisie » — et qu'elles se présentaient
+ *  toutes les deux sous la même phrase : « passerelle injoignable ». On ne
+ *  pouvait pas les distinguer sans accès aux journaux du serveur.
+ *
+ *  Ne contient AUCUN secret : des noms de variables, un schéma d'URL, un code
+ *  d'erreur système. Jamais une clé, jamais un jeton. */
+export interface WhatsAppDiagnostics {
+  /** schéma réellement utilisé pour joindre la passerelle ("https" / "http") */
+  scheme: string | null;
+  /** correction qu'a subie EVOLUTION_BASE_URL au passage, s'il y en a eu une */
+  baseUrlNote: string | null;
+  /** variables d'environnement serveur absentes — NOMS seuls */
+  missingEnv: string[];
+  /** code système du dernier échec réseau ("ECONNREFUSED", "ENOTFOUND"…) */
+  errorCode: string | null;
+  /** adresse publique que la passerelle rappellera pour les accusés de remise */
+  webhookUrl: string | null;
+  /** pourquoi cette adresse n'a pas pu être déterminée, le cas échéant */
+  webhookUrlError: string | null;
+}
+
 /** Réponse de `GET /api/whatsapp/status` et de `/api/whatsapp/session` — état de
  *  la session pour l'écran Paramètres → WhatsApp. Ne contient JAMAIS de secret :
  *  ni clé API, ni jeton de webhook. */
@@ -113,6 +139,8 @@ export interface WhatsAppSessionState {
   webhookConfigured: boolean;
   /** message d'erreur lisible si l'interrogation de la passerelle a échoué */
   error: string | null;
+  /** de quoi agir sur cette erreur sans ouvrir les journaux du serveur */
+  diagnostics: WhatsAppDiagnostics;
 }
 
 /** Réponse de `GET/POST /api/whatsapp/session` : l'état, plus de quoi lier le

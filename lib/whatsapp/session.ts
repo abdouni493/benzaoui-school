@@ -13,7 +13,7 @@ import {
   getInstanceInfo,
   maskId,
 } from "./client";
-import type { WhatsAppSessionState } from "./types";
+import type { WhatsAppDiagnostics, WhatsAppSessionState } from "./types";
 
 /** URL publique du webhook, dérivée UNIQUEMENT de la configuration serveur.
  *
@@ -55,6 +55,35 @@ export function resolveWebhookUrl(): string {
   return url;
 }
 
+/** Variables serveur attendues, et lesquelles manquent réellement.
+ *  EVOLUTION_INSTANCE est volontairement absente de la liste : elle a une
+ *  valeur par défaut, son absence n'est donc pas une anomalie. */
+function missingEnv(): string[] {
+  const required = ["EVOLUTION_BASE_URL", "EVOLUTION_API_KEY", "EVOLUTION_WEBHOOK_TOKEN"];
+  return required.filter((name) => !process.env[name]?.trim());
+}
+
+/** Diagnostic non secret, calculé sans jamais toucher le réseau. */
+function diagnose(baseUrl: string | null, note: string | null, errorCode: string | null): WhatsAppDiagnostics {
+  let scheme: string | null = null;
+  try {
+    if (baseUrl) scheme = new URL(baseUrl).protocol.replace(":", "");
+  } catch {
+    scheme = null;
+  }
+
+  let webhookUrl: string | null = null;
+  let webhookUrlError: string | null = null;
+  try {
+    webhookUrl = resolveWebhookUrl();
+  } catch (err) {
+    webhookUrlError =
+      err instanceof WhatsAppError ? err.message : "Adresse publique de l'application inconnue.";
+  }
+
+  return { scheme, baseUrlNote: note, missingEnv: missingEnv(), errorCode, webhookUrl, webhookUrlError };
+}
+
 /** État courant de la session. Ne lève JAMAIS : une panne de passerelle doit
  *  laisser l'écran Paramètres affichable pour expliquer le problème, pas
  *  renvoyer une erreur opaque. */
@@ -71,6 +100,7 @@ export async function sessionState(): Promise<WhatsAppSessionState> {
       baseUrlHost: null,
       webhookConfigured: false,
       error: null,
+      diagnostics: diagnose(null, null, null),
     };
   }
 
@@ -103,6 +133,7 @@ export async function sessionState(): Promise<WhatsAppSessionState> {
       linkedNumber: info.ownerNumber,
       profileName: info.profileName,
       error: null,
+      diagnostics: diagnose(config.baseUrl, config.baseUrlNote ?? null, null),
     };
   } catch (err) {
     return {
@@ -112,6 +143,11 @@ export async function sessionState(): Promise<WhatsAppSessionState> {
       linkedNumber: null,
       profileName: null,
       error: err instanceof WhatsAppError ? err.message : "Passerelle WhatsApp injoignable.",
+      diagnostics: diagnose(
+        config.baseUrl,
+        config.baseUrlNote ?? null,
+        err instanceof WhatsAppError ? err.networkCode ?? null : null,
+      ),
     };
   }
 }

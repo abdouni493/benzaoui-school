@@ -380,6 +380,16 @@ pas obtenu son certificat, vérifier que les ports 80 et 443 sont ouverts et que
 
 Avec l'option B, `EVOLUTION_BASE_URL` vaut exactement le `TUNNEL_PUBLIC_URL` de `evolution/.env`.
 
+> **`EVOLUTION_BASE_URL` doit commencer par `https://`.** Un tunnel — Funnel comme Cloudflare — ne
+> publie **que** le port 443 : `http://mon-poste.tail1234.ts.net` se fait refuser la connexion, et
+> l'écran Paramètres affichait alors « passerelle injoignable » **avec le bon nom d'hôte**, puisque
+> seul le schéma était faux. L'application relève désormais ce cas toute seule (`http://` → `https://`
+> pour un hôte public) et le signale dans son diagnostic, mais autant écrire la bonne valeur.
+
+> **`EVOLUTION_WEBHOOK_TOKEN` absent = aucun accusé de remise.** Les messages partent, les statuts
+> restent bloqués sur `queued`, et **Initialiser l'instance** échoue en 503. Le panneau Paramètres
+> affiche « Webhook : Non configuré » et nomme la variable manquante.
+
 > **Ne PAS définir `EVOLUTION_WEBHOOK_URL` sur Vercel.** Laissée vide, l'application dérive
 > l'adresse de son propre domaine de production. Renseignée par erreur avec la valeur locale
 > (`host.docker.internal`) recopiée depuis `.env.local`, elle demanderait à la passerelle de
@@ -583,7 +593,8 @@ renvoyer à la main.
 | Symptôme | Cause probable |
 | --- | --- |
 | « N messages en attente » | Normal : la passerelle était injoignable. Ils repartent seuls ; rallumer le poste suffit |
-| « Passerelle WhatsApp injoignable » | PC éteint ou en veille, Docker non démarré, ou `EVOLUTION_BASE_URL` erroné |
+| « Passerelle WhatsApp injoignable » | PC éteint ou en veille, Docker non démarré, ou `EVOLUTION_BASE_URL` erroné. Le message porte maintenant le **code système** : `ETIMEDOUT` = poste éteint, `ECONNREFUSED` = mauvais port ou `http://`, `ENOTFOUND` = adresse fausse |
+| « Webhook : Non configuré » dans Paramètres | `EVOLUTION_WEBHOOK_TOKEN` n'est pas défini **sur Vercel** — l'ajouter, redéployer, puis **Réenregistrer le webhook** |
 | Tout marchait, plus rien le lendemain | Le poste s'est mis en veille — lancer `keep-alive.ps1 -Apply` |
 | Plus rien après une coupure de courant | Docker Desktop ne s'est pas relancé — `keep-alive.ps1 -Apply` |
 | L'adresse `.ts.net` a changé | Volume `tailscale_state` perdu : reprendre `TUNNEL_PUBLIC_URL`, `EVOLUTION_BASE_URL`, puis **Initialiser** |
@@ -596,4 +607,10 @@ renvoyer à la main.
 | 403 en boucle dans les journaux | `SERVER_URL` de la passerelle ≠ `EVOLUTION_BASE_URL` de Vercel |
 | 401 en boucle dans les journaux | `EVOLUTION_WEBHOOK_TOKEN` différent entre Vercel et l'instance — recliquer sur **Initialiser** |
 
-En cas de doute, `check-gateway.ps1` désigne l'étape fautive plus vite que la lecture des journaux.
+Depuis l'application, **Paramètres → WhatsApp** affiche un bloc **Diagnostic** dès qu'il y a une
+anomalie : variables absentes côté serveur (noms seuls), correction appliquée à `EVOLUTION_BASE_URL`,
+code système du dernier échec réseau, et adresse du webhook effectivement dérivée. Il existe parce
+que les deux familles de pannes — « le poste est éteint » et « une variable Vercel est fausse » —
+rendaient jusqu'ici la même phrase, indistinguables sans accès aux journaux du serveur.
+
+Depuis le poste, `check-gateway.ps1` désigne l'étape fautive plus vite que la lecture des journaux.

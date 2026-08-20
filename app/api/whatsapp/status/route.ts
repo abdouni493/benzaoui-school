@@ -5,6 +5,9 @@ import { sessionState } from "@/lib/whatsapp/session";
 import type { WhatsAppSessionState } from "@/lib/whatsapp/types";
 
 export const dynamic = "force-dynamic";
+/** Même raison que /api/whatsapp/session : la lecture d'état interroge la
+ *  passerelle, qui peut mettre 20 s à ne pas répondre. */
+export const maxDuration = 60;
 
 /** État de la session WhatsApp pour l'écran Paramètres → WhatsApp.
  *  Réservé à l'administration/réception. Ne renvoie AUCUN secret : ni clé API,
