@@ -26,7 +26,7 @@ import {
   X
 } from "lucide-react";
 import type { ScheduleSession, Day, Subscription, Teacher } from "@/lib/types";
-import { formatDateFr } from "@/lib/helpers";
+import { DAY_LABELS_FR, formatDateFr, salleStartClashes, sessionSalleIds } from "@/lib/helpers";
 import { printHtmlDocument } from "@/lib/print";
 import {
   bannerHtml,
@@ -200,6 +200,34 @@ export function PlannerPage() {
   const getModuleName = (mid: string) => modules.find((m) => m.id === mid)?.name ?? "-";
   const getGroupName = (gid: string) => groups.find((g) => g.id === gid)?.name ?? "-";
   const getSalleName = (sid: string) => salles.find((s) => s.id === sid)?.name ?? "-";
+
+  /**
+   * Prévient quand la salle demandée est DÉJÀ prise le même jour à la même
+   * heure de début — sans jamais refuser l'enregistrement : une école peut
+   * vouloir doubler une salle (demi-groupes, surveillance), le dernier mot lui
+   * revient. L'alerte sert à ce qu'elle ne le fasse pas sans le savoir.
+   */
+  const warnSalleClash = (candidate: {
+    id?: string;
+    salleIds: string[];
+    days: Day[];
+    startTime: string;
+  }) => {
+    const clashes = salleStartClashes(sessions, candidate);
+    if (clashes.length === 0) return;
+    const lines = clashes
+      .map(
+        (s) =>
+          `• ${sessionSalleIds(s).map(getSalleName).join(" + ")} — ${getModuleName(s.moduleId)}` +
+          ` (${getGroupName(s.groupId)}) ${s.startTime}-${s.endTime}` +
+          ` · ${s.days.map((d) => DAY_LABELS_FR[d]).join(", ")}`,
+      )
+      .join("\n");
+    alert(
+      `⚠️ Salle déjà occupée à ${candidate.startTime} :\n\n${lines}\n\n` +
+        "Le créneau est tout de même enregistré — vérifiez que c'est bien voulu.",
+    );
+  };
   const getTeacherName = (tid: string) => {
     const t = teachers.find((te) => te.id === tid);
     return t ? `${t.firstName} ${t.lastName}` : "-";
@@ -418,6 +446,13 @@ export function PlannerPage() {
         }
       }
 
+      warnSalleClash({
+        id: editingOpenSession?.id,
+        salleIds: openSalleIds,
+        days: openDays,
+        startTime: `${openStartHour}:${openStartMin}`,
+      });
+
       const title = openTitleOverride.trim() || buildOpenTitle();
       // Séance offerte => tarif 0 partout (créneau + abonnement auto), pour que
       // même une base qui ne connaîtrait pas encore la colonne `is_free` ne
@@ -475,6 +510,8 @@ export function PlannerPage() {
       alert("Veuillez remplir tous les champs obligatoires et sélectionner au moins un jour.");
       return;
     }
+    warnSalleClash({ salleIds: [salleId], days: selectedDays, startTime: `${startHour}:${startMin}` });
+
     const newSession: ScheduleSession = {
       id: uid("ses"),
       classId,
@@ -497,6 +534,13 @@ export function PlannerPage() {
       alert("Veuillez remplir tous les champs obligatoires.");
       return;
     }
+    warnSalleClash({
+      id: selectedSession.id,
+      salleIds: [salleId],
+      days: selectedDays,
+      startTime: `${startHour}:${startMin}`,
+    });
+
     const updated: Partial<ScheduleSession> = {
       classId,
       moduleId,

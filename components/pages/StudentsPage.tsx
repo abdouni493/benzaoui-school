@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import {
   Trash2,
   Edit,
@@ -429,10 +430,14 @@ export function StudentsPage() {
   // Filter students based on queries
   const getFilteredStudents = () => {
     return students.filter((s) => {
-      const nameMatch = `${s.firstName} ${s.lastName}`.toLowerCase().includes(searchQuery.toLowerCase());
-      const phoneMatch = s.phone.includes(searchQuery);
-      const emailMatch = s.email.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesSearch = nameMatch || phoneMatch || emailMatch;
+      // La carte se cherche comme le reste : sans se soucier de la casse ni
+      // des espaces, exactement comme le scan la lit.
+      const query = searchQuery.trim().toLowerCase();
+      const nameMatch = `${s.firstName} ${s.lastName}`.toLowerCase().includes(query);
+      const phoneMatch = s.phone.includes(searchQuery.trim());
+      const emailMatch = s.email.toLowerCase().includes(query);
+      const rfidMatch = (s.rfid ?? "").trim().toLowerCase().includes(query);
+      const matchesSearch = !query || nameMatch || phoneMatch || emailMatch || rfidMatch;
 
       if (!matchesSearch) return false;
 
@@ -1539,7 +1544,24 @@ export function StudentsPage() {
 
   /** Enrolling in a cours = picking ONE of its groups. Picking another group
    *  moves the student instead of enrolling him twice in the same cours. */
-  const pickGroup = (item: AssignItem, groupSubId: string) => {
+  const pickGroup = (item: AssignItem, groupSubId: string, mode: StudentFormMode = "assign") => {
+    // À la création, un créneau d'une autre classe / année / filière que celle
+    // déjà retenue est REFUSÉ, avec l'explication : la fiche partirait sinon
+    // avec deux scolarités incompatibles.
+    if (mode === "create") {
+      const target = classOfSubscription(groupSubId);
+      const lockedKey = classScopeKeyOf(lockedScopeClass);
+      if (target && lockedScopeClass && lockedKey && classScopeKeyOf(target) !== lockedKey) {
+        alert(
+          `Scolarité déjà fixée : « ${classFullLabel(lockedScopeClass)} ».\n\n` +
+            `« ${classFullLabel(target)} » relève d'une autre classe, année ou filière.\n` +
+            "Un même étudiant ne peut pas être inscrit sur deux scolarités à la création.\n\n" +
+            "Retirez d'abord les inscriptions retenues (croix sur les puces « Inscriptions retenues ») " +
+            "s'il faut vraiment changer de scolarité.",
+        );
+        return;
+      }
+    }
     const siblingIds = item.groupOptions.map((g) => g.id);
     const current = selectedGroupOf(item);
     const withoutCourse = selectedAssignIds.filter((id) => !siblingIds.includes(id));
@@ -1608,6 +1630,28 @@ export function StudentsPage() {
 
   const isThirdYearSecondaryClass = (cls?: SchoolClass) =>
     cls?.type === "cours" && cls.coursLevel === "lycee" && cls.year === "3eme";
+
+  // ---- Verrou de scolarité (écran de création) ------------------------------
+  // Un élève relève d'UNE scolarité : la PREMIÈRE inscription retenue fixe la
+  // classe, l'année ET la filière, et toutes les suivantes doivent en relever.
+  // Sans ce garde-fou une même fiche pouvait cumuler des créneaux de niveaux
+  // différents — impossible à tarifer, à pointer et à facturer proprement.
+  const classScopeKeyOf = (cls?: SchoolClass) =>
+    !cls
+      ? ""
+      : cls.type === "formation"
+        ? `f:${cls.formationLevel ?? ""}`
+        : `c:${cls.coursLevel ?? ""}:${cls.year ?? ""}:${cls.filiereId ?? ""}`;
+
+  /** La scolarité déjà fixée par les inscriptions retenues, s'il y en a une.
+   *  Un stage ne porte aucune classe : il n'en fixe pas et n'y est pas soumis. */
+  const lockedScopeClass: SchoolClass | undefined = (() => {
+    for (const id of selectedAssignIds) {
+      const cls = classOfSubscription(id);
+      if (cls) return cls;
+    }
+    return undefined;
+  })();
 
   /** L'étudiant est en 3e année secondaire — soit parce que la cascade de
    *  l'écran pointe dessus, soit parce qu'un créneau déjà sélectionné en vient. */
@@ -2095,6 +2139,11 @@ export function StudentsPage() {
           )
         : [];
 
+    /** Le mode voyage avec le clic : seul l'écran de création verrouille la
+     *  scolarité, les écrans « Modifier » et « Affecter » servent aussi à la
+     *  corriger. */
+    const onPickGroupInMode = (item: AssignItem, groupSubId: string) => pickGroup(item, groupSubId, mode);
+
     const fee = mode === "create" ? createRegistrationFee : mode === "edit" ? editRegistrationFee : 0;
     const feeLabel = mode === "create" ? createFeeOption?.label ?? "" : editFeeLabel;
     const feePayNow = mode === "create" ? createFeePayNow : editFeePayNow;
@@ -2107,6 +2156,16 @@ export function StudentsPage() {
           </span>
           <span className="text-[10px] text-muted">{mode === "assign" ? "Modifiable à tout moment" : "Facultatif"}</span>
         </div>
+
+        {/* La scolarité retenue, affichée dès la première inscription : c'est
+            elle qui décide de ce qui peut encore être coché. */}
+        {mode === "create" && lockedScopeClass && (
+          <p className="rounded-lg border border-primary/30 bg-primary-50/60 px-3 py-2 text-[11px] text-ink">
+            <strong>Scolarité de l&apos;étudiant : {classFullLabel(lockedScopeClass)}.</strong> Les créneaux
+            d&apos;une autre classe, année ou filière seront refusés — retirez les inscriptions retenues
+            ci-dessous pour en changer.
+          </p>
+        )}
 
         {/* Direct search: "lycee 2eme sciences" lands on the same créneaux
             as walking the three steps below, in any word order. */}
@@ -2264,7 +2323,7 @@ export function StudentsPage() {
               subDates={assignSubDates}
               startDates={assignStartDates}
               discounts={assignDiscounts}
-              onPickGroup={pickGroup}
+              onPickGroup={onPickGroupInMode}
               onToggleCoursework={toggleCoursework}
               onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
               onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
@@ -2287,7 +2346,7 @@ export function StudentsPage() {
               subDates={assignSubDates}
               startDates={assignStartDates}
               discounts={assignDiscounts}
-              onPickGroup={pickGroup}
+              onPickGroup={onPickGroupInMode}
               onToggleCoursework={toggleCoursework}
               onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
               onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
@@ -2312,7 +2371,7 @@ export function StudentsPage() {
               subDates={assignSubDates}
               startDates={assignStartDates}
               discounts={assignDiscounts}
-              onPickGroup={pickGroup}
+              onPickGroup={onPickGroupInMode}
               onToggleCoursework={toggleCoursework}
               onSubDateChange={(id, value) => setAssignSubDates({ ...assignSubDates, [id]: value })}
               onStartDateChange={(id, value) => setAssignStartDates({ ...assignStartDates, [id]: value })}
@@ -3104,6 +3163,12 @@ export function StudentsPage() {
         </div>
       </div>
 
+      {/* Un scan qui ne débite rien n'est presque jamais une panne : c'est une
+          gratuité active. Elle se voit donc ici, sur l'écran qui scanne. */}
+      <div className="mb-6">
+        <FreeBillingBanner />
+      </div>
+
       {/* Filter panel */}
       <div className="flex flex-col sm:flex-row gap-3 mb-6 bg-surface border border-line p-3 rounded-2xl">
         <div className="flex-1 relative">
@@ -3111,7 +3176,7 @@ export function StudentsPage() {
           <Input
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Rechercher par nom, téléphone ou email..."
+            placeholder="Rechercher par nom, carte RFID, téléphone ou email..."
             className="pl-9"
           />
         </div>

@@ -4,6 +4,7 @@ import { useSession } from "@/lib/store/session";
 import { ClassesPage } from "@/components/pages/ClassesPage";
 import { PlannerPage } from "@/components/pages/PlannerPage";
 import { TimetablesPage } from "@/components/pages/TimetablesPage";
+import { RoomsPage } from "@/components/pages/RoomsPage";
 import { SubscriptionsPage } from "@/components/pages/SubscriptionsPage";
 import { StudentsPage } from "@/components/pages/StudentsPage";
 import { AttendancePage } from "@/components/pages/AttendancePage";
@@ -55,6 +56,8 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
       return <PlannerPage />;
     case "timetables":
       return <TimetablesPage />;
+    case "rooms":
+      return <RoomsPage />;
     case "subscriptions":
       return <SubscriptionsPage />;
     case "students":

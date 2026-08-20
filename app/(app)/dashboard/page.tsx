@@ -4,8 +4,9 @@ import { useData } from "@/lib/store/data";
 import { useSession } from "@/lib/store/session";
 import { Card, CardBody } from "@/components/ui/Card";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Badge } from "@/components/ui/Badge";
 import { TeacherPages } from "@/components/pages/TeacherPages";
+import { DaySchedulePanel } from "@/components/schedule/DaySchedulePanel";
+import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import { motion } from "framer-motion";
 import {
   Users,
@@ -14,7 +15,6 @@ import {
   CheckCircle2,
   DollarSign,
   AlertTriangle,
-  Clock,
   TrendingUp,
   ArrowUpRight,
   ArrowDownLeft,
@@ -65,7 +65,6 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     modules,
     groups,
     subscriptions,
-    salles,
   } = useData();
 
   // 1. General Operational Metrics
@@ -86,26 +85,6 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     return sum + balDebt + regDebt;
   }, 0);
   const unpaidTeacherSessions = unpaidTeacher.filter((u) => !u.paid).reduce((sum, u) => sum + u.amount, 0);
-
-  // Today's classes schedule
-  const todayIndex = (["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"] as const)[
-    new Date().getDay()
-  ];
-  const todaysSchedule = sessions
-    .filter((s) => s.days.includes(todayIndex))
-    .map((s) => {
-      const teacher = teachers.find((t) => t.id === s.teacherId);
-      const mod = modules.find((m) => m.id === s.moduleId);
-      const group = groups.find((g) => g.id === s.groupId);
-      const salle = salles.find((sa) => sa.id === s.salleId);
-      return {
-        ...s,
-        teacherName: teacher ? `${teacher.firstName} ${teacher.lastName}` : "Non spécifié",
-        moduleName: mod ? mod.name : "Module",
-        groupName: group ? group.name : "Groupe",
-        salleName: salle ? salle.name : "Salle non spécifiée",
-      };
-    });
 
   // 3. Subscription Count By Module (CSS Bar Chart Data)
   const getModuleEnrollments = () => {
@@ -284,6 +263,18 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
         </motion.div>
       )}
 
+      {/* Une gratuité active met TOUS les scans à 0 DA : ça doit se voir ici,
+          pas seulement dans le toast d'un scan déjà passé. */}
+      <motion.div variants={itemVariants}>
+        <FreeBillingBanner />
+      </motion.div>
+
+      {/* Les séances de la journée, en emploi du temps — et l'historique des
+          jours précédents à portée de flèche. */}
+      <motion.div variants={itemVariants}>
+        <DaySchedulePanel />
+      </motion.div>
+
       {/* Row 3: Admin-Only Graphs & Financials */}
       {!reception && (
         <motion.div variants={itemVariants} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -396,34 +387,8 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
       )}
 
       {/* Row 4: Operational Data Columns */}
-      <motion.div variants={itemVariants} className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Column 1: Today's school schedule */}
-        <Card className={reception ? "lg:col-span-2 border border-line card-shadow" : "border border-line card-shadow"}>
-          <CardBody className="space-y-4 p-5">
-            <h3 className="font-bold text-ink border-b border-line pb-3 flex items-center gap-2">
-              <Clock className="h-4.5 w-4.5 text-primary" /> Séances du Jour ({todaysSchedule.length})
-            </h3>
-
-            <div className="space-y-2.5 max-h-72 overflow-y-auto pt-1 pr-1">
-              {todaysSchedule.length === 0 ? (
-                <p className="text-xs text-muted italic text-center py-12">Aucun cours planifié aujourd'hui.</p>
-              ) : (
-                todaysSchedule.map((s) => (
-                  <div key={s.id} className="flex justify-between items-center p-3 bg-canvas/30 rounded-xl border border-line hover:border-primary/30 transition-colors">
-                    <div>
-                      <strong className="text-ink font-bold block text-xs">{s.moduleName}</strong>
-                      <span className="text-[10px] text-muted block mt-0.5 font-sans">Gr: {s.groupName} | Prof: {s.teacherName}</span>
-                      <span className="text-[9px] text-primary font-bold block mt-1">{s.salleName}</span>
-                    </div>
-                    <Badge tone="primary" className="font-mono text-[10px]">{s.startTime} - {s.endTime}</Badge>
-                  </div>
-                ))
-              )}
-            </div>
-          </CardBody>
-        </Card>
-
-        {/* Column 2: Debtor Students warning list (Admin only) */}
+      <motion.div variants={itemVariants} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Column 1: Debtor Students warning list (Admin only) */}
         {!reception && (
           <Card className="border border-line card-shadow">
             <CardBody className="space-y-4 p-5">

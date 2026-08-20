@@ -353,6 +353,116 @@ export function isRollCallOpen(args: {
   return args.nowMinutes >= timeToMinutes(opensAt);
 }
 
+// ---- Emploi du temps : colonnes horaires -------------------------------------
+// Une journée n'a pas d'horaires fixes : chaque école pose ses créneaux où elle
+// veut (08:00-09:00, 09:00-11:00…). Les colonnes d'un tableau d'emploi du temps
+// sont donc DÉDUITES des séances du jour : on prend toutes les bornes (débuts et
+// fins), on les trie, et chaque paire consécutive devient une colonne. Une
+// séance couvre alors un nombre exact de colonnes (colSpan), et les trous entre
+// deux cours restent visibles.
+
+export interface TimeRange {
+  startTime: string;
+  endTime: string;
+}
+
+export interface TimeSlot {
+  start: string;
+  end: string;
+}
+
+/** Colonnes horaires d'une journée, dans l'ordre. Vide s'il n'y a rien à poser. */
+export function scheduleSlots(ranges: TimeRange[]): TimeSlot[] {
+  const bounds = new Set<number>();
+  for (const r of ranges) {
+    const from = timeToMinutes(r.startTime);
+    const to = timeToMinutes(r.endTime);
+    if (to <= from) continue; // horaire inutilisable : ignoré, jamais affiché
+    bounds.add(from);
+    bounds.add(to);
+  }
+  const sorted = [...bounds].sort((a, b) => a - b);
+  const slots: TimeSlot[] = [];
+  for (let i = 0; i < sorted.length - 1; i += 1) {
+    slots.push({ start: minutesToTime(sorted[i]), end: minutesToTime(sorted[i + 1]) });
+  }
+  return slots;
+}
+
+/** Première colonne occupée par une séance et nombre de colonnes couvertes,
+ *  ou `null` quand elle n'en touche aucune. */
+export function slotSpan(range: TimeRange, slots: TimeSlot[]): { index: number; span: number } | null {
+  const from = timeToMinutes(range.startTime);
+  const to = timeToMinutes(range.endTime);
+  if (to <= from) return null;
+  let index = -1;
+  let span = 0;
+  slots.forEach((slot, i) => {
+    if (timeToMinutes(slot.start) >= from && timeToMinutes(slot.end) <= to) {
+      if (index === -1) index = i;
+      span += 1;
+    }
+  });
+  return index === -1 ? null : { index, span };
+}
+
+/** Une cellule d'une ligne d'emploi du temps : du temps libre, ou une séance
+ *  qui occupe `span` colonnes. */
+export type RowCell<T> = { kind: "free" } | { kind: "item"; item: T; span: number };
+
+/**
+ * Découpe une ligne du tableau, de gauche à droite : les colonnes vides, puis
+ * chaque séance sur exactement les colonnes qu'elle couvre.
+ *
+ * Une séance qui chevauche celle déjà posée est ÉCARTÉE : une salle ne peut pas
+ * être occupée deux fois sur la même colonne, et un tableau HTML dont les
+ * colSpan se recouvrent se décale sur toute la ligne.
+ */
+export function layoutRow<T>(
+  placed: { item: T; index: number; span: number }[],
+  slotCount: number,
+): RowCell<T>[] {
+  const cells: RowCell<T>[] = [];
+  let cursor = 0;
+  for (const { item, index, span } of [...placed].sort((a, b) => a.index - b.index)) {
+    if (index < cursor || span <= 0) continue;
+    for (let i = cursor; i < index; i += 1) cells.push({ kind: "free" });
+    const clamped = Math.min(span, slotCount - index);
+    if (clamped <= 0) continue;
+    cells.push({ kind: "item", item, span: clamped });
+    cursor = index + clamped;
+  }
+  for (let i = cursor; i < slotCount; i += 1) cells.push({ kind: "free" });
+  return cells;
+}
+
+/** Les salles d'un créneau : une séance libre peut en couvrir plusieurs. */
+export function sessionSalleIds(session: Pick<ScheduleSession, "isOpen" | "salleId" | "salleIds">): string[] {
+  const ids = session.isOpen && session.salleIds?.length ? session.salleIds : [session.salleId];
+  return ids.filter(Boolean) as string[];
+}
+
+/**
+ * Créneaux DÉJÀ posés qui entrent en collision avec celui qu'on est en train de
+ * créer : même salle, un jour en commun, et la même heure de début. Sert à
+ * prévenir la réception — sans jamais l'empêcher d'enregistrer, une école
+ * pouvant volontairement doubler une salle.
+ */
+export function salleStartClashes(
+  sessions: ScheduleSession[],
+  candidate: { id?: string; salleIds: string[]; days: Day[]; startTime: string },
+): ScheduleSession[] {
+  const salles = new Set(candidate.salleIds.filter(Boolean));
+  const days = new Set(candidate.days);
+  if (salles.size === 0 || days.size === 0) return [];
+  return sessions.filter((s) => {
+    if (candidate.id && s.id === candidate.id) return false;
+    if (s.startTime !== candidate.startTime) return false;
+    if (!s.days.some((d) => days.has(d))) return false;
+    return sessionSalleIds(s).some((id) => salles.has(id));
+  });
+}
+
 export function todayIso(): string {
   return new Date().toLocaleDateString("fr-CA"); // YYYY-MM-DD
 }

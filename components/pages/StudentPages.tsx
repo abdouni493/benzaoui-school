@@ -326,11 +326,14 @@ function StudentScheduleView({
     return { ownClassIds: cls, ownGroupIds: grp };
   }, [sessions, ownSessionIds]);
 
-  // « Même classe et année » = same niveau + année (cours) or same niveau de
-  // formation. Every filière and groupe of that scope is shown; only the
-  // student's own classe + filière + groupe is highlighted (see `isOwn`).
+  // « Ma classe » = même niveau, même année ET MÊME FILIÈRE (cours), ou même
+  // niveau de formation. Un élève de 2e année Sciences ne voit donc plus les
+  // séances de 2e année Lettres : seuls les groupes de SA scolarité sont
+  // affichés, les siens en couleur (voir `isOwn`).
   const classScopeKey = (c: SchoolClass) =>
-    c.type === "formation" ? `f:${c.formationLevel ?? ""}` : `c:${c.coursLevel ?? ""}:${c.year ?? ""}`;
+    c.type === "formation"
+      ? `f:${c.formationLevel ?? ""}`
+      : `c:${c.coursLevel ?? ""}:${c.year ?? ""}:${c.filiereId ?? ""}`;
   const peerClassIds = useMemo(() => {
     const keys = new Set(classes.filter((c) => ownClassIds.has(c.id)).map(classScopeKey));
     return new Set(classes.filter((c) => keys.has(classScopeKey(c))).map((c) => c.id));

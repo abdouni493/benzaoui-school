@@ -275,7 +275,7 @@ function TeacherScheduleView({
   getSessionInfo: (s: ScheduleSession) => any;
 }) {
   const { salles, students, subscriptions } = useData();
-  const daysOfWeek = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"];
+  const allDays = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"];
   const [filterSessionId, setFilterSessionId] = useState("");
   const [selectedSession, setSelectedSession] = useState<any | null>(null);
   const [isDetailsOpen, setIsDetailsOpen] = useState(false);
@@ -286,6 +286,11 @@ function TeacherScheduleView({
   const filteredSessions = filterSessionId
     ? mySessions.filter((s) => s.id === filterSessionId)
     : mySessions;
+
+  // Un enseignant ne travaille pas tous les jours : les journées sans cours ne
+  // sont plus affichées du tout. Le tableau ne montre que ses jours réels, et
+  // les colonnes restantes prennent toute la largeur.
+  const daysOfWeek = allDays.filter((day) => filteredSessions.some((s) => s.days.includes(day)));
 
   // Helpers for formatting days
   const frenchDays: Record<string, string> = {
@@ -357,8 +362,23 @@ function TeacherScheduleView({
         </div>
       </div>
 
-      <div className="overflow-x-auto pb-4">
-        <div className="grid grid-cols-1 md:grid-cols-7 gap-4 min-w-[900px] md:min-w-0">
+      {daysOfWeek.length === 0 && (
+        <Card className="border border-line bg-canvas/30 p-8 text-center">
+          <Clock className="mx-auto mb-2 h-9 w-9 text-muted" />
+          <h3 className="text-sm font-bold text-ink">Aucun cours programmé</h3>
+          <p className="mt-1 text-[11px] text-muted">
+            {filterSessionId
+              ? "Ce cours n'est programmé aucun jour de la semaine."
+              : "Aucun créneau ne vous est affecté pour le moment."}
+          </p>
+        </Card>
+      )}
+
+      <div className={daysOfWeek.length === 0 ? "hidden" : "overflow-x-auto pb-4"}>
+        <div
+          className="grid grid-cols-1 gap-4 md:min-w-0"
+          style={{ gridTemplateColumns: `repeat(${Math.max(daysOfWeek.length, 1)}, minmax(180px, 1fr))` }}
+        >
           {daysOfWeek.map((day) => {
             const daySessions = filteredSessions
               .filter((s) => s.days.includes(day))

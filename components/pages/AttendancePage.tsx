@@ -37,6 +37,7 @@ import {
   type RollCallPolicy,
 } from "@/lib/helpers";
 import { printHtmlDocument } from "@/lib/print";
+import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 
 // Human-readable reasons when the server refuses/annotates a manual marking.
 const MARK_FAILURE_MESSAGES: Record<string, string> = {
@@ -866,6 +867,10 @@ export function AttendancePage() {
                 </span>
               </div>
             )}
+
+            {/* Une gratuité active met tous les pointages à 0 DA : dit ici pour
+                la date affichée, et non seulement dans le toast d'un scan. */}
+            <FreeBillingBanner date={sheetDate} />
 
             {/* Quand la feuille s'ouvre : à l'heure dite, ou sur clic. */}
             <div className="rounded-xl border border-line bg-canvas/40 p-3 space-y-2">

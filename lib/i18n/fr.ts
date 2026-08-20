@@ -27,6 +27,7 @@ export const fr = {
   },
   nav: {
     dashboard: "Tableau de bord",
+    rooms: "Répartition des Salles",
     timetables: "Emplois de Temps",
     classes: "Classes",
     planner: "Planner",
