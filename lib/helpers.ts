@@ -2,6 +2,7 @@ import type { Database } from "@/lib/store/data";
 import { DAYS } from "@/lib/types";
 import type { AttendanceOpenMode } from "@/lib/types";
 import type {
+  AttendanceRecord,
   CoursLevel,
   Day,
   RegistrationFeeKey,
@@ -45,6 +46,66 @@ export const filiereName = (db: Database, id?: string) =>
   id ? db.filieres.find((f) => f.id === id)?.name ?? "" : "";
 
 export const studentName = (s: Student) => `${s.firstName} ${s.lastName}`;
+
+// ---- Pourquoi une présence n'a-t-elle rien coûté ? ---------------------------
+
+/** Les cinq raisons pour lesquelles une présence est enregistrée à 0 DA.
+ *  `null` = elle a bien été facturée. */
+export type FreeReason =
+  /** une période gratuite couvrait la classe ce jour-là */
+  | "freePeriod"
+  /** la date de début de facturation de l'inscription n'était pas atteinte */
+  | "preStart"
+  /** le créneau lui-même est coché « séance libre offerte » */
+  | "freeSeance"
+  /** l'élève est marqué gratuit sur sa fiche */
+  | "freeStudent"
+  /** le tarif du créneau est réellement à 0 DA */
+  | "zeroPrice"
+  | null;
+
+/**
+ * Pourquoi cette présence n'a rien débité.
+ *
+ * Trois réglages mettent une séance à 0 DA, et deux d'entre eux se
+ * reconnaissent à une colonne dédiée (`freePeriodId`, `preStart`). Le
+ * troisième — un créneau coché « séance libre offerte » — n'en a aucune : il
+ * ne laisse que le prix non facturé dans `waivedAmount`. Une présence de ce
+ * type s'affichait donc « -0 DA » en rouge, comme si la facturation avait
+ * échoué, alors qu'elle avait été offerte volontairement.
+ */
+export function freeReasonOf(
+  att: Pick<AttendanceRecord, "amountDeducted" | "freePeriodId" | "preStart" | "waivedAmount">,
+  opts: { studentIsFree?: boolean } = {},
+): FreeReason {
+  if (att.amountDeducted > 0) return null;
+  if (att.freePeriodId) return "freePeriod";
+  if (att.preStart) return "preStart";
+  // Aucune colonne dédiée : c'est le prix mis de côté qui trahit la gratuité.
+  if ((att.waivedAmount ?? 0) > 0) return "freeSeance";
+  if (opts.studentIsFree) return "freeStudent";
+  return "zeroPrice";
+}
+
+/** Libellé court, tel qu'il tient dans une ligne d'historique. */
+export const FREE_REASON_LABELS: Record<NonNullable<FreeReason>, string> = {
+  freePeriod: "période gratuite",
+  preStart: "avant le début",
+  freeSeance: "créneau offert",
+  freeStudent: "élève gratuit",
+  zeroPrice: "tarif à 0",
+};
+
+/** La même chose en une phrase, pour l'infobulle. */
+export const FREE_REASON_HINTS: Record<NonNullable<FreeReason>, string> = {
+  freePeriod: "Séance offerte : une période gratuite couvrait cette classe ce jour-là.",
+  preStart:
+    "Séance offerte : la date de début de facturation de l'inscription n'était pas encore atteinte.",
+  freeSeance:
+    "Séance offerte : le créneau est coché « séance libre offerte » — ni débit élève, ni rémunération enseignant.",
+  freeStudent: "Séance offerte : l'élève est marqué gratuit sur sa fiche.",
+  zeroPrice: "Rien à débiter : le tarif de ce créneau est de 0 DA.",
+};
 
 // ---- Ordre d'affichage des fiches --------------------------------------------
 

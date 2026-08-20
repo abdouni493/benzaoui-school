@@ -51,6 +51,9 @@ import {
   byNewestFirst,
   classCascadeLabel,
   courseKeyOf,
+  freeReasonOf,
+  FREE_REASON_HINTS,
+  FREE_REASON_LABELS,
   daysUntil,
   deskPaymentFor,
   enrollmentExpiry,
@@ -3777,20 +3780,32 @@ export function StudentsPage() {
                                   <Badge tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}>
                                     {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
                                   </Badge>
-                                  {att.preStart || att.freePeriodId ? (
-                                    <span
-                                      className="text-[10px] font-bold text-success"
-                                      title={
-                                        att.preStart
-                                          ? "Séance offerte : abonnement pas encore commencé"
-                                          : "Séance offerte : période gratuite"
-                                      }
-                                    >
-                                      Offert ({att.waivedAmount ?? 0} DA)
-                                    </span>
-                                  ) : (
-                                    <span className="font-bold text-danger text-[10px]">-{att.amountDeducted} DA</span>
-                                  )}
+                                  {(() => {
+                                    // « Pourquoi le solde n'a-t-il pas bougé ? » se lit ICI :
+                                    // c'est la première chose qu'on regarde quand on croit à
+                                    // une panne de facturation. La raison est donc écrite en
+                                    // clair, et non seulement dans une infobulle.
+                                    const reason = freeReasonOf(att, {
+                                      studentIsFree: selectedStudent.isFree,
+                                    });
+                                    if (!reason) {
+                                      return (
+                                        <span className="font-bold text-danger text-[10px]">
+                                          -{att.amountDeducted} DA
+                                        </span>
+                                      );
+                                    }
+                                    const waived = att.waivedAmount ?? 0;
+                                    return (
+                                      <span
+                                        className="text-[10px] font-bold text-success"
+                                        title={FREE_REASON_HINTS[reason]}
+                                      >
+                                        Offert · {FREE_REASON_LABELS[reason]}
+                                        {waived > 0 ? ` (${waived} DA)` : ""}
+                                      </span>
+                                    );
+                                  })()}
                                   <button
                                     onClick={() => openEditAtt(att)}
                                     title="Modifier cette présence"
