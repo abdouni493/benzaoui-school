@@ -210,20 +210,118 @@ Charge utile du webhook à enregistrer :
 `setup` doit enchaîner `createInstance(url)` **puis** `setWebhook(url)`, et rester exécutable **sur
 une session déjà ouverte**.
 
-### Interface
+### Interface — panneau « Réglages → WhatsApp »
 
-Un panneau de réglages affichant : état de la session, numéro lié, instance masquée, hôte de la
-passerelle, **et si le webhook pointe bien vers cette application**.
+**C'est la pièce qui rend le montage utilisable par une secrétaire plutôt que par un développeur.**
+Sans elle, connecter le téléphone imposerait de manipuler l'API à la main. Elle doit être autonome :
+tout se fait depuis cet écran, sans terminal, sans copier-coller de jeton.
 
-Boutons requis — **y compris quand la session est ouverte** (piège 6.4) :
+Créer un composant client dédié (`WhatsAppSettingsPanel` ou équivalent), monté dans la page de
+réglages de l'application.
 
-- **Connecter** (QR code) et **Nouveau QR code** ;
-- **Réenregistrer le webhook** ← indispensable en session ouverte ;
-- **Redémarrer la session**, **Déconnecter** (avec confirmation).
+#### Contrat de `GET /api/whatsapp/status`
 
-Ne jamais afficher « la passerelle est prête » si le webhook ne pointe pas vers l'application :
-les messages partiraient et les statuts resteraient bloqués sur `queued`, l'écran affirmant que tout
-va bien.
+Le panneau se pilote entièrement à partir de cette réponse. **Aucun champ ne doit exposer de
+secret** :
+
+| Champ | Type | Rôle |
+| --- | --- | --- |
+| `configured` | `boolean` | les variables minimales pour envoyer sont présentes |
+| `state` | `"open" \| "connecting" \| "close"` | état brut renvoyé par la passerelle |
+| `connected` | `boolean` | raccourci : la session est utilisable |
+| `linkedNumber` | `string \| null` | numéro lié, ex. `"213555123456"` |
+| `profileName` | `string \| null` | nom de profil WhatsApp du compte lié |
+| `instanceMasked` | `string \| null` | nom d'instance **masqué**, ex. `"•••••aoui"` |
+| `baseUrlHost` | `string \| null` | **hôte seul**, jamais l'URL complète, jamais la clé |
+| `webhookConfigured` | `boolean` | le webhook pointe bien vers **cette** application |
+| `error` | `string \| null` | message lisible si l'interrogation a échoué |
+| `qrBase64` | `string \| null` | QR en **data-URI**, prêt pour un `<img src>` ; `null` si connecté |
+| `pairingCode` | `string \| null` | code d'appairage à saisir sur le téléphone, si fourni |
+
+#### Actions — `POST /api/whatsapp/session`
+
+Un seul endpoint, discriminé par `{ action }`, renvoyant l'état à jour :
+
+| Action | Effet | Disponible quand |
+| --- | --- | --- |
+| `setup` | crée l'instance **puis** enregistre le webhook | **toujours**, y compris session ouverte |
+| `connect` | génère un QR / code d'appairage | session fermée |
+| `restart` | relance la session **sans délier** le téléphone | session ouverte |
+| `logout` | délie le téléphone | session ouverte, **après confirmation** |
+
+#### Disposition
+
+1. **Badge d'état** en tête : vert si `connected`, rouge sinon.
+2. **Numéro lié** et nom de profil, quand la session est ouverte — c'est ce qui permet de vérifier
+   d'un coup d'œil que c'est bien le bon téléphone qui est branché.
+3. **Grille d'informations** (4 lignes) : `Instance` (masquée), `Serveur` (hôte seul),
+   `Webhook` (« Jeton configuré » / « Non configuré », ton d'alerte si non), `État brut`.
+4. **Deux branches d'actions**, selon `connected`.
+
+#### Branche « session ouverte »
+
+- Bandeau **conditionné à `webhookConfigured`** :
+  - configuré → message de succès « la passerelle est prête » ;
+  - **non configuré → message d'alerte** expliquant que les messages partiront mais qu'aucun accusé
+    ne reviendra, et **désignant le bouton à cliquer**.
+    Afficher « prête » dans ce cas serait faux : les statuts resteraient bloqués sur `queued`
+    pendant que l'écran affirme que tout va bien.
+- Boutons : **Redémarrer la session**, **Réenregistrer le webhook** (action `setup` — voir piège
+  6.4, il doit être présent **ici**), **Déconnecter**.
+- **Déconnecter en deux temps** : un premier clic remplace le bouton par « Oui, déconnecter » +
+  « Annuler ». Le geste est destructeur — il arrête tous les envois automatiques jusqu'à un nouveau
+  scan — et ne doit pas partir d'un clic isolé.
+- Phrase d'avertissement sous les boutons, disant exactement cela.
+
+#### Branche « session fermée »
+
+- Boutons : **Connecter WhatsApp** (devient **Nouveau QR code** si un QR est déjà affiché) et
+  **Initialiser l'instance** (même action `setup`).
+- Ligne d'explication : « Initialiser » crée l'instance et y enregistre l'adresse du webhook ; à
+  faire une fois, et de nouveau après un changement de domaine.
+- **Bloc QR** quand `qrBase64` est présent : le data-URI dans un `<img>`, centré, encadré, avec la
+  marche à suivre côté téléphone (**WhatsApp → ⋮ → Appareils connectés → Connecter un appareil**).
+- Afficher le **code d'appairage** s'il est fourni, en gros et en `font-mono` : c'est l'alternative
+  quand la caméra ne coopère pas.
+
+#### Comportements dynamiques — ce qui fait la différence à l'usage
+
+- **Sondage tant que le QR est affiché** : un QR WhatsApp expire en moins d'une minute. Tant qu'il
+  est à l'écran et que la session n'est pas ouverte, interroger l'état toutes les ~3 s pour basculer
+  **dès que le scan est pris en compte**, sans que l'utilisateur ait à rafraîchir.
+  **Nettoyer l'intervalle au démontage.**
+- **Effacer le QR dès que `connected` passe à vrai** — laisser un QR périmé à l'écran invite à
+  scanner dans le vide.
+- **Ne sonder que dans ce cas.** Pas de sondage permanent : cet écran reste parfois ouvert des
+  heures, et chaque appel réveille une fonction serverless.
+- **Un seul bouton actif à la fois** : mémoriser l'action en cours et désactiver tous les boutons
+  pendant qu'elle tourne.
+- **Libellés de progression** : « Connecter WhatsApp » → « Connexion… », « Réenregistrer le
+  webhook » → « Enregistrement… ». Une action passerelle prend plusieurs secondes ; sans retour
+  visuel, l'utilisateur cliquera deux fois.
+- **Garde de démontage** : ne pas appeler `setState` après démontage du composant (les actions sont
+  longues, l'utilisateur peut changer de page).
+- **Zone d'erreur** affichant `error` en clair, avec la manœuvre correspondante quand elle est
+  connue (passerelle injoignable → le poste est-il allumé ?).
+
+#### Règles d'affichage non négociables
+
+- **Jamais** la clé API, ni le jeton de webhook, ni l'URL complète de la passerelle : hôte seul, et
+  nom d'instance masqué. Cet écran est visible par du personnel administratif.
+- `webhookConfigured` traduit une **présence**, pas une valeur : ne jamais afficher le jeton.
+
+#### Bloc pédagogique « À savoir »
+
+Terminer le panneau par quelques lignes que le personnel doit avoir sous les yeux :
+
+- les messages partent du numéro de l'organisation via une passerelle auto-hébergée : aucun modèle à
+  faire approuver, les textes se modifient librement ;
+- **la passerelle doit rester allumée** — poste éteint, aucun message ne part ;
+- le téléphone qui a scanné doit se reconnecter à Internet de temps en temps, sinon WhatsApp finit
+  par délier l'appareil ;
+- écrire trop, ou à des gens qui n'attendent rien, **fait bannir le numéro** ; les envois groupés
+  sont temporisés volontairement ;
+- les identifiants sont configurés côté serveur et ne sont jamais exposés ici.
 
 ### Envois automatiques
 
@@ -349,6 +447,12 @@ Ne déclare la tâche terminée que si **tout** ceci est vérifié, en montrant 
 - [ ] l'endpoint webhook répond **401 sans jeton** ;
 - [ ] un message réel atteint **`delivered`** — franchir `queued` est la seule preuve que la boucle
       est complète ;
+- [ ] **le panneau de réglages permet de connecter le téléphone de bout en bout, sans terminal** :
+      QR affiché, scanné, badge qui passe au vert **tout seul** grâce au sondage, numéro lié affiché ;
+- [ ] le panneau expose **« Réenregistrer le webhook » en session ouverte**, et n'annonce pas
+      « prête » quand `webhookConfigured` est faux ;
+- [ ] aucun secret visible dans le panneau ni dans la réponse de `/status` (vérifier l'onglet réseau :
+      ni clé API, ni jeton, ni URL complète de la passerelle) ;
 - [ ] la suite de tests du projet passe, le build de production réussit ;
 - [ ] le script de service continu a été exécuté sur le poste hôte ;
 - [ ] la documentation créée mentionne **explicitement** la contrepartie : poste éteint = aucun
