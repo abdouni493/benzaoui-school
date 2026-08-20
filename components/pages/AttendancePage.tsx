@@ -21,11 +21,21 @@ import {
   ChevronLeft,
   ChevronRight,
   Gift,
+  Play,
+  Lock,
+  Timer,
 } from "lucide-react";
 import type { ScheduleSession, AttendanceStatus, Student, Day, FreePeriod } from "@/lib/types";
 import { useToast } from "@/lib/store/toast";
+import { useSettings, rollCallKey, type AttendanceOpenMode } from "@/lib/store/settings";
 import { formatDA } from "@/lib/utils";
-import { formatDateFr, netPriceFor } from "@/lib/helpers";
+import {
+  formatDateFr,
+  netPriceFor,
+  rollCallOpensAt,
+  isRollCallOpen as isRollCallOpenFor,
+  type RollCallPolicy,
+} from "@/lib/helpers";
 import { printHtmlDocument } from "@/lib/print";
 
 // Human-readable reasons when the server refuses/annotates a manual marking.
@@ -57,6 +67,18 @@ export function AttendancePage() {
     cancelAttendance,
   } = data;
   const { addToast } = useToast();
+  // Politique d'ouverture de la feuille de pointage (réglée sur cet écran).
+  const {
+    attendanceOpenMode,
+    attendanceOpenLead,
+    attendanceOpenAt,
+    rollCallStarted,
+    setAttendanceOpenMode,
+    setAttendanceOpenLead,
+    setAttendanceOpenAt,
+    startRollCall,
+    stopRollCall,
+  } = useSettings();
 
   // Active Tab: "sheet" (Roll-call Sheet) or "history" (Attendance History)
   const [activeTab, setActiveTab] = useState<"sheet" | "history">("sheet");
@@ -219,6 +241,58 @@ export function AttendancePage() {
     return "finished";
   };
 
+  // ---- Ouverture de la feuille de pointage ----------------------------------
+  // Trois politiques, réglables juste au-dessus de la liste des séances :
+  //   · « Avant chaque séance » — la feuille s'ouvre N minutes avant son début ;
+  //   · « À heure fixe »        — elle s'ouvre à la même heure pour toute la journée ;
+  //   · « Manuelle »            — elle ne s'ouvre que sur clic.
+  // Dans TOUS les cas la réception garde le bouton « Démarrer le pointage » :
+  // le réglage automatique choisit quand la feuille s'ouvre toute seule, il
+  // n'empêche jamais de l'ouvrir plus tôt.
+
+  const rollCallPolicy: RollCallPolicy = {
+    mode: attendanceOpenMode,
+    leadMinutes: attendanceOpenLead,
+    fixedTime: attendanceOpenAt,
+  };
+
+  /** Heure à laquelle le pointage de cette séance s'ouvre TOUT SEUL, ou null
+   *  en mode manuel (rien ne s'ouvre sans un clic). */
+  const openingTimeOf = (s: ScheduleSession) => rollCallOpensAt(s.startTime, rollCallPolicy);
+
+  /** Feuille ouverte à la main par la réception, pour ce jour-là. */
+  const isStartedManually = (s: ScheduleSession) =>
+    !!rollCallStarted[rollCallKey(sheetDate, s.id)];
+
+  /** Cette séance accepte-t-elle un pointage maintenant ? */
+  const isRollCallOpen = (s: ScheduleSession): boolean =>
+    isRollCallOpenFor({
+      sheetDate,
+      today: todayStr,
+      sessionStart: s.startTime,
+      nowMinutes: time.getHours() * 60 + time.getMinutes(),
+      startedManually: isStartedManually(s),
+      policy: rollCallPolicy,
+    });
+
+  /** Pourquoi le pointage est refusé, ou undefined s'il est ouvert. Sert à la
+   *  fois à désactiver les boutons et à dire à la réception quoi faire. */
+  const rollCallLockOf = (s?: ScheduleSession): string | undefined => {
+    if (!s) return undefined;
+    if (isFutureSheet) return "Journée à venir — pointage impossible";
+    if (isRollCallOpen(s)) return undefined;
+    const opensAt = openingTimeOf(s);
+    return opensAt
+      ? `Pointage fermé — il s'ouvre à ${opensAt}. Cliquez sur « Démarrer le pointage » pour l'ouvrir tout de suite.`
+      : "Pointage fermé — cliquez sur « Démarrer le pointage » pour l'ouvrir.";
+  };
+
+  const openModeOptions: { key: AttendanceOpenMode; label: string }[] = [
+    { key: "lead", label: "Avant chaque séance" },
+    { key: "fixed", label: "À heure fixe" },
+    { key: "manual", label: "Manuelle" },
+  ];
+
   // Keep a valid session selected whenever the sheet date changes
   useEffect(() => {
     if (sheetSessions.length === 0) {
@@ -233,6 +307,8 @@ export function AttendancePage() {
   // Always a séance of the day being displayed: switching the date can never
   // leave the roll-call on a timing that is not scheduled that day.
   const activeSession = sheetSessions.find((s) => s.id === activeSessionId);
+  /** Message de verrouillage de la séance affichée (undefined = pointage ouvert). */
+  const rollCallLock = rollCallLockOf(activeSession);
 
   // Students on this séance: the ones enrolled in it, PLUS the ones of another
   // group of the same cours who came to this one (rattrapage) — their badge is
@@ -313,6 +389,9 @@ export function AttendancePage() {
   // modal first; pure status switches (present <-> late) go straight through.
   const requestMark = (stu: Student, status: AttendanceStatus) => {
     if (!activeSession) return;
+    // Feuille pas encore ouverte : rien ne doit passer, même par un raccourci
+    // clavier ou un double-clic sur un bouton en train d'être désactivé.
+    if (!isRollCallOpen(activeSession)) return;
     const existing = getStudentSheetAttendance(stu.id, activeSession.id);
 
     if (status === "absent") {
@@ -787,6 +866,70 @@ export function AttendancePage() {
                 </span>
               </div>
             )}
+
+            {/* Quand la feuille s'ouvre : à l'heure dite, ou sur clic. */}
+            <div className="rounded-xl border border-line bg-canvas/40 p-3 space-y-2">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">
+                  <Timer className="h-3.5 w-3.5" /> Ouverture du pointage
+                </span>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {openModeOptions.map((opt) => {
+                    const active = attendanceOpenMode === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        onClick={() => setAttendanceOpenMode(opt.key)}
+                        className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition-colors ${
+                          active
+                            ? "border-primary bg-primary text-white"
+                            : "border-line bg-surface text-ink hover:bg-primary-50"
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {attendanceOpenMode === "lead" && (
+                  <label className="flex items-center gap-1.5 text-[11px] text-muted">
+                    <Input
+                      type="number"
+                      min={0}
+                      max={240}
+                      value={attendanceOpenLead}
+                      onChange={(e) => setAttendanceOpenLead(Number(e.target.value))}
+                      className="h-8 w-20 text-center"
+                    />
+                    minute(s) avant le début de la séance
+                  </label>
+                )}
+
+                {attendanceOpenMode === "fixed" && (
+                  <label className="flex items-center gap-1.5 text-[11px] text-muted">
+                    à partir de
+                    <Input
+                      type="time"
+                      value={attendanceOpenAt}
+                      onChange={(e) => setAttendanceOpenAt(e.target.value)}
+                      className="h-8 w-28 text-center"
+                    />
+                  </label>
+                )}
+              </div>
+
+              <p className="text-[10px] text-muted">
+                {attendanceOpenMode === "manual"
+                  ? "Aucune feuille ne s'ouvre toute seule : choisissez la séance, puis cliquez sur « Démarrer le pointage »."
+                  : attendanceOpenMode === "fixed"
+                    ? `Chaque feuille du jour s'ouvre d'elle-même à ${attendanceOpenAt || "00:00"}. Avant cette heure, le bouton « Démarrer le pointage » l'ouvre quand même.`
+                    : `Chaque feuille s'ouvre d'elle-même ${attendanceOpenLead} minute(s) avant le début de sa séance. Avant, le bouton « Démarrer le pointage » l'ouvre quand même.`}{" "}
+                Les journées passées restent toujours ouvertes pour corriger un oubli. Ce réglage est propre à
+                ce poste.
+              </p>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -919,6 +1062,15 @@ export function AttendancePage() {
                         {live === "upcoming" && <Badge tone="warning">À venir</Badge>}
                         {live === "finished" && <Badge tone="danger">Terminée</Badge>}
                         {isTeacherAbs && <Badge tone="danger">Ens. Absent</Badge>}
+                        {!isFutureSheet && sheetDate === todayStr && (
+                          <Badge tone={isRollCallOpen(s) ? "success" : "warning"}>
+                            {isRollCallOpen(s)
+                              ? "Pointage ouvert"
+                              : openingTimeOf(s)
+                                ? `Pointage à ${openingTimeOf(s)}`
+                                : "Pointage fermé"}
+                          </Badge>
+                        )}
                       </div>
                     </div>
 
@@ -966,7 +1118,29 @@ export function AttendancePage() {
                         </span>
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {!isFutureSheet && sheetDate === todayStr && (
+                          rollCallLock ? (
+                            <Button
+                              size="sm"
+                              onClick={() => startRollCall(sheetDate, activeSession.id)}
+                              className="text-xs"
+                            >
+                              <Play className="h-3.5 w-3.5" /> Démarrer le pointage
+                            </Button>
+                          ) : isStartedManually(activeSession) ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => stopRollCall(sheetDate, activeSession.id)}
+                              className="text-xs"
+                            >
+                              <Lock className="h-3.5 w-3.5" /> Fermer le pointage
+                            </Button>
+                          ) : (
+                            <Badge tone="success">Pointage ouvert</Badge>
+                          )
+                        )}
                         <Button
                           size="sm"
                           variant={absentTeachers[activeSession.id] ? "danger" : "outline"}
@@ -984,6 +1158,16 @@ export function AttendancePage() {
                         <div>
                           <strong>Attention :</strong> L'enseignant est marqué comme absent pour cette séance.
                           Les séances validées ne seront pas ajoutées à son historique de rémunération.
+                        </div>
+                      </div>
+                    )}
+
+                    {rollCallLock && !isFutureSheet && (
+                      <div className="flex items-start gap-2 rounded-xl border border-warning/25 bg-warning/10 p-3 text-xs text-warning">
+                        <Lock className="mt-0.5 h-4 w-4 shrink-0" />
+                        <div>
+                          <strong className="block">Pointage pas encore ouvert</strong>
+                          <span className="text-[11px]">{rollCallLock}</span>
                         </div>
                       </div>
                     )}
@@ -1062,8 +1246,8 @@ export function AttendancePage() {
                                 <div className="flex items-center gap-1.5 self-end sm:self-center">
                                   <button
                                     onClick={() => requestMark(stu, "present")}
-                                    disabled={isFutureSheet}
-                                    title={isFutureSheet ? "Journée à venir — pointage impossible" : undefined}
+                                    disabled={!!rollCallLock}
+                                    title={rollCallLock}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       attToday?.status === "present"
                                         ? "bg-success text-white shadow-sm"
@@ -1074,8 +1258,8 @@ export function AttendancePage() {
                                   </button>
                                   <button
                                     onClick={() => requestMark(stu, "late")}
-                                    disabled={isFutureSheet}
-                                    title={isFutureSheet ? "Journée à venir — pointage impossible" : undefined}
+                                    disabled={!!rollCallLock}
+                                    title={rollCallLock}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       attToday?.status === "late"
                                         ? "bg-warning text-white shadow-sm"
@@ -1086,8 +1270,8 @@ export function AttendancePage() {
                                   </button>
                                   <button
                                     onClick={() => requestMark(stu, "absent")}
-                                    disabled={isFutureSheet}
-                                    title={isFutureSheet ? "Journée à venir — pointage impossible" : undefined}
+                                    disabled={!!rollCallLock}
+                                    title={rollCallLock}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       !attToday
                                         ? "bg-danger text-white shadow-sm"

@@ -1,5 +1,6 @@
 import type { Database } from "@/lib/store/data";
 import { DAYS } from "@/lib/types";
+import type { AttendanceOpenMode } from "@/lib/types";
 import type {
   CoursLevel,
   Day,
@@ -286,6 +287,72 @@ export function sessionEnrolledStudents(db: Database, sessionId: string): Studen
 }
 
 // ---- Formation dates ----
+// ---- Ouverture de la feuille de pointage -------------------------------------
+// Le pointage manuel d'une séance n'est pas ouvert en permanence : il s'ouvre à
+// l'heure décidée par l'école, ou sur un clic de la réception. Les règles sont
+// ici, pures et testées, pour que l'écran Présence n'ait plus qu'à les appeler.
+
+/** "HH:mm" → minutes depuis minuit (0 si la valeur est illisible). */
+export function timeToMinutes(time: string): number {
+  const [h, m] = (time || "").split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return 0;
+  return h * 60 + m;
+}
+
+/** Minutes depuis minuit → "HH:mm", borné à la journée. */
+export function minutesToTime(minutes: number): string {
+  const m = Math.max(0, Math.min(24 * 60 - 1, Math.round(minutes || 0)));
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+}
+
+/** La politique choisie par l'école, telle qu'elle est réglée sur l'écran. */
+export interface RollCallPolicy {
+  mode: AttendanceOpenMode;
+  /** Mode "lead" : minutes d'avance sur le début de la séance (0 = à l'heure). */
+  leadMinutes: number;
+  /** Mode "fixed" : heure "HH:mm", la même pour toutes les séances du jour. */
+  fixedTime: string;
+}
+
+/**
+ * Heure à laquelle le pointage de cette séance s'ouvre TOUT SEUL — ou `null`
+ * en mode manuel, où rien ne s'ouvre sans un clic.
+ */
+export function rollCallOpensAt(sessionStart: string, policy: RollCallPolicy): string | null {
+  if (policy.mode === "manual") return null;
+  if (policy.mode === "fixed") return policy.fixedTime || "00:00";
+  return minutesToTime(timeToMinutes(sessionStart) - (policy.leadMinutes || 0));
+}
+
+/**
+ * Cette séance accepte-t-elle un pointage maintenant ?
+ *
+ * Une journée à venir est toujours fermée (on ne pointe pas d'avance) et une
+ * journée passée toujours ouverte : c'est là que la réception corrige les
+ * oublis, le verrou n'ayant de sens que sur la journée en cours. Un clic sur
+ * « Démarrer le pointage » ouvre la feuille quel que soit le mode.
+ */
+export function isRollCallOpen(args: {
+  /** jour affiché par la feuille, "YYYY-MM-DD" */
+  sheetDate: string;
+  /** aujourd'hui, "YYYY-MM-DD" en heure locale */
+  today: string;
+  /** heure de début de la séance, "HH:mm" */
+  sessionStart: string;
+  /** minutes écoulées depuis minuit */
+  nowMinutes: number;
+  /** la réception a démarré CETTE séance ce jour-là */
+  startedManually: boolean;
+  policy: RollCallPolicy;
+}): boolean {
+  if (args.sheetDate > args.today) return false;
+  if (args.sheetDate < args.today) return true;
+  if (args.startedManually) return true;
+  const opensAt = rollCallOpensAt(args.sessionStart, args.policy);
+  if (opensAt === null) return false;
+  return args.nowMinutes >= timeToMinutes(opensAt);
+}
+
 export function todayIso(): string {
   return new Date().toLocaleDateString("fr-CA"); // YYYY-MM-DD
 }

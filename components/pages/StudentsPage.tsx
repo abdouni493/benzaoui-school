@@ -1615,14 +1615,14 @@ export function StudentsPage() {
     (createLevel === "lycee" && createYear === "3eme") ||
     selectedAssignIds.some((id) => isThirdYearSecondaryClass(classOfSubscription(id)));
 
-  const hasSecondFee = createFeeOptions.some((o) => o.key === "fee2");
+  const hasFirstFee = createFeeOptions.some((o) => o.key === "fee1");
 
   // Règle de l'école : une 3e année secondaire relève du frais d'inscription
-  // de TYPE 2. Ce n'est qu'une PRÉ-sélection : dès que la réception choisit un
+  // de TYPE 1. Ce n'est qu'une PRÉ-sélection : dès que la réception choisit un
   // tarif elle-même (`createFeeTouched`), son choix l'emporte et plus rien ne
   // le change — ni un ajout de créneau, ni un changement de scolarité.
   const autoFeeKey: RegistrationFeeKey | undefined =
-    isThirdYearSecondary && hasSecondFee ? "fee2" : undefined;
+    isThirdYearSecondary && hasFirstFee ? "fee1" : undefined;
   const effectiveCreateFeeKey = createFeeTouched ? createFeeKey : autoFeeKey;
 
   /** The picked tariff, or undefined: « aucun frais », none offered, or free. */
@@ -1822,6 +1822,16 @@ export function StudentsPage() {
             {editing ? `Actuellement dû : ${editCurrentDue} DA` : "Une seule fois par étudiant"}
           </span>
         </div>
+
+        {/* La règle de l'école appliquée d'elle-même : elle doit se VOIR, et
+            rester un simple point de départ que la réception peut changer. */}
+        {!editing && !isFree && autoFeeKey && !createFeeTouched && createFeeOption && (
+          <p className="rounded-lg border border-primary/30 bg-primary-50/60 px-3 py-2 text-[11px] text-ink">
+            <strong>3e année secondaire</strong> : «&nbsp;{createFeeOption.label}&nbsp;» (
+            {createFeeOption.amount} DA) est pré-sélectionné automatiquement. Choisissez un autre tarif
+            ci-dessous si ce n&apos;est pas celui-ci.
+          </p>
+        )}
 
         {isFree ? (
           <p className="rounded-lg border border-line bg-surface px-3 py-2 text-[11px] text-muted">
@@ -3458,11 +3468,14 @@ export function StudentsPage() {
           </div>
         </div>
 
+        {/* La scolarité d'abord : c'est le niveau + l'année qui décident du
+            tarif d'inscription (une 3e année secondaire est pré-tarifée), donc
+            la réception choisit la classe AVANT de voir les frais. */}
+        {renderEnrollmentPicker("create")}
+
         {renderFeeSection("create")}
 
         {renderTopupSection("create")}
-
-        {renderEnrollmentPicker("create")}
 
         <div className="flex justify-end gap-2 pt-6 mt-4 border-t border-line">
           <Button variant="outline" onClick={() => setIsCreateOpen(false)}>

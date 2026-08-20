@@ -2,6 +2,16 @@ import type { Role } from "@/lib/store/session";
 
 export type { Role };
 
+/**
+ * Quand la feuille de pointage d'une séance s'ouvre (écran Présence) :
+ *  - "lead"   : toute seule, N minutes avant l'heure de début de la séance ;
+ *  - "fixed"  : toute seule, à partir d'une heure fixe de la journée ;
+ *  - "manual" : seulement quand la réception clique « Démarrer le pointage ».
+ * Tant qu'elle n'est pas ouverte, les boutons Présent / Retard / Absent sont
+ * verrouillés : personne ne peut pointer une séance par avance.
+ */
+export type AttendanceOpenMode = "lead" | "fixed" | "manual";
+
 export type Day =
   | "sunday"
   | "monday"

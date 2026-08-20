@@ -450,10 +450,17 @@ export function PlannerPage() {
         else push("subscriptions", { id: uid("sub"), sessionId: editingOpenSession.id, pricePerSession: priceToWrite });
       } else {
         const sessionId = uid("ses");
-        push("sessions", { id: sessionId, ...payload });
+        // L'abonnement auto RÉFÉRENCE le créneau (subscriptions.session_id) :
+        // les deux écritures partaient jusqu'ici en parallèle, et quand
+        // l'abonnement arrivait le premier Postgres le refusait
+        // (« violates foreign key constraint subscriptions_session_id_fkey »).
+        // On attend donc que le créneau soit accepté, et on n'écrit
+        // l'abonnement que dans ce cas — sinon il resterait orphelin.
+        const written = await push("sessions", { id: sessionId, ...payload });
+        if (!written) return;
         // Auto-created subscription: this is what makes the timing appear on
         // the Abonnements page as if it had been created there by hand.
-        push("subscriptions", { id: uid("sub"), sessionId, pricePerSession: priceToWrite } as Subscription);
+        await push("subscriptions", { id: uid("sub"), sessionId, pricePerSession: priceToWrite } as Subscription);
       }
 
       setIsOpenSeanceModalOpen(false);

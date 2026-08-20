@@ -768,10 +768,13 @@ interface DataActions {
   /** Deletes one balance_tx row and undoes its effect on the balance. */
   deleteBalanceTx: (txId: string, adjustCash?: boolean) => Promise<BalanceTxResult>;
   deleteFrom: <K extends keyof Database>(key: K, id: string) => void;
+  /** Ajoute la ligne (localement d'abord, puis en base). Résout à `true` quand
+   *  la base l'a acceptée, `false` quand elle l'a refusée — ce que doit
+   *  attendre tout appelant dont l'écriture SUIVANTE référence cette ligne. */
   push: <K extends keyof Database>(
     key: K,
     item: Database[K] extends Array<infer T> ? T : never,
-  ) => void;
+  ) => Promise<boolean>;
   updateItem: <K extends keyof Database>(
     key: K,
     id: string,
@@ -1149,28 +1152,31 @@ export const useData = create<DataStore>((set, get) => ({
   // written. If the write is REFUSED, the optimistic row is taken back out:
   // leaving it on screen was the whole reason a créneau or a subscription
   // looked saved and then vanished on the next refetch.
-  push: (key, item) => {
+  push: async (key, item) => {
     set((state) => ({
       [key]: [...(state[key] as unknown[]), item],
     }) as Partial<DataStore>);
 
-    if (key === "school" || AUTH_LINKED_KEYS.has(key as string)) return; // auth-linked rows are created via /api/admin/users
+    // auth-linked rows are created via /api/admin/users
+    if (key === "school" || AUTH_LINKED_KEYS.has(key as string)) return true;
 
     const cfg = TABLES[key as Exclude<keyof Database, "school">];
     const supabase = createClient();
-    void writeWithSchemaFallback(cfg.toRow(item), (row) =>
+    const error = await writeWithSchemaFallback(cfg.toRow(item), (row) =>
       supabase.from(cfg.table).insert(row),
-    ).then((error) => {
-      if (!error) return;
-      console.error(`Failed to insert into ${cfg.table}:`, error);
-      // Rollback: what the database refused must not linger on screen.
-      const id = (item as { id?: string }).id;
-      if (id === undefined) return;
+    );
+    if (!error) return true;
+
+    console.error(`Failed to insert into ${cfg.table}:`, error);
+    // Rollback: what the database refused must not linger on screen.
+    const id = (item as { id?: string }).id;
+    if (id !== undefined) {
       set((state) => ({
         [key]: (state[key] as Array<{ id: string }>).filter((x) => x.id !== id),
       }) as Partial<DataStore>);
-      reportWriteFailure(cfg.table, error);
-    });
+    }
+    reportWriteFailure(cfg.table, error);
+    return false;
   },
 
   updateItem: (key, id, updatedFields) => {
