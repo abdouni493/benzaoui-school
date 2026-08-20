@@ -238,4 +238,6 @@ fichier, et un analyseur strict aurait cassé la passerelle. Les explications so
 
 - Procédure complète et diagnostic : [`evolution/README.md`](evolution/README.md)
 - Déménagement (nouveau poste, nouveau numéro) : même fichier, section « Déménager »
-- Réappliquer ce montage sur un autre projet : [`whatsapp_promp.md`](whatsapp_promp.md)
+- **Appliquer ce montage à un autre projet** : [`WHATSAPP-NOUVEAU-PROJET.md`](WHATSAPP-NOUVEAU-PROJET.md)
+  (ce qu'il ne faut pas refaire, et les pièges propres à un second projet)
+- Prompt à donner à Claude Code : [`whatsapp_promp.md`](whatsapp_promp.md)
