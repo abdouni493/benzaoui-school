@@ -115,6 +115,9 @@ export interface WhatsAppDiagnostics {
   webhookUrl: string | null;
   /** pourquoi cette adresse n'a pas pu être déterminée, le cas échéant */
   webhookUrlError: string | null;
+  /** variable d'origine écartée parce qu'elle porte une adresse de
+   *  développement (localhost, host.docker.internal, http://) */
+  webhookUrlNote: string | null;
 }
 
 /** Réponse de `GET /api/whatsapp/status` et de `/api/whatsapp/session` — état de

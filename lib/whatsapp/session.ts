@@ -11,6 +11,7 @@ import {
   getConfig,
   getConnectionState,
   getInstanceInfo,
+  isLocalHost,
   maskId,
 } from "./client";
 import type { WhatsAppDiagnostics, WhatsAppSessionState } from "./types";
@@ -22,12 +23,47 @@ import type { WhatsAppDiagnostics, WhatsAppSessionState } from "./types";
  *  Un compte réception pourrait alors faire réenregistrer le webhook de l'école
  *  vers un serveur tiers, qui recevrait tous les numéros des familles, les
  *  statuts de remise et les messages entrants. */
+/** Une origine recopiée du poste de développement, inutilisable en production.
+ *
+ *  `.env.local` pointe `EVOLUTION_WEBHOOK_URL` vers
+ *  `http://host.docker.internal:3000` — l'adresse du poste de développement vue
+ *  depuis le conteneur. Transférer un `.env` vers Vercel en bloc est le geste
+ *  naturel, et cette ligne suivait avec le reste : « Initialiser l'instance »
+ *  échouait alors en 400, sans que rien ne désigne la variable fautive.
+ *
+ *  En production on écarte purement et simplement une telle valeur : dériver
+ *  l'adresse du domaine de l'application est toujours ce qu'on voulait. Hors
+ *  production, rien n'est écarté — c'est justement là que ces adresses servent. */
+export function isUnusableOrigin(raw: string | undefined | null): boolean {
+  const value = raw?.trim();
+  if (!value) return false;
+  if (process.env.NODE_ENV !== "production") return false;
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return true; // illisible : inutilisable de toute façon
+  }
+  // En production la passerelle doit joindre l'application en HTTPS public.
+  return url.protocol !== "https:" || isLocalHost(url.hostname);
+}
+
+/** Nomme les variables écartées, pour que le diagnostic le dise au lieu de
+ *  laisser croire à une adresse choisie au hasard. */
+export function ignoredOriginVars(): string[] {
+  return (["EVOLUTION_WEBHOOK_URL", "NEXT_PUBLIC_SITE_URL"] as const).filter((name) =>
+    isUnusableOrigin(process.env[name]),
+  );
+}
+
 export function resolveWebhookUrl(): string {
-  const explicit = process.env.EVOLUTION_WEBHOOK_URL?.trim();
+  const usable = (raw: string | undefined) =>
+    raw?.trim() && !isUnusableOrigin(raw) ? raw.trim() : "";
 
   const origin =
-    explicit ||
-    process.env.NEXT_PUBLIC_SITE_URL?.trim() ||
+    usable(process.env.EVOLUTION_WEBHOOK_URL) ||
+    usable(process.env.NEXT_PUBLIC_SITE_URL) ||
     (process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim()
       ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL.trim()}`
       : "") ||
@@ -81,7 +117,21 @@ function diagnose(baseUrl: string | null, note: string | null, errorCode: string
       err instanceof WhatsAppError ? err.message : "Adresse publique de l'application inconnue.";
   }
 
-  return { scheme, baseUrlNote: note, missingEnv: missingEnv(), errorCode, webhookUrl, webhookUrlError };
+  const ignored = ignoredOriginVars();
+  const webhookUrlNote =
+    ignored.length > 0
+      ? `${ignored.join(" et ")} ${ignored.length > 1 ? "portent" : "porte"} une adresse locale ou non-HTTPS : ${ignored.length > 1 ? "elles sont ignorées" : "elle est ignorée"} en production.`
+      : null;
+
+  return {
+    scheme,
+    baseUrlNote: note,
+    missingEnv: missingEnv(),
+    errorCode,
+    webhookUrl,
+    webhookUrlError,
+    webhookUrlNote,
+  };
 }
 
 /** État courant de la session. Ne lève JAMAIS : une panne de passerelle doit

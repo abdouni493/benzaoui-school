@@ -7,6 +7,7 @@ vi.mock("server-only", () => ({}));
 
 import {
   WhatsAppError,
+  createInstance,
   getConfig,
   getConnectionState,
   isKnownServerUrl,
@@ -34,6 +35,13 @@ function mockFetchOnce(payload: unknown, ok = true, status = 200) {
 }
 
 beforeEach(() => {
+  // Les reprises attendent 250 ms puis 900 ms. Rendre l'attente immediate
+  // garde la suite rapide sans rien changer a la logique testee. Le stub vit
+  // ICI et non au niveau du module : afterEach appelle vi.unstubAllGlobals().
+  vi.stubGlobal("setTimeout", ((fn: () => void) => {
+    fn();
+    return 0;
+  }) as unknown as typeof setTimeout);
   vi.stubEnv("EVOLUTION_BASE_URL", BASE_URL);
   vi.stubEnv("EVOLUTION_API_KEY", API_KEY);
   vi.stubEnv("EVOLUTION_INSTANCE", INSTANCE);
@@ -379,15 +387,39 @@ describe("passerelle injoignable — le message porte l'hôte et le code", () =>
     expect((err as WhatsAppError).message).not.toContain(API_KEY);
   });
 
-  it("rejoue UNE lecture après une coupure passagère", async () => {
+  it("rejoue une lecture après une coupure passagère", async () => {
     const fetchMock = fetchThatFails("ECONNRESET", { instance: { state: "open" } });
     await expect(getConnectionState()).resolves.toEqual({ state: "open" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("va jusqu'à deux reprises avant d'abandonner", async () => {
+    // Le cas de production : une fonction réveillée réutilise une socket que
+    // la passerelle a fermée entre-temps. Une seule reprise ne suffisait pas
+    // toujours — le pool pouvait servir une deuxième socket morte.
+    const fetchMock = fetchThatFails("ECONNRESET");
+    await expect(getConnectionState()).rejects.toBeInstanceOf(WhatsAppError);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("ne rejoue JAMAIS un envoi : un message posté deux fois est pire qu'un échec", async () => {
     const fetchMock = fetchThatFails("ECONNRESET");
     await expect(sendTextMessage("213555111222", "Bonjour")).rejects.toBeInstanceOf(WhatsAppError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejoue « Initialiser l'instance », qui est idempotent malgré son POST", async () => {
+    // L'idempotence est déclarée par appel, pas déduite du verbe : c'est le
+    // bouton sur lequel la réception tombe quand la liaison est instable.
+    const fetchMock = fetchThatFails("ECONNRESET", {});
+    await expect(createInstance("https://ecole.example/api/whatsapp/webhook")).resolves
+      .toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("n'insiste pas sur une panne franche : ECONNREFUSED n'est pas passager", async () => {
+    const fetchMock = fetchThatFails("ECONNREFUSED");
+    await expect(getConnectionState()).rejects.toBeInstanceOf(WhatsAppError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

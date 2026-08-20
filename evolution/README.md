@@ -393,8 +393,13 @@ Avec l'option B, `EVOLUTION_BASE_URL` vaut exactement le `TUNNEL_PUBLIC_URL` de 
 > **Ne PAS définir `EVOLUTION_WEBHOOK_URL` sur Vercel.** Laissée vide, l'application dérive
 > l'adresse de son propre domaine de production. Renseignée par erreur avec la valeur locale
 > (`host.docker.internal`) recopiée depuis `.env.local`, elle demanderait à la passerelle de
-> rappeler une machine qui n'existe pas pour elle : les messages partiraient, mais aucun statut ni
-> aucune réponse de parent ne reviendrait — sans erreur visible.
+> rappeler une machine qui n'existe pas pour elle.
+>
+> C'est le piège du `.env.local` **transféré en bloc** : la ligne suit avec le reste, et
+> «&nbsp;Initialiser l'instance&nbsp;» répondait alors **400** sans désigner la variable fautive.
+> En production, l'application écarte désormais d'elle-même toute origine locale ou non-HTTPS
+> (`EVOLUTION_WEBHOOK_URL` comme `NEXT_PUBLIC_SITE_URL`), dérive l'adresse de son domaine, et le
+> signale dans son diagnostic. Mieux vaut tout de même ne pas les définir.
 
 Aucune de ces variables ne doit être préfixée `NEXT_PUBLIC_` : ce préfixe les publierait dans le
 navigateur de chaque visiteur, clé de la passerelle comprise.
@@ -595,6 +600,8 @@ renvoyer à la main.
 | « N messages en attente » | Normal : la passerelle était injoignable. Ils repartent seuls ; rallumer le poste suffit |
 | « Passerelle WhatsApp injoignable » | PC éteint ou en veille, Docker non démarré, ou `EVOLUTION_BASE_URL` erroné. Le message porte maintenant le **code système** : `ETIMEDOUT` = poste éteint, `ECONNREFUSED` = mauvais port ou `http://`, `ENOTFOUND` = adresse fausse |
 | « Webhook : Non configuré » dans Paramètres | `EVOLUTION_WEBHOOK_TOKEN` n'est pas défini **sur Vercel** — l'ajouter, redéployer, puis **Réenregistrer le webhook** |
+| `ECONNRESET` | Liaison coupée en cours de route, presque toujours passager : une fonction serverless réveillée réutilise une socket que la passerelle a fermée entre-temps. L'application rejoue déjà chaque lecture deux fois ; si l'erreur persiste, la connexion Internet du poste est instable |
+| **400** sur « Initialiser l'instance » | Une origine de développement traîne dans les variables Vercel (`EVOLUTION_WEBHOOK_URL`, `NEXT_PUBLIC_SITE_URL`). Elle est maintenant écartée automatiquement ; la supprimer reste préférable |
 | Tout marchait, plus rien le lendemain | Le poste s'est mis en veille — lancer `keep-alive.ps1 -Apply` |
 | Plus rien après une coupure de courant | Docker Desktop ne s'est pas relancé — `keep-alive.ps1 -Apply` |
 | L'adresse `.ts.net` a changé | Volume `tailscale_state` perdu : reprendre `TUNNEL_PUBLIC_URL`, `EVOLUTION_BASE_URL`, puis **Initialiser** |
@@ -614,3 +621,27 @@ que les deux familles de pannes — « le poste est éteint » et « une variabl
 rendaient jusqu'ici la même phrase, indistinguables sans accès aux journaux du serveur.
 
 Depuis le poste, `check-gateway.ps1` désigne l'étape fautive plus vite que la lecture des journaux.
+
+> **Attention à ce que « depuis le poste » teste vraiment.** Sur la machine qui héberge la
+> passerelle — et sur toute machine du tailnet — MagicDNS résout `benzaoui-wa.tail6ac334.ts.net`
+> vers l'IP **tailnet** du nœud (`100.x`). La requête ne passe alors **jamais** par le Funnel :
+> elle réussit même si le chemin public est cassé.
+>
+> Observé aussi dans l'autre sens : le réseau de l'école coupe les connexions vers la plage des
+> nœuds d'entrée Tailscale (`176.58.90.0/24` — visible dans les journaux de `tailscaled` sous
+> forme de `connection refused` vers les serveurs DERP). Un test forcé sur ces IP échoue donc
+> depuis l'école alors que le Funnel sert parfaitement le reste du monde.
+>
+> Pour trancher, tester **hors du réseau de l'école** (partage de connexion mobile, ou un
+> vérificateur HTTP en ligne). Les deux commandes utiles :
+>
+> ```powershell
+> # Ce que voit un client public : force les IP publiques du Funnel
+> curl.exe --resolve benzaoui-wa.tail6ac334.ts.net:443:176.58.90.63 https://benzaoui-wa.tail6ac334.ts.net/
+>
+> # Ce que sert le nœud lui-même, Funnel hors circuit
+> curl.exe --resolve benzaoui-wa.tail6ac334.ts.net:443:100.91.249.10 https://benzaoui-wa.tail6ac334.ts.net/
+> ```
+>
+> La seconde qui répond et la première qui échoue désignent le Funnel ; les deux qui répondent
+> désignent le réseau depuis lequel on teste.

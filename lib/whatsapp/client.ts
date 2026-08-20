@@ -59,9 +59,11 @@ export interface EvolutionConfig {
   baseUrlNote?: string;
 }
 
-/** Hôtes pour lesquels `http://` reste légitime : un poste de développement ou
- *  une passerelle sur le réseau local de l'école n'a pas de certificat TLS. */
-function isLocalHost(hostname: string): boolean {
+/** Hôte qui n'existe QUE sur la machine de développement ou sur le réseau
+ *  local : `http://` y reste légitime (pas de certificat TLS), mais une telle
+ *  adresse est injoignable depuis l'extérieur — un hébergeur ou une passerelle
+ *  distante ne pourra jamais la rappeler. */
+export function isLocalHost(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   return (
     h === "localhost" ||
@@ -215,7 +217,8 @@ const NETWORK_HINTS: Record<string, string> = {
   EAI_AGAIN: "résolution DNS temporairement impossible — réessayer dans un instant",
   ECONNREFUSED:
     "connexion refusée par l'hôte — port fermé, ou EVOLUTION_BASE_URL en http:// alors que le tunnel ne publie que le 443",
-  ECONNRESET: "connexion coupée en cours de route",
+  ECONNRESET:
+    "connexion coupée en cours de route — liaison instable entre l'hébergeur et la passerelle, en général passager",
   ENETUNREACH: "réseau injoignable — adresse IPv6 sans route depuis l'hébergeur",
   EHOSTUNREACH: "hôte injoignable",
   ETIMEDOUT:
@@ -228,9 +231,13 @@ const NETWORK_HINTS: Record<string, string> = {
   ERR_INVALID_URL: "EVOLUTION_BASE_URL n'est pas une URL valide",
 };
 
-/** Échecs qui peuvent disparaître au coup suivant. On ne rejoue QUE des
- *  lectures : rejouer un envoi après une coupure risquerait de poster deux fois
- *  le même message à une famille. */
+/** Échecs qui peuvent disparaître au coup suivant.
+ *
+ *  ECONNRESET est de loin le plus fréquent en production : l'application vit
+ *  dans des fonctions gelées entre deux appels, dont le pool de connexions
+ *  garde des sockets que la passerelle a fermées entre-temps. La première
+ *  requête d'une fonction réveillée tombe alors sur une socket morte. Rejouer
+ *  suffit — le pool en ouvre une neuve. */
 const TRANSIENT_CODES = new Set([
   "ECONNRESET",
   "ETIMEDOUT",
@@ -238,7 +245,19 @@ const TRANSIENT_CODES = new Set([
   "ENETUNREACH",
   "EHOSTUNREACH",
   "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
 ]);
+
+/** Attentes entre deux tentatives : deux reprises, pas plus. Une socket morte
+ *  se rejoue tout de suite ; une passerelle qui redémarre a besoin d'un souffle. */
+const RETRY_DELAYS_MS = [250, 900];
+
+/** Temps total qu'on s'autorise, marge comprise, sous les 60 s de
+ *  `maxDuration`. Au-delà l'hébergeur coupe la fonction et le navigateur reçoit
+ *  une 504 opaque à la place de notre message. */
+const RETRY_BUDGET_MS = 40_000;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** Bascule la résolution DNS en IPv4 d'abord, une seule fois par processus.
  *
@@ -265,10 +284,20 @@ async function evolutionRequest<T>(
     method?: "GET" | "POST" | "PUT" | "DELETE";
     body?: unknown;
     timeoutMs?: number;
+    /** l'appel peut être rejoué sans conséquence. Déclaré PAR APPEL et non
+     *  déduit du verbe HTTP : `/instance/create` est un POST parfaitement
+     *  idempotent, alors que `/message/sendText` est un GET qu'on ne rejouerait
+     *  pour rien au monde s'il en était un. Par défaut, seules les lectures. */
+    idempotent?: boolean;
   } = {},
 ): Promise<T> {
   const config = requireConfig();
-  const { method = "GET", body, timeoutMs = REQUEST_TIMEOUT_MS } = init;
+  const {
+    method = "GET",
+    body,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+    idempotent = method === "GET",
+  } = init;
 
   const attempt = () =>
     fetch(`${config.baseUrl}${path}`, {
@@ -282,28 +311,30 @@ async function evolutionRequest<T>(
       cache: "no-store",
     });
 
-  let response: Response;
-  try {
-    response = await attempt();
-  } catch (err) {
-    const code = networkErrorCode(err);
-    const ipv6Dead = code === "ENETUNREACH" || code === "EHOSTUNREACH";
-    // Une seule reprise, et sous deux conditions : une LECTURE (voir
-    // TRANSIENT_CODES), et un délai ordinaire — rejouer un appel long (la
-    // demande de QR en attend 30) ferait dépasser `maxDuration`, et l'hébergeur
-    // couperait la fonction avant qu'elle ait pu expliquer quoi que ce soit.
-    const canRetry =
-      method === "GET" &&
-      timeoutMs <= REQUEST_TIMEOUT_MS &&
-      (code === null || TRANSIENT_CODES.has(code));
+  const startedAt = Date.now();
+  let response: Response | null = null;
+  let lastCode: string | null = null;
 
-    if (!canRetry) throw unreachable(config, code);
-
-    if (ipv6Dead) await forceIpv4Once();
+  for (let tries = 0; response === null; tries++) {
     try {
       response = await attempt();
-    } catch (retryErr) {
-      throw unreachable(config, networkErrorCode(retryErr) ?? code);
+    } catch (err) {
+      const code = networkErrorCode(err);
+      lastCode = code ?? lastCode;
+      // ENETUNREACH sur un nom qui porte A et AAAA : c'est l'IPv6 qui manque
+      // de route, pas la passerelle qui est absente.
+      if (code === "ENETUNREACH" || code === "EHOSTUNREACH") await forceIpv4Once();
+
+      const delay = RETRY_DELAYS_MS[tries];
+      const worstCase = Date.now() - startedAt + (delay ?? 0) + timeoutMs;
+      const worthRetrying =
+        delay !== undefined &&
+        idempotent &&
+        (code === null || TRANSIENT_CODES.has(code)) &&
+        worstCase < RETRY_BUDGET_MS;
+
+      if (!worthRetrying) throw unreachable(config, lastCode);
+      await sleep(delay);
     }
   }
 
@@ -395,6 +426,9 @@ export async function sendTextMessage(
     {
       method: "POST",
       body: { number: to, text, delay, linkPreview: false },
+      // Explicite, et non par défaut : un message parti deux fois chez une
+      // famille est pire qu'un envoi manqué, que la file d'attente rattrape.
+      idempotent: false,
       // La passerelle TIENT ce délai avant d'envoyer : il s'ajoute au temps de
       // réponse, le timeout doit donc en tenir compte.
       timeoutMs: REQUEST_TIMEOUT_MS + delay,
@@ -424,6 +458,8 @@ export async function filterWhatsAppNumbers(numbers: string[]): Promise<Set<stri
     >(`/chat/whatsappNumbers/${encodeURIComponent(config.instance)}`, {
       method: "POST",
       body: { numbers },
+      // POST par convention d'Evolution, mais c'est une simple consultation.
+      idempotent: true,
     });
     if (!Array.isArray(res)) return null;
 
@@ -576,6 +612,9 @@ export async function createInstance(webhookUrl: string): Promise<void> {
         webhook: webhookPayload(webhookUrl, token),
       },
       timeoutMs: 30_000,
+      // Réappeler « Initialiser » sur une instance existante est déjà sans
+      // effet (voir le catch plus bas) : la rejouer l'est tout autant.
+      idempotent: true,
     });
   } catch (err) {
     if (err instanceof WhatsAppError && /already in use|already exists/i.test(err.message)) return;
@@ -591,6 +630,8 @@ export async function setWebhook(webhookUrl: string): Promise<void> {
   await evolutionRequest<unknown>(`/webhook/set/${encodeURIComponent(config.instance)}`, {
     method: "POST",
     body: { webhook: webhookPayload(webhookUrl, token) },
+    // Écrit toujours exactement la même valeur : la rejouer ne change rien.
+    idempotent: true,
   });
 }
 
@@ -599,6 +640,7 @@ export async function logoutInstance(): Promise<void> {
   const config = requireConfig();
   await evolutionRequest<unknown>(`/instance/logout/${encodeURIComponent(config.instance)}`, {
     method: "DELETE",
+    idempotent: true,
   });
 }
 
@@ -608,6 +650,7 @@ export async function restartInstance(): Promise<void> {
   const config = requireConfig();
   await evolutionRequest<unknown>(`/instance/restart/${encodeURIComponent(config.instance)}`, {
     method: "POST",
+    idempotent: true,
   });
 }
 

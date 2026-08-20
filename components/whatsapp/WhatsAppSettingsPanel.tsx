@@ -507,9 +507,14 @@ function Diagnostics({
   diagnostics: WhatsAppDiagnostics;
   connected: boolean;
 }) {
-  const { missingEnv, baseUrlNote, errorCode, webhookUrl, webhookUrlError } = diagnostics;
+  const { missingEnv, baseUrlNote, errorCode, webhookUrl, webhookUrlError, webhookUrlNote } =
+    diagnostics;
   const hasAnomaly =
-    missingEnv.length > 0 || Boolean(baseUrlNote) || Boolean(errorCode) || Boolean(webhookUrlError);
+    missingEnv.length > 0 ||
+    Boolean(baseUrlNote) ||
+    Boolean(errorCode) ||
+    Boolean(webhookUrlError) ||
+    Boolean(webhookUrlNote);
   if (!hasAnomaly) return null;
 
   return (
@@ -542,9 +547,18 @@ function Diagnostics({
               — vérifier que le poste qui héberge la passerelle est allumé et que les conteneurs
               tournent (<code className="font-mono">docker compose ps</code>).
             </>
+          ) : errorCode === "ECONNRESET" ? (
+            <>
+              {" "}
+              — la liaison a été coupée en cours de route. C&apos;est en général passager :
+              l&apos;application rejoue déjà chaque lecture deux fois. Si cela se répète, la
+              connexion Internet du poste qui héberge la passerelle est instable.
+            </>
           ) : null}
         </p>
       )}
+
+      {webhookUrlNote && <p className="text-warning">{webhookUrlNote}</p>}
 
       {webhookUrlError ? (
         <p className="text-warning">

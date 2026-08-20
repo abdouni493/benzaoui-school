@@ -4,7 +4,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import { WhatsAppError } from "@/lib/whatsapp/client";
-import { resolveWebhookUrl } from "@/lib/whatsapp/session";
+import { ignoredOriginVars, resolveWebhookUrl } from "@/lib/whatsapp/session";
 
 /** L'adresse que la passerelle rappellera pour livrer les statuts et les
  *  messages entrants.
@@ -93,18 +93,53 @@ describe("resolveWebhookUrl — hébergement de la passerelle hors de Vercel", (
     }
   });
 
-  it("refuse une adresse non-HTTPS en production", () => {
+  it("écarte une adresse non-HTTPS en production, faute d'autre origine", () => {
     // Une passerelle hébergée ne peut pas joindre « http://localhost » : sans
     // ce garde-fou, l'enregistrement réussirait et rien ne remonterait jamais.
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("EVOLUTION_WEBHOOK_URL", "http://localhost:3000/api/whatsapp/webhook");
     try {
       resolveWebhookUrl();
-      expect.unreachable("une URL http:// doit être refusée en production");
+      expect.unreachable("une URL http:// doit être écartée en production");
     } catch (err) {
       expect(err).toBeInstanceOf(WhatsAppError);
-      expect((err as WhatsAppError).status).toBe(400);
+      // 503 « origine inconnue », et non plus 400 « pas en HTTPS » : la valeur
+      // fautive est ignorée, il ne reste donc plus AUCUNE origine.
+      expect((err as WhatsAppError).status).toBe(503);
     }
+  });
+
+  it("ignore l'adresse du poste de développement au profit du domaine Vercel", () => {
+    // Le cas qui a réellement cassé la mise en service : `.env.local` transféré
+    // en bloc vers Vercel, EVOLUTION_WEBHOOK_URL comprise. « Initialiser
+    // l'instance » répondait 400 sans désigner la variable fautive.
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("EVOLUTION_WEBHOOK_URL", "http://host.docker.internal:3000/api/whatsapp/webhook");
+    vi.stubEnv("VERCEL_PROJECT_PRODUCTION_URL", "benzaoui-school.vercel.app");
+    expect(resolveWebhookUrl()).toBe("https://benzaoui-school.vercel.app/api/whatsapp/webhook");
+    expect(ignoredOriginVars()).toEqual(["EVOLUTION_WEBHOOK_URL"]);
+  });
+
+  it("écarte aussi un NEXT_PUBLIC_SITE_URL local recopié du poste", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "http://localhost:3000");
+    vi.stubEnv("VERCEL_PROJECT_PRODUCTION_URL", "benzaoui-school.vercel.app");
+    expect(resolveWebhookUrl()).toBe("https://benzaoui-school.vercel.app/api/whatsapp/webhook");
+    expect(ignoredOriginVars()).toEqual(["NEXT_PUBLIC_SITE_URL"]);
+  });
+
+  it("n'écarte RIEN hors production : c'est là que ces adresses servent", () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("EVOLUTION_WEBHOOK_URL", "http://host.docker.internal:3000/api/whatsapp/webhook");
+    expect(ignoredOriginVars()).toEqual([]);
+    expect(resolveWebhookUrl()).toBe("http://host.docker.internal:3000/api/whatsapp/webhook");
+  });
+
+  it("garde une origine HTTPS publique, même explicite", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("EVOLUTION_WEBHOOK_URL", "https://ecole.benzaoui.dz/api/whatsapp/webhook");
+    expect(ignoredOriginVars()).toEqual([]);
+    expect(resolveWebhookUrl()).toBe("https://ecole.benzaoui.dz/api/whatsapp/webhook");
   });
 
   it("accepte une adresse http hors production (développement local)", () => {
