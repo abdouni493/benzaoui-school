@@ -10,5 +10,17 @@ make sure to make on the sql code all the table for all the interfaces and all t
 make sure to connect all the interfaces and all the button action to make them use only the supabase data base connection 
 
 
+fix the interface of presence make it option of user can set the time of starting presenting to make the presenting automatique or user can click on starting presence manually 
 
 
+frais dinscription type 1 for 3eme lyce automatique on the creation 
+fix the interface of create new student make it the first thing that will have to select the user after the remplireation of informaitons perssonal is the selecting of classe and year if user select 3eme lycee then make sure to make it select for frais dinscripiton the type 1 automatically 
+
+
+
+
+condition if user choose a classe on the firts creation then make sure to make all the inscriptions on that classe and year and that filere if user tried to inscribe the studnet on anothe class or another year or another filier then dispay for him alert and do not let him created him on a filer and year and classe diffrent than that first creation
+
+fix the interface of students make it user can seach about student from rfid on the text box of searching 
+
+make sure to fix the scanning make it when student scan correclty then its will decrease from his sold and the teacher will get payed from that seance then make sure to fix the interface of view details button action interface on the interface of students make on the part of presences user can remove that presence and recover that decreased sold 
