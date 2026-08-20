@@ -267,6 +267,9 @@ const studentsBaseMapper = makeMapper<Student>([
   ["isFree", "is_free"],
   ["parentId", "parent_id"],
   ["registrationDue", "registration_due"],
+  // Lu seulement : la colonne a sa valeur par défaut en base, et `toRow` ne
+  // l'émet que si l'appelant la fournit — ce qu'aucune mise à jour ne fait.
+  ["createdAt", "created_at"],
 ]);
 
 const sessionsMapper = makeMapper<ScheduleSession>([

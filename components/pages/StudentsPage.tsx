@@ -48,6 +48,7 @@ import type {
   BalanceTxType,
 } from "@/lib/types";
 import {
+  byNewestFirst,
   classCascadeLabel,
   courseKeyOf,
   daysUntil,
@@ -430,25 +431,29 @@ export function StudentsPage() {
 
   // Filter students based on queries
   const getFilteredStudents = () => {
-    return students.filter((s) => {
-      // La carte se cherche comme le reste : sans se soucier de la casse ni
-      // des espaces, exactement comme le scan la lit.
-      const query = searchQuery.trim().toLowerCase();
-      const nameMatch = `${s.firstName} ${s.lastName}`.toLowerCase().includes(query);
-      const phoneMatch = s.phone.includes(searchQuery.trim());
-      const emailMatch = s.email.toLowerCase().includes(query);
-      const rfidMatch = (s.rfid ?? "").trim().toLowerCase().includes(query);
-      const matchesSearch = !query || nameMatch || phoneMatch || emailMatch || rfidMatch;
+    return students
+      .filter((s) => {
+        // La carte se cherche comme le reste : sans se soucier de la casse ni
+        // des espaces, exactement comme le scan la lit.
+        const query = searchQuery.trim().toLowerCase();
+        const nameMatch = `${s.firstName} ${s.lastName}`.toLowerCase().includes(query);
+        const phoneMatch = s.phone.includes(searchQuery.trim());
+        const emailMatch = s.email.toLowerCase().includes(query);
+        const rfidMatch = (s.rfid ?? "").trim().toLowerCase().includes(query);
+        const matchesSearch = !query || nameMatch || phoneMatch || emailMatch || rfidMatch;
 
-      if (!matchesSearch) return false;
+        if (!matchesSearch) return false;
 
-      if (filterType === "debt") return s.balance < 0 || (s.registrationDue && s.registrationDue > 0);
-      if (filterType === "paid") return s.balance >= 0 && (!s.registrationDue || s.registrationDue === 0);
-      if (filterType === "free") return s.isFree;
-      if (filterType === "soon") return isSoonToRunOut(s);
+        if (filterType === "debt") return s.balance < 0 || (s.registrationDue && s.registrationDue > 0);
+        if (filterType === "paid") return s.balance >= 0 && (!s.registrationDue || s.registrationDue === 0);
+        if (filterType === "free") return s.isFree;
+        if (filterType === "soon") return isSoonToRunOut(s);
 
-      return true;
-    });
+        return true;
+      })
+      // Du plus récemment inscrit au plus ancien : la fiche qu'on vient
+      // d'enregistrer est la première sous les yeux de la réception.
+      .sort(byNewestFirst);
   };
 
   const handleCreateStudent = async () => {
@@ -499,6 +504,10 @@ export function StudentsPage() {
         isFree,
         subscriptionIds: [],
         registrationDue,
+        // La base pose la sienne (`created_at` par défaut) ; celle-ci sert le
+        // temps que la liste soit relue, pour que la fiche soit en tête tout
+        // de suite et non après un rechargement.
+        createdAt: new Date().toISOString(),
       };
       push("students", newStudent);
 
@@ -544,6 +553,11 @@ export function StudentsPage() {
       const studentName = `${firstName} ${lastName}`;
       setIsCreateOpen(false);
       resetForm();
+      // Être en tête de liste ne sert à rien si une recherche ou un filtre en
+      // cours l'exclut : la réception verrait l'écran inchangé et croirait
+      // l'enregistrement perdu. On rouvre donc la liste entière.
+      setSearchQuery("");
+      setFilterType("all");
 
       const settled = settleRegistrationNow && !topupError;
       // Alarme : la fiche part du guichet avec une inscription non réglée.

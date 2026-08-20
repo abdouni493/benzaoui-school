@@ -46,6 +46,35 @@ export const filiereName = (db: Database, id?: string) =>
 
 export const studentName = (s: Student) => `${s.firstName} ${s.lastName}`;
 
+// ---- Ordre d'affichage des fiches --------------------------------------------
+
+/** Date d'inscription en millisecondes.
+ *
+ *  Une fiche sans date exploitable — base antérieure à la colonne `created_at`,
+ *  ou ligne tout juste écrite dont la base n'a pas encore été relue — compte
+ *  comme la PLUS RÉCENTE : c'est toujours celle qu'on vient d'enregistrer,
+ *  jamais une archive. */
+export function createdAtMs(item: { createdAt?: string }): number {
+  const t = item.createdAt ? Date.parse(item.createdAt) : NaN;
+  return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t;
+}
+
+/**
+ * Comparateur « du plus récemment créé au plus ancien ».
+ *
+ * La réception ouvre la liste des élèves juste après avoir enregistré une
+ * fiche : la voir en tête est le seul ordre utile. Sans tri, les lignes
+ * sortaient dans l'ordre rendu par Postgres et la nouvelle atterrissait en
+ * dernier, hors de l'écran dès que la promotion dépasse quelques dizaines.
+ */
+export function byNewestFirst(a: { createdAt?: string }, b: { createdAt?: string }): number {
+  const at = createdAtMs(a);
+  const bt = createdAtMs(b);
+  // Dates égales, ou deux dates inconnues : renvoyer `bt - at` vaudrait NaN
+  // entre deux infinis, et le tri deviendrait incohérent d'un moteur à l'autre.
+  return at === bt ? 0 : bt - at;
+}
+
 export function classLabel(db: Database, cls: SchoolClass): string {
   if (cls.type === "formation") return `${cls.name} (${cls.formationLevel})`;
   const fil = filiereName(db, cls.filiereId);

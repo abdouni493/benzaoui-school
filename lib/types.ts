@@ -305,6 +305,10 @@ export interface Student {
   subscriptionDiscounts?: Record<string, SubscriptionDiscount>;
   /** outstanding one-time registration cost not yet settled */
   registrationDue?: number;
+  /** horodatage d'inscription (ISO), tel que la base l'a écrit. Sert à ranger
+   *  la liste du plus récent au plus ancien ; absent sur une base qui n'a pas
+   *  encore la colonne `created_at`. */
+  createdAt?: string;
 }
 
 /** Portal password kept so the payment receipt can print the student's login.
