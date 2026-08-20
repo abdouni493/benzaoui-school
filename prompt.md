@@ -9,3 +9,6 @@ make sure to make on the sql code all the table for all the interfaces and all t
 
 make sure to connect all the interfaces and all the button action to make them use only the supabase data base connection 
 
+
+
+
