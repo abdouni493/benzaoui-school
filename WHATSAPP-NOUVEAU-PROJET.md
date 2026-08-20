@@ -71,7 +71,7 @@ est elle aussi connectée au tailnet.
 - **Chaque poste doit être allumé pour les messages de SON établissement.** L'école A éteinte
   n'empêche pas l'école B d'envoyer, mais l'école A n'envoie rien.
 - **Docker Desktop doit être installé sur chaque poste** : Windows 10/11 avec WSL2, et
-  réalistement 8 Go de RAM. Un poste d'accueil très ancien peinera.
+  réalistement 8 Go de RAM (la passerelle ne pèse que ~260 Mo, mais la machine virtuelle WSL2 en réserve 2 à 3). Un poste d'accueil très ancien peinera.
 - **`keep-alive.ps1 -Apply` doit être passé une fois sur chaque poste** (droits administrateur), et
   l'ouverture de session automatique activée si l'on veut une reprise sans intervention après une
   coupure de courant.
@@ -169,9 +169,19 @@ organisation, et ne jamais réutiliser un numéro déjà lié à un autre projet
 
 ### 2.4 Si les deux tournent sur la même machine — les ressources
 
-Chaque montage, c'est ~500–700 Mo (Evolution + Postgres + Tailscale). Sur un poste modeste, ou avec
-un plafond mémoire WSL réduit, deux piles peuvent étouffer le poste — et un `next dev` par-dessus
-encore plus. Vérifier `.wslconfig` avant de doubler.
+**Mesure réelle en service** (`docker stats`), et non une estimation :
+
+| Conteneur | Mémoire | CPU |
+| --- | --- | --- |
+| `evolution` | 191 Mo | ~0 % |
+| `postgres` | 46 Mo | ~1 % |
+| `tailscale` | 21 Mo | ~0 % |
+| **Total** | **≈ 260 Mo** | **négligeable** |
+
+La passerelle elle-même est donc légère. **Le vrai coût, c'est Docker Desktop et sa machine
+virtuelle WSL2**, qui réserve 2 à 3 Go quel que soit le nombre de conteneurs. Doubler les piles
+n'ajoute que ~260 Mo, mais un `next dev` par-dessus, lui, pèse lourd : c'est la combinaison qui
+étouffe un poste, pas la passerelle. Vérifier `.wslconfig` avant de doubler.
 
 **Deux machines séparées évitent tous ces pièges** (2.1, 2.2, 2.4) : chacune a ses propres volumes,
 ses propres ports, sa propre mémoire. Seul le nom de nœud reste à différencier.
