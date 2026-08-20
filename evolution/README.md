@@ -407,6 +407,94 @@ le téléphone était déjà lié à la passerelle locale.
 
 ---
 
+## Déménager : changer de téléphone, changer de poste
+
+Les deux opérations sont indépendantes. Prises dans le bon ordre, **ni l'une ni l'autre ne demande
+de toucher aux variables Vercel**.
+
+### Changer seulement le numéro WhatsApp
+
+Aucune configuration à modifier : ni `evolution/.env`, ni Vercel, ni Tailscale.
+
+1. **Paramètres → WhatsApp → Déconnecter** — délie le téléphone actuel.
+2. **Connecter WhatsApp** — un nouveau QR s'affiche.
+3. Le scanner avec le **nouveau** téléphone de l'école.
+
+L'instance, le webhook et l'adresse publique ne bougent pas. `DEL_INSTANCE=false` garantit que la
+déconnexion ne détruit pas l'instance : seuls les identifiants du téléphone sont remplacés.
+
+### Changer de poste
+
+Tout se joue sur un point : **l'adresse publique doit rester identique**. Elle vaut
+`https://` + `TAILSCALE_HOSTNAME` + `.` + nom du tailnet. Si elle change, il faut reprendre
+`EVOLUTION_BASE_URL` sur Vercel, redéployer, puis réenregistrer le webhook.
+
+Or Tailscale n'attribue jamais deux fois le même nom : **tant que l'ancien nœud existe, le nouveau
+devient `benzaoui-wa-1`** et l'adresse change. D'où l'ordre ci-dessous, qui n'est pas négociable.
+
+**Sur l'ANCIEN poste**
+
+1. Arrêter la passerelle :
+   ```powershell
+   docker compose -f evolution/docker-compose.funnel.yml down
+   ```
+2. Copier `evolution/.env` sur une clé USB. **Ce fichier n'est pas dans Git** (il contient les
+   secrets) : sans lui, la clé API ne correspondrait plus à celle de Vercel.
+
+**Dans la console Tailscale**
+
+3. **Machines → `benzaoui-wa` → ⋯ → Remove.** C'est cette suppression qui libère le nom. La sauter
+   est l'erreur classique du déménagement : tout démarre, tout semble sain, et seule l'adresse a
+   discrètement changé.
+4. Vérifier la clé d'authentification (**Settings → Keys**). Si elle a expiré, en générer une
+   nouvelle — **Reusable**, jamais **Ephemeral** — et la reporter dans `.env`.
+
+**Sur le NOUVEAU poste**
+
+5. Installer **Docker Desktop**, puis cloner le dépôt.
+6. Y déposer le `evolution/.env` de l'étape 2.
+7. Démarrer, et **vérifier le nom obtenu** :
+   ```powershell
+   docker compose -f evolution/docker-compose.funnel.yml up -d
+   docker compose -f evolution/docker-compose.funnel.yml logs -f tailscale
+   ```
+   Le nom doit être exactement `benzaoui-wa.tail…ts.net`. **Un suffixe `-1` signifie que l'étape 3
+   a été oubliée** : supprimer l'ancien nœud, puis `down` et `up -d` à nouveau.
+8. Contrôler que le Funnel est bien accordé — l'affichage de `funnel status` ne fait pas foi :
+   ```powershell
+   docker exec evolution-tailscale tailscale status --json | Select-String "funnel"
+   ```
+9. Rendre le poste apte au service continu, **dans un PowerShell administrateur** :
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File evolution\keep-alive.ps1 -Apply
+   ```
+10. **Machines → `benzaoui-wa` → ⋯ → Disable key expiry.** Sans ce clic, le nœud se déconnecte au
+    bout de quelques mois et les envois s'arrêtent sans le moindre avertissement.
+
+**Dans l'application**
+
+11. **Paramètres → WhatsApp → Initialiser l'instance** — recrée l'instance et le webhook sur la
+    passerelle neuve.
+12. **Connecter WhatsApp**, puis scanner avec le téléphone de l'école.
+13. Vérifier l'ensemble :
+    ```powershell
+    powershell -ExecutionPolicy Bypass -File evolution\check-gateway.ps1 `
+      -BaseUrl https://benzaoui-wa.tail6ac334.ts.net `
+      -ApiKey  VOTRE_CLE `
+      -AppUrl  https://benzaoui-school.vercel.app
+    ```
+
+### Faut-il transférer les volumes Docker ?
+
+**Non**, dès lors que le téléphone change aussi : la session du volume `evolution_instances`
+concerne l'ancien numéro et serait de toute façon remplacée au premier scan. Le nouveau poste
+repart donc sur des volumes vides, et l'étape 11 reconstruit ce qu'il faut.
+
+Le journal des messages de l'école n'est pas concerné : il vit dans Supabase, pas sur le poste
+(`DATABASE_SAVE_DATA_NEW_MESSAGE=false`).
+
+---
+
 ## Vérifier toute la chaîne
 
 Depuis le poste de l'école, sans rien modifier :
