@@ -214,10 +214,25 @@ export function WhatsAppSettingsPanel() {
                 {/* ---- Session ouverte ---- */}
                 {state.connected && (
                   <div className="space-y-3">
-                    <p className="flex items-center gap-2 text-xs text-success">
-                      <CheckCircle2 className="h-4 w-4" /> La passerelle est prête : les alertes et
-                      les envois groupés fonctionnent.
-                    </p>
+                    {/* Une session ouverte ne suffit pas : si le webhook ne pointe pas vers
+                        CETTE application, les messages partent mais aucun accusé ne revient,
+                        et les statuts restent bloqués sur « queued » sans rien expliquer.
+                        Annoncer « prête » dans ce cas serait faux. */}
+                    {state.webhookConfigured ? (
+                      <p className="flex items-center gap-2 text-xs text-success">
+                        <CheckCircle2 className="h-4 w-4" /> La passerelle est prête : les alertes
+                        et les envois groupés fonctionnent.
+                      </p>
+                    ) : (
+                      <p className="flex items-start gap-2 text-xs text-warning">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                        <span>
+                          Les messages partiront, mais aucun accusé de remise ne reviendra : le
+                          webhook ne pointe pas vers cette application. Cliquer sur «&nbsp;Réenregistrer
+                          le webhook&nbsp;» ci-dessous. La session reste ouverte.
+                        </span>
+                      </p>
+                    )}
 
                     <div className="flex flex-wrap gap-2">
                       <Button
@@ -228,6 +243,18 @@ export function WhatsAppSettingsPanel() {
                       >
                         <RotateCw className="h-4 w-4" />
                         {label("restart", "Redémarrer la session", "Redémarrage")}
+                      </Button>
+                      {/* Même action « setup » que sur session fermée. Elle est indispensable
+                          ICI aussi : après un déménagement de la passerelle, la session reste
+                          ouverte mais le webhook pointe encore vers l'ancien domaine. Sans ce
+                          bouton, le seul moyen de le corriger était de délier le téléphone. */}
+                      <Button
+                        variant="outline"
+                        onClick={() => void run("setup")}
+                        disabled={busy !== null}
+                        className="flex items-center gap-2"
+                      >
+                        {label("setup", "Réenregistrer le webhook", "Enregistrement")}
                       </Button>
 
                       {confirmLogout ? (
