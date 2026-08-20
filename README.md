@@ -24,6 +24,10 @@ npm run dev
 1. Créer un projet Supabase, puis exécuter `supabase/schema.sql` dans **Dashboard → SQL Editor**.
 2. Exécuter ensuite chaque fichier de `supabase/migrations/` (dans l'ordre des dates).
 3. Créer le premier compte admin depuis la page de connexion (« Créer un compte admin »).
+4. En cas de doute sur une base déjà en service, exécuter la dernière migration
+   `supabase/migrations/*_repair_*.sql` : elle repose les colonnes manquantes puis **renvoie la
+   liste de ce qui manque encore** (résultat vide = base à jour). Une migration oubliée se
+   manifeste sinon par un `400` sur `/rest/v1/rpc/...` — typiquement au scan des élèves.
 
 ## Messages WhatsApp (Evolution API — passerelle auto-hébergée)
 
