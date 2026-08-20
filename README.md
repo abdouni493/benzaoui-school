@@ -74,8 +74,10 @@ n'est ouvert sur la box de l'école : c'est le conteneur qui ouvre la connexion 
 qui fonctionne derrière une IP dynamique ou un partage 4G. Contrairement à Cloudflare, **aucun nom
 de domaine n'est nécessaire** — d'où ce choix.
 
-> **La contrepartie, à assumer** : PC éteint, en veille, ou sans Internet = **aucun message ne
-> part**, et personne n'est prévenu automatiquement.
+> **La contrepartie** : PC éteint, en veille ou sans Internet, **rien ne part sur le moment**.
+> Mais rien n'est perdu non plus : les messages sont **mis en file d'attente** et repartent
+> automatiquement dès que la passerelle revient — y compris les alertes déclenchées par un scan de
+> carte, que personne n'aurait pensé à renvoyer à la main.
 > [`evolution/keep-alive.ps1`](evolution/keep-alive.ps1) supprime les causes évitables (mise en
 > veille, Docker non relancé après une coupure de courant) et signale ce qui reste à régler à la
 > main. À lancer une fois à l'installation, puis après chaque grosse mise à jour de Windows.

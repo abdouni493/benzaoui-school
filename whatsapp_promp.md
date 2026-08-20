@@ -332,6 +332,79 @@ S'il existe des alertes automatiques (événement métier → message) :
 - **déduplication** par clé, **relâchée en cas d'échec** pour qu'une prochaine tentative reparte ;
 - ne jamais journaliser la clé ni le corps complet en clair.
 
+### File d'attente (outbox) — **obligatoire**
+
+C'est le complément indispensable d'une passerelle auto-hébergée. Le poste qui l'héberge sera
+éteint, en veille ou hors ligne à un moment ou à un autre : **sans file d'attente, chaque message
+émis pendant ce temps est purement perdu.** Pour une alerte automatique déclenchée par un événement
+métier, personne ne revient jamais la renvoyer à la main.
+
+Comportement attendu : la passerelle est injoignable ⇒ le message est **mis en attente**, pas
+rejeté ; il repart **tout seul** dès qu'elle revient.
+
+#### Table dédiée — surtout pas le journal d'envoi
+
+Le journal (`whatsapp_messages`) enregistre ce qui a été confié à la passerelle et son statut de
+remise ; **il ne stocke même pas le texte**, n'ayant jamais eu à renvoyer un message. Une file a
+besoin de l'inverse. Créer une table distincte :
+
+| Colonne | Rôle |
+| --- | --- |
+| `recipient_phone` | MSISDN **normalisé dès la mise en file** — un numéro invalide doit être refusé tout de suite, pas découvert trois jours plus tard |
+| `recipient_display`, `recipient_name` | affichage |
+| `body` | **le texte à envoyer** — ce que le journal ne conserve pas |
+| `status` | `pending` \| `sent` \| `abandoned` |
+| `attempts`, `last_error`, `last_attempt_at` | suivi des échecs |
+| `created_at`, `sent_at`, `abandoned_at`, `abandoned_reason` | horodatage |
+
+Index sur `(status, created_at)` : le vidage lit toujours « les plus anciens en attente d'abord ».
+Un message parti est marqué `sent` **et** journalisé normalement, pour que le suivi de remise
+(`sent → delivered → read`) reste au même endroit que pour un envoi direct.
+
+#### Règles de reprise — les trois qui comptent
+
+1. **Une passerelle injoignable ne consomme JAMAIS de tentative.** Ce n'est pas la faute du
+   message. Sans cette règle, un week-end hors ligne épuiserait le compteur de toute la file et
+   ferait abandonner des messages parfaitement valides.
+2. **Un échec propre au destinataire incrémente les tentatives** (numéro sans compte WhatsApp,
+   refus de la passerelle) ; au bout de 3, le message est abandonné plutôt que réessayé sans fin.
+3. **Expirer les messages trop anciens** (~7 jours). Un rappel de solde vieux d'une semaine peut
+   être devenu **faux** — la famille a pu payer entre-temps. Mieux vaut ne rien envoyer qu'envoyer
+   une information périmée à un parent.
+
+#### Le vidage doit respecter la MÊME cadence que l'envoi direct
+
+Extraire la temporisation anti-bannissement dans un module partagé (`pacing.ts`) et l'utiliser des
+deux côtés. Le rattrapage traite justement des lots accumulés : c'est le moment où l'on ressemble le
+plus à un robot, donc le dernier endroit où accélérer. Dupliquer les constantes les laisserait
+diverger, et une divergence ici coûte le numéro.
+
+#### Qui déclenche le rattrapage ?
+
+En serverless, rien ne tourne entre deux requêtes. C'est donc **l'application ouverte dans le
+navigateur** qui déclenche le vidage — un composant monté dans la coquille applicative :
+
+- sonde une route `GET /api/whatsapp/outbox` qui **compte des lignes et n'appelle jamais la
+  passerelle** (sondage bon marché : un écran ouvert des heures ne doit pas réveiller la passerelle
+  en boucle) ;
+- n'appelle `POST /api/whatsapp/outbox/flush` **que s'il reste quelque chose** ;
+- verrou anti-chevauchement : un vidage est lent, le sondage suivant peut tomber pendant ;
+- s'arrête définitivement sur 401/403 plutôt que de boucler sur un refus ;
+- premier passage **différé** de quelques secondes : ce composant est remonté à chaque navigation.
+
+Ce n'est pas un pis-aller : le poste de l'organisation a l'application ouverte toute la journée, et
+c'est **le même poste** qui héberge la passerelle. Quand il est allumé, le rattrapage part.
+
+#### Retour visible, sans mentir
+
+- La réponse d'envoi distingue **trois** issues : `sent`, `queued` (en attente), `failed`.
+  **Un message en attente n'est pas un échec** — l'afficher en rouge ferait croire à une perte.
+- Compte rendu par destinataire à trois états : envoyé (vert), **en attente** (orange), échec
+  (rouge).
+- Indicateur discret tant qu'il reste des messages en file, et bouton **« Envoyer maintenant »**
+  dans les réglages pour ne pas attendre l'intervalle.
+- Ne rien afficher quand la file est vide : un encart permanent finit par ne plus être lu.
+
 ## 5. Partie C — Sécurité, non négociable
 
 - La clé de la passerelle ne quitte **jamais** le serveur.
@@ -398,7 +471,13 @@ Il n'est appliqué qu'à l'**initialisation** du volume. Le modifier ensuite ⇒
 connexion et la passerelle ne démarre plus. Le conserver tel quel lors d'une bascule qui réutilise
 le volume.
 
-### 6.10 Déménager la passerelle : supprimer l'ancien nœud **d'abord**
+### 6.10 Sans file d'attente, tout message émis passerelle éteinte est PERDU
+Le poste hôte sera éteint un jour ou l'autre. Un envoi qui échoue franchement laisse
+l'utilisateur devant une erreur — et une alerte automatique, elle, ne laisse rien du tout : personne
+ne revient la renvoyer. La file d'attente n'est donc pas un raffinement, c'est ce qui rend
+l'hébergement sur un poste acceptable. Voir « File d'attente (outbox) » en partie B.
+
+### 6.11 Déménager la passerelle : supprimer l'ancien nœud **d'abord**
 Tailscale n'attribue jamais deux fois le même nom. Tant que l'ancien nœud existe, le nouveau devient
 `<nom>-1` et **l'adresse publique change**. Supprimer l'ancien nœud dans la console **avant** de
 démarrer le nouveau ⇒ l'adresse reste identique et l'hébergeur n'a **rien** à savoir du
@@ -453,6 +532,11 @@ Ne déclare la tâche terminée que si **tout** ceci est vérifié, en montrant 
       « prête » quand `webhookConfigured` est faux ;
 - [ ] aucun secret visible dans le panneau ni dans la réponse de `/status` (vérifier l'onglet réseau :
       ni clé API, ni jeton, ni URL complète de la passerelle) ;
+- [ ] **passerelle arrêtée, un envoi est MIS EN ATTENTE et non perdu** — l'interface l'annonce
+      comme tel, jamais comme un échec ;
+- [ ] **passerelle rallumée, les messages en attente repartent SEULS**, sans action de
+      l'utilisateur, en respectant la même temporisation qu'un envoi direct ;
+- [ ] une passerelle injoignable **ne consomme pas de tentative** (vérifiable par un test) ;
 - [ ] la suite de tests du projet passe, le build de production réussit ;
 - [ ] le script de service continu a été exécuté sur le poste hôte ;
 - [ ] la documentation créée mentionne **explicitement** la contrepartie : poste éteint = aucun

@@ -8,8 +8,13 @@
  *
  *  À l'envoi, la passerelle rend « queued » : elle a pris le message en charge,
  *  il n'est pas encore remis. La suite arrive plus tard, de façon asynchrone,
- *  par le webhook (`sent` → `delivered` → `read`, ou `failed`). */
-export type MessageStatus = "queued" | "sent" | "delivered" | "read" | "failed";
+ *  par le webhook (`sent` → `delivered` → `read`, ou `failed`).
+ *
+ *  « pending » est EN AMONT de tout cela : le message attend dans la file
+ *  locale parce que la passerelle était injoignable, et n'a donc jamais été
+ *  confié à WhatsApp. À ne pas confondre avec « queued », qui signifie
+ *  l'inverse — la passerelle l'a bien accepté. */
+export type MessageStatus = "pending" | "queued" | "sent" | "delivered" | "read" | "failed";
 
 /** État de la session WhatsApp côté passerelle. `unknown` couvre tout libellé
  *  qu'une version d'Evolution renverrait sans qu'on le connaisse. */
@@ -44,6 +49,46 @@ export interface SendResponse {
    *  limite d'exécution de Vercel plutôt que d'être coupée en plein envoi.
    *  L'interface renvoie ce reliquat dans un appel suivant. */
   remaining?: string[];
+  /** Messages MIS EN FILE parce que la passerelle était injoignable (le poste
+   *  qui l'héberge est éteint, en veille, ou sans Internet). Ils repartiront
+   *  seuls : ce n'est pas un échec, et l'interface ne doit pas l'annoncer
+   *  comme tel. */
+  queued?: number;
+  /** `true` quand la passerelle n'a pas répondu du tout et que TOUT le lot est
+   *  parti en file d'attente. */
+  offline?: boolean;
+}
+
+/** Un message en attente, tel qu'affiché dans l'écran Paramètres → WhatsApp. */
+export interface OutboxEntry {
+  id: string;
+  /** numéro lisible, ou à défaut le MSISDN */
+  recipient: string;
+  recipientName: string | null;
+  body: string;
+  attempts: number;
+  lastError: string | null;
+  createdAt: string;
+}
+
+/** Résultat d'une tentative de vidage de la file d'attente.
+ *
+ *  `offline: true` n'est PAS une erreur : c'est le cas nominal quand le poste
+ *  hébergeant la passerelle est éteint. La file reste alors intacte. */
+export interface FlushOutcome {
+  sent: number;
+  failed: number;
+  /** encore en attente après cette tentative */
+  remaining: number;
+  /** écartés car trop anciens : l'information a pu changer entre-temps */
+  expired: number;
+  offline: boolean;
+}
+
+/** Réponse de `GET /api/whatsapp/outbox`. */
+export interface OutboxResponse {
+  pending: number;
+  entries: OutboxEntry[];
 }
 
 /** Réponse de `GET /api/whatsapp/status` et de `/api/whatsapp/session` — état de

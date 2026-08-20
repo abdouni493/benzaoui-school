@@ -19,7 +19,7 @@ import {
   type WhatsAppTemplateId,
 } from "@/lib/whatsapp/templates";
 import type { OutgoingMessage, SendResponse, SendResult } from "@/lib/whatsapp/types";
-import { AlertTriangle, Check, MessageCircle, Send, X } from "lucide-react";
+import { AlertTriangle, Check, Clock, MessageCircle, Send, X } from "lucide-react";
 
 export interface WhatsAppRecipient {
   id: string;
@@ -231,20 +231,29 @@ export function WhatsAppMessageModal({
       }
 
       const sent = collected.filter((r) => r.ok).length;
-      const failed = collected.length - sent;
+      // Un message « pending » attend dans la file locale : ni parti, ni perdu.
+      // Le compter comme un échec ferait croire à une erreur alors qu'il
+      // repartira tout seul.
+      const pending = collected.filter((r) => r.status === "pending").length;
+      const failed = collected.length - sent - pending;
 
-      if (sent > 0) {
+      if (sent > 0 || pending > 0) {
+        const parts: string[] = [];
+        if (sent > 0) parts.push(`${sent} message(s) envoyé(s)`);
+        if (pending > 0) parts.push(`${pending} en attente`);
+        if (failed > 0) parts.push(`${failed} en échec`);
+
         addToast({
-          type: failed > 0 ? "warning" : "success",
+          type: failed > 0 ? "warning" : pending > 0 ? "info" : "success",
           title: "Message WhatsApp",
           message:
-            failed > 0
-              ? `${sent} message(s) envoyé(s), ${failed} en échec.`
-              : `${sent} message(s) envoyé(s).`,
+            pending > 0
+              ? `${parts.join(", ")}. La passerelle est injoignable : les messages en attente partiront automatiquement dès son retour.`
+              : `${parts.join(", ")}.`,
         });
-        // Les échecs restent affichés pour être corrigés ; un envoi entièrement
-        // réussi n'a plus rien à montrer.
-        if (failed === 0) onClose();
+        // Les échecs restent affichés pour être corrigés ; les messages en
+        // attente aussi, pour que l'utilisateur sache qu'ils ne sont pas partis.
+        if (failed === 0 && pending === 0) onClose();
       }
     } catch {
       setError("Impossible de joindre le serveur.");
@@ -414,17 +423,29 @@ export function WhatsAppMessageModal({
               <div
                 key={`${r.phone}-${i}`}
                 className={`flex items-center justify-between gap-2 rounded-lg border px-3 py-1.5 text-xs ${
-                  r.ok ? "border-success/30 bg-success/10" : "border-danger/30 bg-danger/10"
+                  r.ok
+                    ? "border-success/30 bg-success/10"
+                    : r.status === "pending"
+                      ? "border-warning/30 bg-warning/10"
+                      : "border-danger/30 bg-danger/10"
                 }`}
               >
                 <span className="truncate text-ink">
                   {r.name} — {r.phone}
                 </span>
                 <span
-                  className={`flex shrink-0 items-center gap-1 ${r.ok ? "text-success" : "text-danger"}`}
+                  className={`flex shrink-0 items-center gap-1 ${
+                    r.ok ? "text-success" : r.status === "pending" ? "text-warning" : "text-danger"
+                  }`}
                 >
-                  {r.ok ? <Check className="h-3.5 w-3.5" /> : <X className="h-3.5 w-3.5" />}
-                  {r.ok ? "Envoyé" : (r.error ?? "Échec")}
+                  {r.ok ? (
+                    <Check className="h-3.5 w-3.5" />
+                  ) : r.status === "pending" ? (
+                    <Clock className="h-3.5 w-3.5" />
+                  ) : (
+                    <X className="h-3.5 w-3.5" />
+                  )}
+                  {r.ok ? "Envoyé" : r.status === "pending" ? "En attente" : (r.error ?? "Échec")}
                 </span>
               </div>
             ))}

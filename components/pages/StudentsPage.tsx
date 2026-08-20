@@ -1214,6 +1214,7 @@ export function StudentsPage() {
 
     let sent = 0;
     let failed = 0;
+    let queued = 0;
     const queue = [...waRecipients];
 
     try {
@@ -1241,6 +1242,9 @@ export function StudentsPage() {
 
         sent += batchResult.sent;
         failed += batchResult.failed;
+        // Passerelle injoignable : ces messages attendent dans la file locale
+        // et repartiront seuls. Ce n'est ni un envoi ni un échec.
+        queued += batchResult.results.filter((r) => r.status === "pending").length;
 
         // Destinataires que la route n'a pas eu le temps de traiter avant sa
         // limite d'exécution : ils repassent en tête de file.
@@ -1250,13 +1254,16 @@ export function StudentsPage() {
         }
       }
 
+      const notif = `${selected.length} notification(s) créée(s) dans l'application.`;
       addToast({
-        type: failed > 0 ? "warning" : "success",
-        title: "Alertes envoyées",
+        type: failed > 0 ? "warning" : queued > 0 ? "info" : "success",
+        title: queued > 0 ? "Alertes mises en attente" : "Alertes envoyées",
         message:
-          failed > 0
-            ? `${sent} message(s) WhatsApp envoyé(s), ${failed} en échec. ${selected.length} notification(s) créée(s) dans l'application.`
-            : `${sent} message(s) WhatsApp envoyé(s) et ${selected.length} notification(s) créée(s) dans l'application.`,
+          queued > 0
+            ? `${sent} message(s) envoyé(s), ${queued} en attente : la passerelle est injoignable, ils partiront automatiquement dès son retour. ${notif}`
+            : failed > 0
+              ? `${sent} message(s) WhatsApp envoyé(s), ${failed} en échec. ${notif}`
+              : `${sent} message(s) WhatsApp envoyé(s) et ${notif}`,
       });
       setIsAlertLowBalanceOpen(false);
     } catch {

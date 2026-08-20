@@ -9,6 +9,7 @@ import { useSession } from "@/lib/store/session";
 import { useSettings } from "@/lib/store/settings";
 
 import { GlobalRFIDListener } from "@/components/controls/GlobalRFIDListener";
+import { WhatsAppOutboxWatcher } from "@/components/whatsapp/WhatsAppOutboxWatcher";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -30,6 +31,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-dvh overflow-hidden bg-canvas">
       <GlobalRFIDListener />
+      {/* Fait repartir les messages WhatsApp mis en attente pendant que la
+          passerelle etait injoignable. Monte ici pour survivre aux changements
+          de page : un vidage prend plusieurs dizaines de secondes. */}
+      <WhatsAppOutboxWatcher />
       {/* Desktop sidebar */}
       <div className="hidden lg:block">
         <Sidebar />

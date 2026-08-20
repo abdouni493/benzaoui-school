@@ -41,9 +41,10 @@ ne coûte rien du tout : ni serveur à louer, ni nom de domaine à acheter.
 
 **Le seul vrai arbitrage** : les options gratuites font tourner la passerelle sur le PC du
 secrétariat. Tant qu'il est allumé, tout fonctionne, 24 h/24 s'il le faut. Éteint ou en veille,
-**aucun message ne part** — et personne n'est prévenu automatiquement. `keep-alive.ps1` supprime les
-causes évitables (veille, Docker non relancé après une coupure) ; il ne peut rien contre un poste
-débranché.
+**rien ne part sur le moment** — mais rien n'est perdu : les messages sont mis en file d'attente et
+repartent seuls au retour de la passerelle (voir « File d'attente » plus bas). `keep-alive.ps1`
+supprime les causes évitables (veille, Docker non relancé après une coupure) ; il ne peut rien
+contre un poste débranché.
 
 Dans tous les cas l'application est identique : seule change la valeur de `EVOLUTION_BASE_URL`.
 
@@ -554,10 +555,34 @@ C'est le point qui décide de la survie du service :
 
 Un numéro banni par WhatsApp l'est **sans recours**. Utilisez un numéro dédié à l'école.
 
+### File d'attente — ce qui se passe quand le poste est éteint
+
+Un message émis alors que la passerelle est injoignable **n'est pas perdu** : il est mis en file
+d'attente (table `whatsapp_outbox`) et repart **tout seul** dès qu'elle revient.
+
+C'est ce qui rend l'hébergement sur un poste acceptable. Sans cela, une alerte de solde déclenchée
+par un scan de carte disparaissait sans que personne ne le sache — et personne ne revenait la
+renvoyer à la main.
+
+- **Rien à faire** : l'application vide la file d'elle-même, en arrière-plan, dès qu'un écran est
+  ouvert et que la passerelle répond.
+- Un bandeau discret indique le nombre de messages en attente ; **Paramètres → WhatsApp** les liste
+  et offre un bouton **Envoyer maintenant** pour ne pas attendre.
+- Le rattrapage respecte **la même temporisation** qu'un envoi normal : c'est justement en traitant
+  un lot accumulé que l'on ressemble le plus à un robot.
+- Un message est abandonné après **3 échecs qui lui sont propres** (numéro sans compte WhatsApp), ou
+  après **7 jours** d'attente — un rappel de solde d'il y a une semaine peut être devenu faux.
+- Une passerelle injoignable ne consomme **aucune** tentative : un long week-end hors ligne
+  n'épuise pas le compteur.
+
+> Cette fonctionnalité exige la migration `supabase/migrations/20260820_whatsapp_outbox.sql`,
+> à exécuter une fois dans **Supabase → SQL Editor**.
+
 ### Diagnostic
 
 | Symptôme | Cause probable |
 | --- | --- |
+| « N messages en attente » | Normal : la passerelle était injoignable. Ils repartent seuls ; rallumer le poste suffit |
 | « Passerelle WhatsApp injoignable » | PC éteint ou en veille, Docker non démarré, ou `EVOLUTION_BASE_URL` erroné |
 | Tout marchait, plus rien le lendemain | Le poste s'est mis en veille — lancer `keep-alive.ps1 -Apply` |
 | Plus rien après une coupure de courant | Docker Desktop ne s'est pas relancé — `keep-alive.ps1 -Apply` |

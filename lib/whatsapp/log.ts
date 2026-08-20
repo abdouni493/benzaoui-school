@@ -20,6 +20,10 @@ const asUuid = (v: string | null | undefined): string | null => (v && UUID_RE.te
 /** Rang de progression d'un statut : on ne « recule » jamais (un « sent » en
  *  retard ne doit pas écraser un « read » déjà reçu). `failed` est terminal. */
 const STATUS_RANK: Record<MessageStatus, number> = {
+  // « pending » vit dans whatsapp_outbox, jamais dans ce journal : une ligne
+  // n'y entre qu'une fois confiée à la passerelle. Le rang négatif garantit
+  // qu'un événement mal formé ne pourrait de toute façon rien écraser.
+  pending: -1,
   queued: 0,
   sent: 1,
   delivered: 2,

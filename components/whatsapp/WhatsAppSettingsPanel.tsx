@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import {
   AlertTriangle,
   CheckCircle2,
+  Clock,
   LogOut,
   MessageCircle,
   QrCode,
@@ -14,7 +15,7 @@ import {
   RotateCw,
   ShieldCheck,
 } from "lucide-react";
-import type { WhatsAppSessionResponse } from "@/lib/whatsapp/types";
+import type { FlushOutcome, OutboxResponse, WhatsAppSessionResponse } from "@/lib/whatsapp/types";
 
 /** Actions pilotant la session, côté /api/whatsapp/session. */
 type Action = "setup" | "connect" | "logout" | "restart";
@@ -55,6 +56,8 @@ export function WhatsAppSettingsPanel() {
   const [qrBase64, setQrBase64] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [confirmLogout, setConfirmLogout] = useState(false);
+  const [outbox, setOutbox] = useState<OutboxResponse | null>(null);
+  const [flushing, setFlushing] = useState(false);
 
   // Évite un setState après démontage (le composant vit dans un onglet).
   const mounted = useRef(true);
@@ -86,6 +89,45 @@ export function WhatsAppSettingsPanel() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  /** File d'attente : lecture bon marche (aucun appel a la passerelle). */
+  const loadOutbox = useCallback(async () => {
+    try {
+      const res = await fetch("/api/whatsapp/outbox", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as OutboxResponse;
+      if (mounted.current) setOutbox(data);
+    } catch {
+      // Silencieux : l'ecran reste utilisable sans cette information.
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadOutbox();
+  }, [loadOutbox]);
+
+  /** Vidage manuel. Le rattrapage se fait aussi tout seul en arriere-plan
+   *  (WhatsAppOutboxWatcher) ; ce bouton sert a ne pas attendre l'intervalle. */
+  const flushNow = async () => {
+    setFlushing(true);
+    try {
+      const res = await fetch("/api/whatsapp/outbox/flush", { method: "POST" });
+      if (res.ok) {
+        const outcome = (await res.json()) as FlushOutcome;
+        if (mounted.current && outcome.offline) {
+          setError(
+            "La passerelle est toujours injoignable : les messages restent en attente.",
+          );
+        }
+      }
+    } catch {
+      // idem : on retentera
+    } finally {
+      if (mounted.current) setFlushing(false);
+      await loadOutbox();
+      await refresh();
+    }
+  };
 
   // Le QR expire vite : tant qu'il est à l'écran et que la session n'est pas
   // ouverte, on surveille l'état pour basculer dès que le scan est pris en
@@ -210,6 +252,52 @@ export function WhatsAppSettingsPanel() {
                     tone={state.connected ? "success" : undefined}
                   />
                 </dl>
+
+                {/* ---- File d'attente ----
+                    N'apparait que s'il y a quelque chose dedans : une file vide
+                    n'est pas une information, et un encart permanent finirait
+                    par ne plus etre lu. */}
+                {outbox && outbox.pending > 0 && (
+                  <div className="space-y-3 rounded-xl border border-warning/30 bg-warning/5 p-4">
+                    <p className="flex items-start gap-2 text-xs text-warning">
+                      <Clock className="mt-0.5 h-4 w-4 shrink-0" />
+                      <span>
+                        <strong>
+                          {outbox.pending} message{outbox.pending > 1 ? "s" : ""} en attente
+                        </strong>{" "}
+                        — mis de côté pendant que la passerelle était injoignable. Ils repartent
+                        automatiquement dès son retour ; aucun n&apos;est perdu.
+                      </span>
+                    </p>
+
+                    <ul className="space-y-1.5 text-[11px] text-muted">
+                      {outbox.entries.slice(0, 5).map((e) => (
+                        <li key={e.id} className="flex items-baseline justify-between gap-3">
+                          <span className="truncate">
+                            <span className="text-ink">{e.recipientName ?? e.recipient}</span>{" "}
+                            <span className="opacity-70">— {e.body.slice(0, 60)}</span>
+                            {e.body.length > 60 ? "…" : ""}
+                          </span>
+                          {e.attempts > 0 && (
+                            <span className="shrink-0 text-warning">
+                              {e.attempts} tentative{e.attempts > 1 ? "s" : ""}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                      {outbox.pending > 5 && <li className="opacity-70">…et {outbox.pending - 5} autre(s)</li>}
+                    </ul>
+
+                    <Button
+                      variant="outline"
+                      onClick={() => void flushNow()}
+                      disabled={flushing || busy !== null}
+                      className="flex items-center gap-2"
+                    >
+                      {flushing ? "Envoi en cours…" : "Envoyer maintenant"}
+                    </Button>
+                  </div>
+                )}
 
                 {/* ---- Session ouverte ---- */}
                 {state.connected && (

@@ -8,6 +8,8 @@ import {
   sendTextMessage,
 } from "@/lib/whatsapp/client";
 import { logOutgoingMessage } from "@/lib/whatsapp/log";
+import { type QueueEntry, queueMessages } from "@/lib/whatsapp/outbox";
+import { TYPING_DELAY_MS, randomGap, sleep } from "@/lib/whatsapp/pacing";
 import { normalizePhone } from "@/lib/whatsapp/phone";
 import { MAX_MESSAGE_LENGTH } from "@/lib/whatsapp/templates";
 import type { OutgoingMessage, SendResult } from "@/lib/whatsapp/types";
@@ -42,15 +44,9 @@ const MAX_RECIPIENTS = 8;
  *  quoi terminer l'envoi en cours, le journaliser et sérialiser la réponse. */
 const TIME_BUDGET_MS = 45_000;
 
-/** Bornes du tirage aléatoire de la pause entre deux destinataires. */
-const GAP_MIN_MS = 3_000;
-const GAP_MAX_MS = 7_000;
-
-/** Frappe simulée par la passerelle avant chaque envoi (comportement humain). */
-const TYPING_DELAY_MS = 1_200;
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const randomGap = () => GAP_MIN_MS + Math.floor(Math.random() * (GAP_MAX_MS - GAP_MIN_MS + 1));
+// La temporisation anti-bannissement vit dans `lib/whatsapp/pacing.ts` : le
+// vidage de la file d'attente envoie lui aussi, et les deux chemins doivent
+// respecter exactement la même cadence.
 
 interface Recipient {
   phone: string;
@@ -131,18 +127,75 @@ export async function POST(request: Request) {
       if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
     }
 
-    // Session tombée (téléphone éteint, QR jamais scanné, passerelle
-    // redémarrée) : inutile d'enchaîner huit échecs identiques et d'attendre
-    // 40 secondes pour l'apprendre.
-    const { state } = await getConnectionState();
-    if (state !== "open") {
-      return NextResponse.json(
-        {
-          error:
-            "WhatsApp n'est pas connecté. Ouvrir Paramètres → WhatsApp et scanner le QR code avec le téléphone de l'école.",
-        },
-        { status: 503 },
-      );
+    /** Met le lot en file d'attente plutôt que de le perdre. Les numéros
+     *  invalides sont écartés au passage : les mettre en file reviendrait à
+     *  réessayer indéfiniment quelque chose qui ne marchera jamais. */
+    async function queueBatch(
+      items: { recipient: Recipient; message: OutgoingMessage | null }[],
+    ): Promise<{ results: SendResult[]; queued: number; invalid: number }> {
+      const results: SendResult[] = [];
+      const toQueue: QueueEntry[] = [];
+
+      for (const { recipient, message } of items) {
+        const name = recipient.name?.trim() || recipient.phone;
+        const normalized = normalizePhone(recipient.phone);
+
+        if (!normalized) {
+          const error = "Numéro invalide";
+          results.push({ name, phone: recipient.phone, ok: false, status: "failed", error });
+          await logOutgoingMessage({
+            recipientPhone: recipient.phone,
+            recipientName: name,
+            studentId: recipient.studentId,
+            parentId: recipient.parentId,
+            messageType: "text",
+            instance: config!.instance,
+            status: "failed",
+            errorMessage: error,
+          });
+          continue;
+        }
+
+        toQueue.push({
+          recipientPhone: normalized.msisdn,
+          recipientDisplay: normalized.display,
+          recipientName: recipient.name?.trim() || null,
+          studentId: recipient.studentId ?? null,
+          parentId: recipient.parentId ?? null,
+          messageType: "text",
+          body: message!.text,
+        });
+        results.push({ name, phone: normalized.display, ok: false, status: "pending" });
+      }
+
+      const queued = await queueMessages(toQueue);
+      return { results, queued, invalid: results.length - toQueue.length };
+    }
+
+    // Passerelle injoignable (poste éteint, en veille, sans Internet) ou session
+    // tombée : le message N'EST PAS PERDU. Il part en file d'attente et repartira
+    // seul au retour de la passerelle.
+    //
+    // C'est le comportement qui compte le plus pour une alerte automatique
+    // déclenchée par un scan de carte : personne ne serait jamais revenu la
+    // renvoyer à la main.
+    let gatewayReady = false;
+    try {
+      const { state } = await getConnectionState();
+      gatewayReady = state === "open";
+    } catch {
+      gatewayReady = false;
+    }
+
+    if (!gatewayReady) {
+      const { results, queued, invalid } = await queueBatch(resolved);
+      return NextResponse.json({
+        sent: 0,
+        failed: invalid,
+        queued,
+        offline: true,
+        results,
+      });
     }
 
     // Numéros réellement joignables sur WhatsApp. `null` = vérification
@@ -155,6 +208,9 @@ export async function POST(request: Request) {
     const results: SendResult[] = [];
     const remaining: string[] = [];
     const started = Date.now();
+    // Renseignés si la passerelle tombe en plein lot (voir plus bas).
+    let queuedOffline = 0;
+    let wentOffline = false;
 
     for (let i = 0; i < resolved.length; i++) {
       const { recipient, message } = resolved[i];
@@ -195,9 +251,16 @@ export async function POST(request: Request) {
         results.push({ name, phone: normalized.display, ok: true, messageId, status: "queued" });
         await logOutgoingMessage({ ...logMeta, messageId, status: "queued" });
       } catch (err) {
-        // Panne globale (passerelle injoignable, clé refusée, session tombée) :
-        // tout le lot échouerait pareil, on arrête plutôt que d'insister.
-        if (err instanceof WhatsAppError && (err.status === 503 || err.status === 502)) throw err;
+        // Passerelle tombée EN COURS de lot : le reste échouerait pareil. On
+        // met le reliquat — courant compris — en file d'attente, puis on rend
+        // la main. Ce qui était déjà parti reste parti : pas de doublon.
+        if (err instanceof WhatsAppError && (err.status === 503 || err.status === 502)) {
+          const rest = await queueBatch(resolved.slice(i));
+          results.push(...rest.results);
+          queuedOffline = rest.queued;
+          wentOffline = true;
+          break;
+        }
 
         const errorMessage = err instanceof Error ? err.message : "Échec de l'envoi";
         results.push({
@@ -232,11 +295,16 @@ export async function POST(request: Request) {
     }
 
     const sent = results.filter((r) => r.ok).length;
+    // Un message en file n'est ni parti ni en échec : le compter comme un échec
+    // ferait afficher une erreur pour quelque chose qui va partir tout seul.
+    const pending = results.filter((r) => r.status === "pending").length;
     return NextResponse.json({
       sent,
-      failed: results.length - sent,
+      failed: results.length - sent - pending,
       results,
       ...(remaining.length > 0 ? { remaining } : {}),
+      ...(queuedOffline > 0 ? { queued: queuedOffline } : {}),
+      ...(wentOffline ? { offline: true } : {}),
     });
   } catch (err) {
     if (err instanceof WhatsAppError) {
