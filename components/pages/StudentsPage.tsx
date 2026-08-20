@@ -67,6 +67,7 @@ import {
 import { useSettings } from "@/lib/store/settings";
 import { printHtmlDocument } from "@/lib/print";
 import { buildStudentPaymentsReport } from "@/lib/reports/studentPayments";
+import { buildRechargeTicket } from "@/lib/reports/rechargeTicket";
 import { useScanProcessor } from "@/lib/useScanProcessor";
 import { useToast } from "@/lib/store/toast";
 import {
@@ -2806,330 +2807,47 @@ export function StudentsPage() {
     printHtmlDocument(html);
   };
 
-  /** The modules a student is enrolled in, with the price actually charged
-   *  (per-module reduction applied) — printed on the payment receipt. */
-  const getStudentEnrollmentRows = (stu: Student) =>
-    stu.subscriptionIds.flatMap((subId) => {
-      const sub = subscriptions.find((s) => s.id === subId);
-      if (!sub) {
-        const cw = coursework.find((c) => c.id === subId);
-        return cw
-          ? [{
-              module: `Stage: ${cw.name}`,
-              classLabel: "-",
-              group: "-",
-              teacher: teachers.find((t) => t.id === cw.teacherId)
-                ? `${teachers.find((t) => t.id === cw.teacherId)!.firstName} ${teachers.find((t) => t.id === cw.teacherId)!.lastName}`
-                : "-",
-              basePrice: cw.total,
-              netPrice: cw.total,
-              discountLabel: "",
-              unit: "total",
-            }]
-          : [];
-      }
-      const sess = sessions.find((se) => se.id === sub.sessionId);
-      if (!sess) return [];
-      const cls = classes.find((c) => c.id === sess.classId);
-      const lvl = cls ? (cls.type === "cours" ? cls.coursLevel : cls.formationLevel) : undefined;
-      const t = teachers.find((te) => te.id === sess.teacherId);
-      const isFormation = cls?.type === "formation";
-      const basePrice = isFormation ? sub.levelPrice ?? 0 : sub.pricePerSession;
-      const disc = stu.subscriptionDiscounts?.[subId];
-      return [{
-        module: modules.find((m) => m.id === sess.moduleId)?.name ?? "Module",
-        classLabel: cls ? (lvl ? `${cls.name} (${lvl})` : cls.name) : "-",
-        group: groups.find((g) => g.id === sess.groupId)?.name ?? "-",
-        teacher: t ? `${t.firstName} ${t.lastName}` : "-",
-        basePrice,
-        netPrice: netPriceFor(basePrice, disc),
-        discountLabel: disc && disc.value > 0
-          ? disc.type === "percent" ? `-${disc.value}%` : `-${disc.value} DA`
-          : "",
-        unit: isFormation ? `${sub.periodMonths ?? 0} mois` : "séance",
-      }];
-    });
-
+  /** Bon de chargement de solde — ticket de caisse 80 mm.
+   *
+   *  Une recharge se règle en trente secondes au guichet : la preuve remise à
+   *  la famille est un ticket étroit, pas une facture. L'ancien reçu tirait une
+   *  page entière (en-tête fiscal, tableau des modules souscrits, deux cadres de
+   *  signature) pour annoncer un seul montant — sur la thermique 80 mm de la
+   *  réception cela sortait en dizaines de centimètres de papier.
+   *
+   *  Le contenu est arrêté dans lib/reports/rechargeTicket.ts ; ici on ne fait
+   *  que réunir ce que l'écran connaît de l'élève. */
   const handlePrintInvoice = (stu: Student, amount: number, desc: string, settledReg: boolean) => {
-    // Get fresh values from useData store
-    const updatedStudents = useData.getState().students;
-    const updatedStu = updatedStudents.find(s => s.id === stu.id) || stu;
+    // `stu` est la photo d'AVANT l'écriture (voir handleTopup) : le solde
+    // d'après se relit dans le magasin, une fois l'opération passée.
+    const updatedStu = useData.getState().students.find((s) => s.id === stu.id) ?? stu;
 
-    const invoiceNum = `REC-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
-    const portalPassword = studentCredentials.find((c) => c.studentId === stu.id)?.password ?? "";
-    const enrollments = getStudentEnrollmentRows(updatedStu);
+    // La scolarité de l'élève, telle qu'on en parle au guichet : la première
+    // inscription qui porte une classe la fixe pour tout le dossier (verrou de
+    // scolarité), les suivantes en relèvent forcément.
+    const scopeClass = updatedStu.subscriptionIds
+      .map((id) => classOfSubscription(id))
+      .find((c): c is SchoolClass => Boolean(c));
 
-    const logoHtml = school.logo
-      ? `<img src="${school.logo}" alt="logo" class="school-logo" />`
-      : `<div class="school-logo-fallback">🏫</div>`;
-
-    const html = `
-      <html>
-        <head>
-          <title>Reçu de Paiement - ${invoiceNum}</title>
-          <style>
-            @media print {
-              body { padding: 0; margin: 0; background: #fff; color: #000; font-size: 11px; }
-              .no-print { display: none; }
-            }
-            * { box-sizing: border-box; }
-            body { font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; padding: 20px; color: #1e1b4b; background-color: #faf9ff; max-width: 600px; margin: 0 auto; }
-            
-            /* Letterhead Header */
-            .letterhead { display: flex; justify-content: space-between; align-items: stretch; border: 1px solid #e8e6f4; background: #fff; padding: 12px; border-radius: 12px; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
-            .school-identity { display: flex; align-items: center; gap: 12px; }
-            .school-logo, .school-logo-fallback { width: 50px; height: 50px; border-radius: 10px; object-fit: cover; }
-            .school-logo-fallback { background: #f5f3ff; border: 1px solid #ddd; display: flex; align-items: center; justify-content: center; font-size: 1.8em; }
-            .school-details h2 { margin: 0; font-size: 1.2em; color: #7c3aed; font-weight: 800; }
-            .school-details p { margin: 1px 0; font-size: 0.8em; color: #5c567a; }
-            
-            .school-tax-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; border-left: 2px solid #7c3aed; padding-left: 12px; align-items: center; }
-            .tax-item { font-size: 0.72em; color: #5c567a; }
-            .tax-item strong { color: #1e1b4b; font-family: monospace; }
-            
-            /* Document title banner */
-            .doc-title-banner { background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%); color: #fff; padding: 10px; border-radius: 10px; margin-bottom: 15px; text-align: center; }
-            .doc-title-banner h1 { margin: 0; font-size: 1.15em; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
-
-            /* Compact Side-by-Side Information Grid */
-            .info-grid {
-              display: grid;
-              grid-template-columns: 1fr 1fr;
-              gap: 15px;
-              border: 1px solid #e8e6f4;
-              border-top: 4px solid #7c3aed;
-              background: #fff;
-              padding: 12px;
-              border-radius: 12px;
-              box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-              margin-bottom: 15px;
-            }
-            .info-column {
-              display: flex;
-              flex-direction: column;
-              gap: 6px;
-            }
-            .info-item {
-              display: flex;
-              justify-content: space-between;
-              border-bottom: 1px dashed #f1f0fb;
-              padding-bottom: 4px;
-              font-size: 0.85em;
-            }
-            .info-item:last-child {
-              border-bottom: 0;
-              padding-bottom: 0;
-            }
-            .info-label {
-              font-weight: bold;
-              color: #5c567a;
-            }
-            .info-value {
-              font-weight: bold;
-              color: #1e1b4b;
-              text-align: right;
-            }
-            
-            /* Portal credentials block */
-            .credentials { border: 1px solid #e8e6f4; border-top: 4px solid #3b82f6; background: #fff; border-radius: 12px; padding: 12px; margin-bottom: 15px; }
-            .credentials h3 { margin: 0 0 8px; font-size: 0.9em; color: #1e40af; border-bottom: 1px dashed #e8e6f4; padding-bottom: 5px; }
-            .cred-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 15px; }
-            .cred-note { margin-top: 8px; font-size: 0.68em; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 5px 8px; }
-
-            /* Modules table */
-            .modules-card { border: 1px solid #e8e6f4; border-top: 4px solid #7c3aed; background: #fff; border-radius: 12px; padding: 12px; margin-bottom: 15px; }
-            .modules-card h3 { margin: 0 0 8px; font-size: 0.9em; color: #7c3aed; border-bottom: 1px dashed #e8e6f4; padding-bottom: 5px; }
-            table.modules { width: 100%; border-collapse: collapse; font-size: 0.78em; }
-            table.modules th { background: #fcfbff; color: #5c567a; text-transform: uppercase; font-size: 0.9em; letter-spacing: 0.3px; text-align: left; padding: 6px 8px; border-bottom: 1px solid #f1f0fb; }
-            table.modules td { padding: 6px 8px; border-bottom: 1px solid #f1f0fb; }
-            table.modules tr:last-child td { border-bottom: 0; }
-            .num { text-align: right; font-family: monospace; font-weight: 700; }
-            .strike { text-decoration: line-through; color: #9ca3af; font-weight: 400; }
-            .cut { color: #b91c1c; font-weight: 700; }
-
-            /* Payment Synthesis Card */
-            .synthesis-card { background: #fdfcff; border: 2px solid #7c3aed; border-radius: 12px; padding: 14px; margin-top: 15px; }
-            .synthesis-line { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #f1f0fb; font-size: 0.9em; }
-            .synthesis-line:last-child { border-bottom: 0; padding-bottom: 0; }
-            .amount-box { display: flex; justify-content: space-between; background: #f0fdf4; border: 2px solid #22c55e; color: #15803d; border-radius: 8px; padding: 10px; margin-top: 8px; font-size: 1.15em; font-weight: 800; }
-            
-            /* Signatures block */
-            .signatures { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-top: 25px; }
-            .signature-block { border: 1px dashed #c0b6e9; border-radius: 10px; background: #fff; padding: 10px; height: 75px; display: flex; flex-direction: column; justify-content: space-between; }
-            .signature-label { font-size: 0.75em; font-weight: bold; text-transform: uppercase; color: #5c567a; text-align: center; }
-            
-            .meta-text { text-align: center; font-size: 0.7em; color: #999; margin-top: 20px; font-style: italic; }
-          </style>
-        </head>
-        <body>
-          <!-- School Letterhead -->
-          <div class="letterhead">
-            <div class="school-identity">
-              ${logoHtml}
-              <div class="school-details">
-                <h2>${school.name}</h2>
-                <p>${school.description}</p>
-                <p>📍 ${school.address} | 📞 ${school.phone}</p>
-              </div>
-            </div>
-            <div class="school-tax-grid">
-              <div class="tax-item">NIF: <strong>${school.nif || "-"}</strong></div>
-              <div class="tax-item">NIS: <strong>${school.nis || "-"}</strong></div>
-              <div class="tax-item">RC: <strong>${school.registreCommerce || "-"}</strong></div>
-              <div class="tax-item">Art. Fiscal: <strong>${school.articleFiscal || "-"}</strong></div>
-            </div>
-          </div>
-
-          <!-- Document Title -->
-          <div class="doc-title-banner">
-            <h1>Reçu de Versement</h1>
-          </div>
-
-          <!-- Compact Information Grid (Left & Right columns) -->
-          <div class="info-grid">
-            <!-- Left Column -->
-            <div class="info-column">
-              <div class="info-item">
-                <span class="info-label">Élève :</span>
-                <span class="info-value" style="color: #7c3aed;">${stu.lastName} ${stu.firstName}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">RFID :</span>
-                <span class="info-value" style="font-family: monospace;">${stu.rfid || "-"}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">Date :</span>
-                <span class="info-value">${new Date().toLocaleString("fr-DZ")}</span>
-              </div>
-            </div>
-            
-            <!-- Right Column -->
-            <div class="info-column">
-              <div class="info-item">
-                <span class="info-label">Reçu N° :</span>
-                <span class="info-value" style="font-family: monospace; color: #7c3aed;">${invoiceNum}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">Opération :</span>
-                <span class="info-value">${settledReg ? "Rechargement + Inscr." : "Rechargement Solde"}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">Désignation :</span>
-                <span class="info-value">${desc}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Portal account (login the family uses on the app) -->
-          <div class="credentials">
-            <h3>🔐 Compte de l'Élève (Espace en ligne)</h3>
-            <div class="cred-grid">
-              <div class="info-item">
-                <span class="info-label">Email / Identifiant :</span>
-                <span class="info-value" style="font-family: monospace;">${stu.email || "-"}</span>
-              </div>
-              <div class="info-item">
-                <span class="info-label">Mot de passe :</span>
-                <span class="info-value" style="font-family: monospace; letter-spacing: 0.5px;">${
-                  portalPassword || "— (non enregistré)"
-                }</span>
-              </div>
-            </div>
-            <div class="cred-note">
-              ⚠️ Document confidentiel — remettre en main propre au parent / à l'élève.
-              ${portalPassword ? "Le mot de passe peut être modifié à tout moment depuis l'espace personnel." : "Le mot de passe n'a pas été enregistré à la création : réinitialisez-le depuis la fiche de l'élève pour le faire apparaître ici."}
-            </div>
-          </div>
-
-          <!-- Modules the student is subscribed to -->
-          <div class="modules-card">
-            <h3>📚 Modules Souscrits (${enrollments.length})</h3>
-            ${
-              enrollments.length === 0
-                ? `<p style="font-size:0.78em; color:#999; font-style:italic; margin:6px 0 0;">Aucun module souscrit pour le moment.</p>`
-                : `<table class="modules">
-              <thead>
-                <tr>
-                  <th>Module</th>
-                  <th>Classe / Niveau</th>
-                  <th>Groupe</th>
-                  <th>Enseignant</th>
-                  <th class="num">Tarif</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${enrollments
-                  .map(
-                    (e) => `
-                <tr>
-                  <td style="font-weight:bold; color:#1e1b4b;">${e.module}</td>
-                  <td>${e.classLabel}</td>
-                  <td>${e.group}</td>
-                  <td>${e.teacher}</td>
-                  <td class="num">
-                    ${
-                      e.discountLabel
-                        ? `<span class="strike">${e.basePrice}</span> ${e.netPrice} DA<br/><span class="cut" style="font-size:0.85em;">${e.discountLabel}</span>`
-                        : `${e.netPrice} DA`
-                    }
-                    <br/><span style="font-weight:400; color:#9ca3af; font-size:0.85em;">/ ${e.unit}</span>
-                  </td>
-                </tr>`,
-                  )
-                  .join("")}
-              </tbody>
-            </table>`
-            }
-          </div>
-
-          <!-- Payment Synthesis Card -->
-          <div class="synthesis-card">
-            <h3 style="margin-top:0; border-bottom:1px dashed #7c3aed; padding-bottom:6px; color:#7c3aed; font-size: 0.95em;">Situation Financière du Compte</h3>
-            <div class="synthesis-line">
-              <span>Ancien Solde :</span>
-              <strong>${stu.balance} DA</strong>
-            </div>
-            <div class="synthesis-line">
-              <span>Montant Versé :</span>
-              <strong style="color: #15803d;">+${amount} DA</strong>
-            </div>
-            ${settledReg 
-              ? `
-                <div class="synthesis-line" style="color: #b91c1c;">
-                  <span>Frais d'inscription déduits :</span>
-                  <strong>-${stu.registrationDue || 0} DA</strong>
-                </div>
-              ` 
-              : ""
-            }
-            <div class="synthesis-line">
-              <span>Nouveau Solde Disponible :</span>
-              <strong style="color: #1e1b4b;">${updatedStu.balance} DA</strong>
-            </div>
-            
-            <div class="amount-box">
-              <span>MONTANT REÇU :</span>
-              <span>${amount} DA</span>
-            </div>
-          </div>
-
-          <!-- Signature blocks -->
-          <div class="signatures">
-            <div class="signature-block">
-              <span class="signature-label">Le Parent / Élève</span>
-            </div>
-            <div class="signature-block">
-              <span class="signature-label">La Caisse / Direction</span>
-            </div>
-          </div>
-
-          <div class="meta-text">
-            Reçu généré par le système centralisé de l'école ${school.name}
-          </div>
-        </body>
-      </html>
-    `;
-    printHtmlDocument(html);
+    printHtmlDocument(
+      buildRechargeTicket({
+        school,
+        student: updatedStu,
+        password: studentCredentials.find((c) => c.studentId === stu.id)?.password ?? "",
+        schooling: scopeClass
+          ? classCascadeLabel(
+              scopeClass,
+              filieres.find((f) => f.id === scopeClass.filiereId)?.name ?? "",
+            )
+          : "",
+        amount,
+        description: desc,
+        balanceBefore: stu.balance,
+        balanceAfter: updatedStu.balance,
+        registrationSettled: settledReg ? stu.registrationDue ?? 0 : 0,
+        language,
+      }),
+    );
   };
 
   return (
@@ -4863,7 +4581,7 @@ export function StudentsPage() {
       <Modal 
         open={printConfirmData !== null} 
         onClose={() => setPrintConfirmData(null)} 
-        title="Reçu de Paiement"
+        title="Bon de chargement de solde"
       >
         <div className="space-y-6 text-center py-4">
           <div className="mx-auto w-12 h-12 bg-primary-50 rounded-full flex items-center justify-center text-primary text-xl">
@@ -4873,7 +4591,7 @@ export function StudentsPage() {
             <h3 className="text-sm font-bold text-ink">Rechargement effectué avec succès !</h3>
             <p className="text-xs text-muted max-w-sm mx-auto leading-relaxed">
               Le solde de l'élève <strong>{printConfirmData?.student.firstName} {printConfirmData?.student.lastName}</strong> a été rechargé de <strong>{printConfirmData?.amount} DA</strong>. 
-              Souhaitez-vous imprimer le reçu de paiement ?
+              Souhaitez-vous imprimer le bon de chargement (ticket 80&nbsp;mm) ?
             </p>
           </div>
           
@@ -4899,7 +4617,7 @@ export function StudentsPage() {
               }}
               className="px-5 py-2 rounded-xl text-xs font-bold"
             >
-              Imprimer le Reçu
+              Imprimer le bon
             </Button>
           </div>
         </div>

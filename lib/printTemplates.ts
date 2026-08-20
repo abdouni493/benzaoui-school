@@ -82,7 +82,9 @@ export const PRINT_BASE_CSS = `
   .meta-text { text-align: center; font-size: 0.75em; color: #999; margin-top: 30px; font-style: italic; }
 `;
 
-function escapeHtml(s: string): string {
+/** Échappement HTML partagé par tous les documents imprimables : un nom qui
+ *  contient « & » ou « < » ne doit jamais casser le balisage du ticket. */
+export function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
