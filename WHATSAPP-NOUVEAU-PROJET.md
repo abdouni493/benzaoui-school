@@ -24,6 +24,60 @@ redéployer, rescanner le QR.
 
 ---
 
+## 0 bis. Sur QUEL poste faire tourner la passerelle ?
+
+**Sur le poste de l'organisation cliente — jamais sur celui du développeur.**
+
+```
+École A  ──►  SON poste (passerelle A)  ──►  benzaoui-wa.tail6ac334.ts.net
+École B  ──►  SON poste (passerelle B)  ──►  annaba-wa.tail6ac334.ts.net
+Poste du développeur  ──►  hors du circuit
+```
+
+C'est le point qui décide de tout le reste. Chaque école héberge sa propre passerelle, avec son
+propre nœud Tailscale et son propre numéro WhatsApp. Le poste du développeur peut rester éteint en
+permanence : chaque école continue d'envoyer.
+
+Ce choix tombe juste pour une raison simple : **le poste de l'école est déjà allumé pendant les
+heures de cours** — c'est celui qui scanne les cartes RFID, saisit les présences et encaisse. La
+passerelle est donc disponible exactement quand l'établissement fonctionne, et les alertes
+automatiques de solde partent de la machine qui lit les cartes. Elles ne peuvent pas échouer faute
+de passerelle joignable : c'est la même machine.
+
+### Ce que la séparation des postes supprime
+
+| | Même poste | Postes séparés |
+| --- | --- | --- |
+| `name:` Compose distinct (piège 2.1) | obligatoire | **inutile** |
+| Port local distinct (piège 2.2) | obligatoire | **inutile** |
+| Mémoire partagée (piège 2.4) | à surveiller | **inutile** |
+| Nom de nœud distinct | obligatoire | obligatoire |
+| Numéro WhatsApp distinct | obligatoire | obligatoire |
+
+Autrement dit : **le second établissement est plus simple à installer que le premier**, dès lors
+qu'il a son propre poste. Il suffit de choisir un `TAILSCALE_HOSTNAME` différent.
+
+### Un seul compte Tailscale, et un bénéfice inattendu
+
+Tous ces postes rejoignent **votre** tailnet. Vous gardez un compte unique, voyez chaque
+établissement dans **Machines**, et l'attribut `funnel` des ACL couvre déjà les nouveaux nœuds.
+
+Bénéfice : chaque passerelle étant dans votre tailnet, **vous pouvez la diagnostiquer depuis votre
+propre poste**, sans vous déplacer — `check-gateway.ps1` fonctionne à distance dès que votre machine
+est elle aussi connectée au tailnet.
+
+### Les limites, dites franchement
+
+- **Chaque poste doit être allumé pour les messages de SON établissement.** L'école A éteinte
+  n'empêche pas l'école B d'envoyer, mais l'école A n'envoie rien.
+- **Docker Desktop doit être installé sur chaque poste** : Windows 10/11 avec WSL2, et
+  réalistement 8 Go de RAM. Un poste d'accueil très ancien peinera.
+- **`keep-alive.ps1 -Apply` doit être passé une fois sur chaque poste** (droits administrateur), et
+  l'ouverture de session automatique activée si l'on veut une reprise sans intervention après une
+  coupure de courant.
+
+---
+
 ## 1. Faut-il un nouveau compte Tailscale ? **Non.**
 
 C'est la bonne nouvelle : **un seul compte Tailscale suffit pour tous vos projets.** Un tailnet
