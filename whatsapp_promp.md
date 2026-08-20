@@ -1,0 +1,365 @@
+# Prompt réutilisable — Passerelle WhatsApp gratuite, sans VPS
+
+Ce fichier est un **prompt à donner tel quel à Claude Code** pour ajouter l'envoi WhatsApp à
+n'importe quel projet web hébergé en serverless (Vercel, Netlify, Cloudflare Pages…), **sans VPS et
+sans frais mensuels**.
+
+Il condense un montage réellement mis en production, **avec les pièges rencontrés** — c'est cette
+dernière partie qui a le plus de valeur : sans elle, les mêmes erreurs coûtent plusieurs heures.
+
+## Comment l'utiliser
+
+1. Remplir le bloc **« Contexte du projet »** ci-dessous.
+2. Copier **tout ce qui suit la ligne de séparation** dans Claude Code.
+3. Certaines étapes se font à la main dans la console Tailscale : le prompt les identifie
+   explicitement et demande à Claude de s'arrêter pour les réclamer.
+
+---
+
+## Contexte du projet (à remplir avant d'envoyer)
+
+```
+Projet            : <nom>
+Framework         : <ex. Next.js 15, App Router>
+Hébergeur         : <ex. Vercel>
+Domaine public    : <ex. mon-app.vercel.app>
+Base de données   : <ex. Supabase / Postgres / Prisma>
+OS du poste hôte  : <ex. Windows 11 + Docker Desktop>
+Langue du code    : <ex. commentaires en français>
+Qui reçoit les messages : <ex. les parents d'élèves, depuis le numéro de l'école>
+```
+
+---
+
+# PROMPT
+
+Tu vas ajouter à ce projet l'envoi de messages **WhatsApp** depuis le numéro de téléphone de
+l'organisation, **sans passer par la WhatsApp Business API** (pas de modèle à faire approuver, pas
+de frais par message), et **sans louer de serveur**.
+
+Avant d'écrire la moindre ligne, lis la documentation du framework présente dans le projet et
+respecte les conventions du dépôt (nommage, langue des commentaires, style des fichiers existants).
+
+## 1. Contrainte d'architecture — la comprendre avant de coder
+
+Une session WhatsApp Web (moteur **Baileys**) doit maintenir une connexion **ouverte en
+permanence**. Un hébergeur serverless réveille une fonction par requête puis l'éteint : les deux
+modèles sont **incompatibles**. Aucun réglage de l'hébergeur ne peut contourner cela.
+
+La passerelle doit donc tourner **ailleurs**, sur une machine qui reste allumée, et l'application la
+pilote en HTTPS :
+
+```
+App serverless ──HTTPS──►  passerelle Evolution API  ──►  WhatsApp des destinataires
+App (webhook)  ◄──HTTPS──  passerelle Evolution API  ◄──  statuts de remise, réponses
+```
+
+« Ailleurs » ne veut dire ni « VPS » ni « payant » : la passerelle tourne sur **un poste que
+l'organisation possède déjà**, exposé par **Tailscale Funnel**, qui fournit gratuitement une adresse
+HTTPS publique et stable **sans nom de domaine**.
+
+**Contrepartie à annoncer clairement à l'utilisateur, sans l'enjoliver** : poste éteint, en veille
+ou sans Internet ⇒ aucun message ne part, et personne n'est prévenu automatiquement.
+
+## 2. Pile technique imposée
+
+| Composant | Version | Remarque |
+| --- | --- | --- |
+| `evoapicloud/evolution-api` | **`v2.3.7`** | **Épingler.** Ne jamais utiliser `latest` : une montée de version silencieuse casse la session. |
+| `postgres` | `16-alpine` | Persistance des instances Evolution |
+| `tailscale/tailscale` | `latest` | Sidecar qui publie la passerelle |
+
+## 3. Partie A — Infrastructure (à créer par toi)
+
+### `<infra>/docker-compose.funnel.yml`
+
+Trois services : `evolution`, `postgres`, `tailscale`.
+
+**Service `evolution`** :
+- `restart: unless-stopped`
+- port publié **sur `127.0.0.1` uniquement** : `"127.0.0.1:8081:8080"` — permet le diagnostic local
+  sans rien exposer au réseau local ; le trafic public passe exclusivement par le Funnel ;
+- `SERVER_URL=${TUNNEL_PUBLIC_URL}` — **doit valoir exactement** la variable `EVOLUTION_BASE_URL`
+  côté application (voir piège 6.1) ;
+- `AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}` ;
+- `AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=false` ;
+- `DATABASE_ENABLED=true`, `DATABASE_PROVIDER=postgresql`, URI vers le service `postgres` ;
+- `DATABASE_SAVE_DATA_NEW_MESSAGE=false` et `DATABASE_SAVE_MESSAGE_UPDATE=false` — le journal
+  applicatif vit dans la base du projet, ne pas dupliquer les messages sur le disque du poste ;
+- `DEL_INSTANCE=false` — **essentiel** : une instance déconnectée ne doit pas être supprimée, sinon
+  une simple coupure imposerait de tout reconfigurer au lieu d'un simple rescan ;
+- `WEBHOOK_GLOBAL_ENABLED=false` — les webhooks sont déclarés **par instance**, depuis l'application,
+  avec un jeton d'authentification ;
+- `QRCODE_LIMIT=30`, `LOG_LEVEL=ERROR`, `CACHE_LOCAL_ENABLED=true`, `CACHE_REDIS_ENABLED=false` ;
+- volume nommé sur `/evolution/instances` — **c'est la session WhatsApp** ; la perdre impose un
+  nouveau scan du QR ;
+- `depends_on: postgres: condition: service_healthy`.
+
+**Service `postgres`** : volume de données + `healthcheck` avec `pg_isready` (sans lui, Evolution
+démarre en erreur avant que la base accepte les connexions).
+
+**Service `tailscale`** :
+- `TS_AUTHKEY=${TAILSCALE_AUTHKEY}`
+- `TS_HOSTNAME=${TAILSCALE_HOSTNAME}` — détermine la première moitié de l'adresse publique
+- `TS_SERVE_CONFIG=/config/funnel.json`
+- `TS_STATE_DIR=/var/lib/tailscale` **+ volume nommé** (voir piège 6.2)
+- `TS_USERSPACE=true` — évite `/dev/net/tun` et les privilèges réseau ; indispensable sous Docker
+  Desktop / Windows
+- monter le **dossier** de configuration, pas le fichier : `./tailscale:/config:ro` (piège 6.5)
+
+### `<infra>/tailscale/funnel.json`
+
+**Aucun commentaire, aucune clé étrangère** — Tailscale désérialise ce fichier (piège 6.6) :
+
+```json
+{
+  "TCP": { "443": { "HTTPS": true } },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": { "/": { "Proxy": "http://evolution:8080" } }
+    }
+  },
+  "AllowFunnel": { "${TS_CERT_DOMAIN}:443": true }
+}
+```
+
+`${TS_CERT_DOMAIN}` est substitué au démarrage par le FQDN réel du nœud : **ne jamais l'écrire en
+dur**. Le Funnel n'accepte que les ports **443, 8443 et 10000**.
+
+### `<infra>/keep-alive.ps1` (ou l'équivalent pour l'OS du poste)
+
+Script qui **verrouille le poste en service continu**. Il rapporte par défaut et ne modifie qu'avec
+`-Apply`. Il doit traiter :
+
+1. **mise en veille et veille prolongée → « jamais »** (elles suspendent les conteneurs et font
+   tomber la session : cause n°1 d'un service qui « marche la journée et plus le soir ») ;
+2. **démarrage automatique du moteur Docker** — après une coupure de courant, `unless-stopped` ne
+   sert à rien tant que Docker Desktop n'est pas lancé ;
+3. contrôle de l'état et de la politique de redémarrage des conteneurs ;
+4. détection d'un **montage concurrent** partageant les mêmes volumes.
+
+**Ne signaler que ce qui casse réellement le service.** Exemple vécu : l'arrêt des disques inactifs
+avait été signalé à tort — le disque se réveille au premier accès, cela ne coupe rien. Un faux
+signalement apprend à ignorer le rapport.
+
+Signaler sans les modifier : l'**ouverture de session automatique** (elle stocke un mot de passe) et
+les **heures d'activité des mises à jour système**.
+
+### `<infra>/check-gateway.ps1`
+
+Diagnostic de bout en bout, exécutable sans rien modifier. Il vérifie **dans cet ordre**, avec pour
+chaque échec la manœuvre correspondante :
+
+1. la passerelle répond ;
+2. la clé API est acceptée ;
+3. l'instance existe et la session est connectée ;
+4. **le webhook est déclaré vers le bon domaine** (piège 6.3) ;
+5. l'endpoint webhook de l'application répond **401 sans jeton**.
+
+## 4. Partie B — Intégration applicative
+
+### Variables d'environnement (côté serveur uniquement)
+
+| Variable | Rôle |
+| --- | --- |
+| `EVOLUTION_BASE_URL` | adresse publique de la passerelle, **sans slash final** |
+| `EVOLUTION_API_KEY` | identique à `AUTHENTICATION_API_KEY` de la passerelle |
+| `EVOLUTION_INSTANCE` | nom de l'instance |
+| `EVOLUTION_WEBHOOK_TOKEN` | secret **différent** de la clé API, pour authentifier les webhooks entrants |
+
+**`EVOLUTION_WEBHOOK_URL` ne doit PAS être définie en production** : l'application dérive l'adresse
+de son propre domaine. La définir par erreur avec la valeur locale est le piège 6.3.
+
+**Aucune de ces variables ne doit porter le préfixe public du framework** (`NEXT_PUBLIC_`, `VITE_`,
+`PUBLIC_`…) : cela publierait la clé de la passerelle dans le navigateur de chaque visiteur.
+
+### Module client (serveur)
+
+Fonctions attendues, toutes côté serveur :
+
+- `sendText(recipients, message)` — envoi, avec **temporisation entre destinataires** ;
+- `sessionState()` — état de la session (`open`, `connecting`, `close`) + numéro lié ;
+- `createInstance(webhookUrl)` — **idempotent** : doit avaler « already exists » ;
+- `setWebhook(webhookUrl)` — réenregistre le webhook **sans toucher à la session en cours** ;
+- `logoutInstance()`, `restartInstance()`.
+
+Charge utile du webhook à enregistrer :
+
+```json
+{
+  "enabled": true,
+  "url": "<URL publique de l'app>/api/whatsapp/webhook",
+  "byEvents": false,
+  "headers": {
+    "Authorization": "Bearer <EVOLUTION_WEBHOOK_TOKEN>",
+    "Content-Type": "application/json"
+  },
+  "events": ["MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE"]
+}
+```
+
+### Routes serveur
+
+| Route | Rôle |
+| --- | --- |
+| `POST /api/whatsapp/send` | **Seul chemin détenant la clé.** Limite le nombre de destinataires par appel, temporise les envois groupés. |
+| `POST /api/whatsapp/webhook` | Vérifie le `Bearer`, **et que le champ `server_url` du corps correspond à `EVOLUTION_BASE_URL`**. Répond `401` sans jeton, `403` si `server_url` diffère. |
+| `GET /api/whatsapp/status` | État de session pour l'interface. Ne renvoie **jamais** la clé. |
+| `POST /api/whatsapp/session` | Actions explicites : `setup`, `connect`, `logout`, `restart`. |
+
+`setup` doit enchaîner `createInstance(url)` **puis** `setWebhook(url)`, et rester exécutable **sur
+une session déjà ouverte**.
+
+### Interface
+
+Un panneau de réglages affichant : état de la session, numéro lié, instance masquée, hôte de la
+passerelle, **et si le webhook pointe bien vers cette application**.
+
+Boutons requis — **y compris quand la session est ouverte** (piège 6.4) :
+
+- **Connecter** (QR code) et **Nouveau QR code** ;
+- **Réenregistrer le webhook** ← indispensable en session ouverte ;
+- **Redémarrer la session**, **Déconnecter** (avec confirmation).
+
+Ne jamais afficher « la passerelle est prête » si le webhook ne pointe pas vers l'application :
+les messages partiraient et les statuts resteraient bloqués sur `queued`, l'écran affirmant que tout
+va bien.
+
+### Envois automatiques
+
+S'il existe des alertes automatiques (événement métier → message) :
+
+- **fire-and-forget**, sans jamais lever d'exception : une passerelle éteinte ne doit casser ni
+  l'action métier ni la transaction déjà écrite ;
+- **déduplication** par clé, **relâchée en cas d'échec** pour qu'une prochaine tentative reparte ;
+- ne jamais journaliser la clé ni le corps complet en clair.
+
+## 5. Partie C — Sécurité, non négociable
+
+- La clé de la passerelle ne quitte **jamais** le serveur.
+- Le webhook entrant est authentifié par `Bearer`, **et** par correspondance de `server_url`.
+- Le fichier de secrets de l'infrastructure est couvert par `.gitignore`, et **n'est pas dans Git** :
+  prévoir explicitement son transport lors d'un déménagement.
+- **Protection du numéro** : n'écrire qu'à des personnes qui attendent quelque chose de
+  l'organisation ; monter en charge progressivement (~50 messages/jour la première semaine) ; ne
+  jamais désactiver la temporisation des envois groupés. **Un numéro banni par WhatsApp l'est sans
+  recours.** Utiliser un numéro dédié.
+
+## 6. Partie D — Pièges connus (les respecter dès le départ)
+
+### 6.1 `SERVER_URL` doit correspondre au caractère près
+C'est la valeur inscrite dans le champ `server_url` de chaque webhook, comparée par l'application.
+Un slash final en trop ⇒ **tous les statuts de remise rejetés en 403**.
+
+### 6.2 Le volume d'état Tailscale rend l'URL stable
+Sans lui, le nœud se réenregistre à chaque démarrage et reçoit un nom suffixé (`-1`, `-2`…).
+**L'adresse publique change** et l'application n'atteint plus rien. Ce volume est aussi important
+que celui de la session WhatsApp.
+
+### 6.3 Le webhook survit aux déménagements — et pointe vers l'ancienne adresse
+Il est stocké **sur la passerelle**, pas dans l'application. Après un passage de `localhost` à la
+production, il pointe encore vers la machine de développement. Symptôme : les messages partent, les
+statuts restent sur `queued`, **aucune erreur nulle part**. C'est la raison d'être du contrôle n°4
+de `check-gateway`.
+
+### 6.4 Le bouton de réenregistrement doit exister en session ouverte
+Erreur vécue : il n'était rendu que si la session était **fermée**. Session ouverte + webhook
+périmé = le cas qui a besoin du bouton, et celui où il disparaissait. Le seul contournement était de
+délier le téléphone — casser une session saine pour corriger une URL.
+
+### 6.5 Monter le **dossier** de configuration, pas le fichier
+La documentation Tailscale l'impose : un bind-mount de fichier unique empêche le conteneur de voir
+les modifications ultérieures.
+
+### 6.6 `funnel.json` ne supporte aucun commentaire
+Tailscale le désérialise. Mettre les explications dans un `README.md` voisin.
+
+### 6.7 **`tailscale funnel status` ment** — le piège le plus coûteux
+Sans l'attribut `funnel` accordé par les ACL, le conteneur démarre, applique sa configuration,
+**obtient même son certificat TLS**, et affiche `# Funnel on: https://…`. Cet affichage vient du
+fichier **local**, qui s'applique quoi qu'il arrive. Le plan de contrôle, lui, refuse silencieusement
+de publier le DNS public : l'adresse ne résout nulle part, sans le moindre message d'erreur.
+
+**La seule vérification qui fasse foi :**
+
+```bash
+docker exec <conteneur-tailscale> tailscale status --json | grep funnel
+```
+
+Doit contenir `funnel` **et** `funnel-ports?ports=443,8443,10000`. Si `https` est présent mais pas
+`funnel`, le certificat fonctionnera et le Funnel non — c'est exactement le symptôme observé.
+
+### 6.8 Deux montages Compose peuvent partager les mêmes volumes
+Deux fichiers dans le même dossier résolvent le **même nom de projet**, donc les **mêmes volumes**.
+Avantage : basculer d'un montage d'essai vers la production **conserve la session WhatsApp**, sans
+rescanner le QR. Danger : les démarrer ensemble met deux passerelles et deux bases sur les mêmes
+données. Documenter l'arrêt préalable, et le détecter dans le script de contrôle.
+
+### 6.9 Le mot de passe Postgres ne peut plus changer
+Il n'est appliqué qu'à l'**initialisation** du volume. Le modifier ensuite ⇒ la base rejette la
+connexion et la passerelle ne démarre plus. Le conserver tel quel lors d'une bascule qui réutilise
+le volume.
+
+### 6.10 Déménager la passerelle : supprimer l'ancien nœud **d'abord**
+Tailscale n'attribue jamais deux fois le même nom. Tant que l'ancien nœud existe, le nouveau devient
+`<nom>-1` et **l'adresse publique change**. Supprimer l'ancien nœud dans la console **avant** de
+démarrer le nouveau ⇒ l'adresse reste identique et l'hébergeur n'a **rien** à savoir du
+déménagement. Oublier cette étape *ressemble* à une réussite : tout démarre, tout paraît sain, seule
+l'adresse a discrètement changé.
+
+## 7. Partie E — Étapes manuelles à réclamer à l'utilisateur
+
+Tu **ne peux pas** faire ces étapes toi-même. Arrête-toi et demande-les explicitement, avec les
+valeurs exactes à reporter :
+
+1. Créer un compte **Tailscale** gratuit (plan Personal) et relever le **nom du tailnet**
+   (`tailXXXX.ts.net`) dans **DNS**.
+2. **DNS → MagicDNS actif**, puis **Enable HTTPS**.
+3. **Access controls** — ajouter `nodeAttrs` **à l'intérieur** de la politique existante :
+   ```jsonc
+   "nodeAttrs": [
+     { "target": ["autogroup:member"], "attr": ["funnel"] },
+   ],
+   ```
+   ⚠️ Le fichier ne peut contenir **qu'un seul** objet de haut niveau. Coller ce bloc *au-dessus* de
+   la politique existante produit `invalid character '{' after top-level value`. Les tailnets récents
+   utilisent `grants`, les anciens `acls` : ne pas mettre les deux.
+4. **Settings → Keys → Generate auth key**, cochée **Reusable**, **jamais Ephemeral** (un nœud
+   éphémère disparaît hors ligne et revient sous un autre nom, changeant l'adresse).
+5. Après le premier démarrage : **Machines → `<nœud>` → Disable key expiry**. Sans ce clic, le nœud
+   se déconnecte au bout de quelques mois et **les envois s'arrêtent sans aucun avertissement**.
+6. Renseigner les variables d'environnement chez l'hébergeur, **puis redéployer** — elles ne sont
+   lues qu'au déploiement.
+
+`TAILSCALE_HOSTNAME` ne se récupère nulle part : **c'est un nom choisi**. L'adresse publique vaut
+`https://` + ce nom + `.` + le nom du tailnet.
+
+## 8. Critères d'acceptation
+
+Ne déclare la tâche terminée que si **tout** ceci est vérifié, en montrant les sorties réelles :
+
+- [ ] `docker compose config` valide, images **épinglées**, trois conteneurs `unless-stopped` ;
+- [ ] `tailscale status --json` contient **`funnel`** et `funnel-ports` ;
+- [ ] le nom obtenu est **exactement** celui attendu, **sans suffixe `-1`** ;
+- [ ] l'adresse publique répond en HTTPS **depuis l'extérieur du réseau** (pas seulement depuis le
+      poste : un test local ne prouve rien) ;
+- [ ] la clé API est acceptée à travers le tunnel ;
+- [ ] le webhook est déclaré vers le **domaine de production**, pas vers `localhost` ni
+      `host.docker.internal` ;
+- [ ] l'endpoint webhook répond **401 sans jeton** ;
+- [ ] un message réel atteint **`delivered`** — franchir `queued` est la seule preuve que la boucle
+      est complète ;
+- [ ] la suite de tests du projet passe, le build de production réussit ;
+- [ ] le script de service continu a été exécuté sur le poste hôte ;
+- [ ] la documentation créée mentionne **explicitement** la contrepartie : poste éteint = aucun
+      message, sans alerte.
+
+## 9. Ce qu'il ne faut pas faire
+
+- Ne **pas** proposer la WhatsApp Business API « au cas où » : elle impose des modèles à faire
+  approuver et une facturation par message, tout ce que ce montage évite.
+- Ne **pas** utiliser le tag `latest` pour la passerelle.
+- Ne **pas** annoncer un coût sans le vérifier : le prix affiché d'un hébergeur géré est souvent le
+  plancher de l'abonnement, pas la facture d'un service tournant en continu.
+- Ne **pas** minimiser la dépendance au poste allumé : c'est le vrai prix de la gratuité, et
+  l'utilisateur doit le décider en connaissance de cause.
