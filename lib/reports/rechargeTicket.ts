@@ -33,42 +33,48 @@ import { TICKET_PAGE_CSS, escapeHtml, printDocument } from "@/lib/printTemplates
 const TICKET_CSS = `
   ${TICKET_PAGE_CSS}
 
-  body { padding: 1mm 0; font-size: 12px; line-height: 1.3; }
+  /* Tout est noir franc et gras. Une tête thermique ne sait pas nuancer : un
+     gris est rendu en trame de points, qui à 203 ppp sort délavé et pâlit
+     encore avec le papier. La hiérarchie se joue donc sur la graisse et la
+     taille — jamais sur la couleur. */
+  body { padding: 1mm 0; font-size: 12px; line-height: 1.3; font-weight: 600; }
 
   /* Le rectangle unique : tout le bon tient dedans, sur toute la largeur. */
-  .bon { width: 100%; border: 1px solid #000; border-radius: 3px; padding: 1.5mm 2mm; }
+  .bon { width: 100%; border: 1.2px solid #000; border-radius: 3px; padding: 1.5mm 2mm; }
 
-  .bon .head { display: flex; align-items: center; gap: 2mm; padding-bottom: 1.5mm; border-bottom: 1px solid #000; }
+  .bon .head { display: flex; align-items: center; gap: 2mm; padding-bottom: 1.5mm; border-bottom: 1.2px solid #000; }
   .bon .logo, .bon .logo-fallback { width: 14mm; height: 14mm; flex: none; }
   .bon .logo { object-fit: contain; }
-  .bon .logo-fallback { display: flex; align-items: center; justify-content: center; font-size: 20px; border: 1px dashed #999; border-radius: 3px; }
+  .bon .logo-fallback { display: flex; align-items: center; justify-content: center; font-size: 20px; border: 1px dashed #000; border-radius: 3px; }
   .bon .school { min-width: 0; }
   .bon .school b { display: block; font-size: 14px; font-weight: 800; line-height: 1.15; }
-  .bon .school span { display: block; font-size: 10px; color: #333; line-height: 1.25; }
+  .bon .school span { display: block; font-size: 10px; font-weight: 700; line-height: 1.25; }
 
   .bon .title { margin: 1.5mm 0 0; text-align: center; font-size: 12.5px; font-weight: 800; letter-spacing: .4px; text-transform: uppercase; }
-  .bon .num { text-align: center; font-family: monospace; font-size: 10px; color: #333; }
+  .bon .num { text-align: center; font-family: monospace; font-size: 10px; font-weight: 700; }
 
   /* Sections : un filet pointillé, pas un cadre de plus — chaque bordure
      supplémentaire coûte deux millimètres de papier. */
-  .bon .sec { margin-top: 1.5mm; padding-top: 1.2mm; border-top: 1px dashed #777; }
-  .bon .sec-title { font-size: 9.5px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; color: #333; margin-bottom: .8mm; }
+  .bon .sec { margin-top: 1.5mm; padding-top: 1.2mm; border-top: 1px dashed #000; }
+  .bon .sec-title { font-size: 9.5px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; margin-bottom: .8mm; }
 
   /* « table-layout: fixed » : sans lui, un identifiant long écrase la colonne des
      étiquettes au lieu de revenir à la ligne. */
   .bon table { width: 100%; table-layout: fixed; border-collapse: collapse; margin: 0; }
-  .bon th, .bon td { padding: .5mm 0; border: 0; background: none; vertical-align: top; text-transform: none; letter-spacing: 0; font-size: 11.5px; line-height: 1.25; }
-  .bon th { width: 34%; text-align: start; font-weight: 500; color: #333; }
-  .bon td { text-align: end; font-weight: 700; word-break: break-word; }
+  .bon th, .bon td { padding: .5mm 0; border: 0; background: none; vertical-align: top; text-transform: none; letter-spacing: 0; font-size: 11.5px; line-height: 1.25; color: #000; }
+  /* L'étiquette reste plus légère que la valeur — 700 contre 800 — sinon la
+     colonne de gauche pèse autant que la donnée qu'on cherche. */
+  .bon th { width: 34%; text-align: start; font-weight: 700; }
+  .bon td { text-align: end; font-weight: 800; word-break: break-word; }
   .bon td.mono { font-family: monospace; font-size: 11px; }
 
   /* Le montant : la seule ligne qu'on doit pouvoir lire à bout de bras. */
-  .bon .amount { display: flex; justify-content: space-between; align-items: baseline; gap: 2mm; margin-top: 1.5mm; padding: 1.2mm 2mm; border: 1.5px solid #000; border-radius: 3px; }
+  .bon .amount { display: flex; justify-content: space-between; align-items: baseline; gap: 2mm; margin-top: 1.5mm; padding: 1.2mm 2mm; border: 1.8px solid #000; border-radius: 3px; }
   .bon .amount span { font-size: 10.5px; font-weight: 800; letter-spacing: .3px; text-transform: uppercase; }
   .bon .amount strong { font-size: 18px; font-weight: 800; white-space: nowrap; }
 
-  .bon .stamp { margin-top: 1.5mm; padding-top: 1.2mm; border-top: 1px dashed #777; display: flex; justify-content: space-between; gap: 2mm; font-size: 10px; }
-  .bon .note { margin: 1.2mm 0 0; text-align: center; font-size: 9px; font-style: italic; color: #333; line-height: 1.25; }
+  .bon .stamp { margin-top: 1.5mm; padding-top: 1.2mm; border-top: 1px dashed #000; display: flex; justify-content: space-between; gap: 2mm; font-size: 10px; font-weight: 700; }
+  .bon .note { margin: 1.2mm 0 0; text-align: center; font-size: 9px; font-weight: 700; font-style: italic; line-height: 1.25; }
 `;
 
 const LABELS = {

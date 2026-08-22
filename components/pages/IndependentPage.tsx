@@ -129,22 +129,24 @@ const RECEIPT_LABELS = {
  *  large avant de le réduire au tiers de sa taille sur le rouleau. */
 const TICKET_CSS = `
   ${TICKET_PAGE_CSS}
-  body { padding: 1mm 0; color: #111; font-size: 12px; }
+  /* Noir franc et gras partout : une tête thermique trame les gris en points
+     et les sort délavés, la hiérarchie se joue sur la graisse et la taille. */
+  body { padding: 1mm 0; font-size: 12px; font-weight: 600; }
   .ticket { width: 100%; }
   .ticket .school { display: block; font-size: 1.25em; font-weight: 800; letter-spacing: .3px; }
-  .ticket .head { text-align: center; line-height: 1.35; padding-bottom: 6px; border-bottom: 1px dashed #999; }
-  .ticket .head span { display: block; font-size: .85em; color: #444; }
+  .ticket .head { text-align: center; line-height: 1.35; padding-bottom: 6px; border-bottom: 1px dashed #000; }
+  .ticket .head span { display: block; font-size: .85em; font-weight: 700; }
   .ticket .title { margin: 7px 0 2px; text-align: center; font-weight: 800; font-size: 1.02em; letter-spacing: .5px; }
-  .ticket .num { text-align: center; font-family: monospace; font-size: .85em; color: #444; margin-bottom: 7px; }
+  .ticket .num { text-align: center; font-family: monospace; font-size: .85em; font-weight: 700; margin-bottom: 7px; }
   .ticket table { width: 100%; border-collapse: collapse; font-size: .92em; margin: 0; }
-  .ticket th, .ticket td { padding: 2.5px 0; border: 0; background: none; text-transform: none; letter-spacing: 0; font-size: 1em; }
-  .ticket th { width: 38%; text-align: start; font-weight: 600; color: #555; }
-  .ticket td { text-align: end; font-weight: 700; color: #111; }
-  .ticket .total { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding: 6px 8px; border: 1.5px solid #111; border-radius: 4px; font-weight: 800; font-size: 1.1em; }
+  .ticket th, .ticket td { padding: 2.5px 0; border: 0; background: none; text-transform: none; letter-spacing: 0; font-size: 1em; color: #000; }
+  .ticket th { width: 38%; text-align: start; font-weight: 700; }
+  .ticket td { text-align: end; font-weight: 800; }
+  .ticket .total { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding: 6px 8px; border: 1.8px solid #000; border-radius: 4px; font-weight: 800; font-size: 1.1em; }
   .ticket .total.free { border-style: dashed; }
-  .ticket .note { margin: 5px 0 0; text-align: center; font-size: .82em; font-style: italic; color: #444; }
-  .ticket .sign { margin-top: 14px; padding-top: 4px; border-top: 1px dashed #999; text-align: center; font-size: .8em; color: #555; }
-  .ticket .foot { margin-top: 8px; text-align: center; font-size: .75em; color: #777; line-height: 1.4; }
+  .ticket .note { margin: 5px 0 0; text-align: center; font-size: .82em; font-weight: 700; font-style: italic; }
+  .ticket .sign { margin-top: 14px; padding-top: 4px; border-top: 1px dashed #000; text-align: center; font-size: .8em; font-weight: 700; }
+  .ticket .foot { margin-top: 8px; text-align: center; font-size: .75em; font-weight: 700; line-height: 1.4; }
 `;
 
 /** Receipt number, generated at print time (module scope: never during render). */

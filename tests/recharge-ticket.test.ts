@@ -84,6 +84,16 @@ describe("buildRechargeTicket — format 80 mm", () => {
     expect(html).toContain("width: 72mm");
   });
 
+  it("n'imprime qu'en noir franc, et jamais en maigre", () => {
+    // Une tête thermique ne nuance pas : un gris est tramé en points, et à
+    // 203 ppp la ligne sort délavée — d'autant plus sur du papier bon marché.
+    // Toute couleur de texte vaut donc #000, et la hiérarchie se joue sur la
+    // graisse (700 pour l'étiquette, 800 pour la donnée) et sur la taille.
+    const style = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
+    expect(style.match(/(?<![-w])color:s*#(?!000)[0-9a-f]{3,6}/gi) ?? []).toEqual([]);
+    expect(style).not.toMatch(/font-weight:s*[1-5]00/);
+  });
+
   it("n'imprime rien de la facture A4 précédente", () => {
     // Ni dans le corps, ni dans la feuille de style : le bon est un document
     // autonome, aucune règle de la facture A4 ne l'accompagne.
