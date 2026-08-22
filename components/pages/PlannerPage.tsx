@@ -25,7 +25,8 @@ import {
   Sparkles,
   X
 } from "lucide-react";
-import type { ScheduleSession, Day, Subscription, Teacher } from "@/lib/types";
+import type { ScheduleSession, Day, SeanceAudience, Subscription, Teacher } from "@/lib/types";
+import { checkOpenSeanceAudience } from "@/lib/seanceAudience";
 import { DAY_LABELS_FR, formatDateFr, salleStartClashes, sessionSalleIds } from "@/lib/helpers";
 import { printHtmlDocument } from "@/lib/print";
 import {
@@ -167,6 +168,10 @@ export function PlannerPage() {
   // "Séance libre offerte": the whole créneau is free — every présence recorded
   // on it is offered (no débit, no encaissement, no rémunération de l'enseignant).
   const [openIsFree, setOpenIsFree] = useState(false);
+  // Public du créneau : qui la réception pourra encaisser dessus (voir
+  // lib/seanceAudience.ts). Un créneau neuf est réservé à ses propres classes
+  // et groupes — c'est le réglage qu'on peut toujours élargir ensuite.
+  const [openAudience, setOpenAudience] = useState<SeanceAudience>("enrolled");
   const [savingOpenSeance, setSavingOpenSeance] = useState(false);
   // "Vue" filter: all timings / regular courses only / séances libres only
   const [kindFilter, setKindFilter] = useState<"all" | "cours" | "open">("all");
@@ -307,6 +312,44 @@ export function PlannerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [openPeriodStart, openPeriodEnd, openDays]);
 
+  /**
+   * Combien d'élèves chaque public laisserait entrer, avec les classes et les
+   * groupes cochés à l'instant. La réception ne devine pas ce que « toute la
+   * filière » ajoute : autant le compter devant elle, sur ses propres données.
+   * Calculé uniquement quand la fenêtre est ouverte.
+   */
+  const audienceCounts = useMemo(() => {
+    if (!isOpenSeanceModalOpen) return { enrolled: 0, filiere: 0 };
+    const draft: ScheduleSession = {
+      id: editingOpenSession?.id ?? "draft",
+      classId: openClassIds[0] ?? "",
+      moduleId: openModuleId,
+      groupId: openGroupIds[0] ?? "",
+      salleId: openSalleIds[0] ?? "",
+      teacherId: openTeacherId,
+      days: openDays,
+      startTime: `${openStartHour}:${openStartMin}`,
+      endTime: `${openEndHour}:${openEndMin}`,
+      isOpen: true,
+      classIds: openClassIds,
+      groupIds: openGroupIds,
+      salleIds: openSalleIds,
+    };
+    const countOf = (audience: SeanceAudience) =>
+      students.filter(
+        (student) =>
+          checkOpenSeanceAudience({
+            session: { ...draft, openAudience: audience },
+            student,
+            sessions,
+            subscriptions,
+            classes,
+          }).allowed,
+      ).length;
+    return { enrolled: countOf("enrolled"), filiere: countOf("filiere") };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpenSeanceModalOpen, openClassIds, openGroupIds, students, sessions, subscriptions, classes]);
+
   /** Readable, self-describing name for a séance libre timing — the format the
    *  Abonnements / Séances Libres screens display. */
   const buildOpenTitle = () => {
@@ -343,6 +386,7 @@ export function PlannerPage() {
     setOpenPassagerPhone("");
     setOpenTitleOverride("");
     setOpenIsFree(false);
+    setOpenAudience("enrolled");
   };
 
   const openEditOpenSeance = (s: ScheduleSession) => {
@@ -369,6 +413,9 @@ export function PlannerPage() {
     setOpenPassagerPhone(t?.isPassager ? t.phone : "");
     setOpenTitleOverride(s.title ?? "");
     setOpenIsFree(!!s.isFree);
+    // Créneau d'avant le réglage : le formulaire propose le public restreint,
+    // et c'est l'enregistrement qui le lui donnera vraiment.
+    setOpenAudience(s.openAudience ?? "enrolled");
     setIsOpenSeanceModalOpen(true);
     setIsDetailsOpen(false);
   };
@@ -476,6 +523,7 @@ export function PlannerPage() {
         salleIds: openSalleIds,
         openPrice: priceToWrite,
         isFree: openIsFree,
+        openAudience,
       };
 
       if (editingOpenSession) {
@@ -1200,6 +1248,63 @@ export function PlannerPage() {
                 </div>
               </div>
             ))}
+
+            {/* Public du créneau : à qui la réception pourra le vendre. Les cases
+                ci-dessus décrivaient le créneau ; celle-ci dit qui y entre. */}
+            <div>
+              <label className="block text-xs font-semibold text-muted mb-1.5 font-sans">
+                Qui peut assister à cette séance libre ? *
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {([
+                  {
+                    key: "enrolled",
+                    title: "Ses classes et groupes",
+                    count: audienceCounts.enrolled,
+                  },
+                  {
+                    key: "filiere",
+                    title: "Toute la filière",
+                    count: audienceCounts.filiere,
+                  },
+                ] as const).map((choice) => {
+                  const active = openAudience === choice.key;
+                  return (
+                    <button
+                      key={choice.key}
+                      type="button"
+                      onClick={() => setOpenAudience(choice.key)}
+                      className={`p-2.5 rounded-xl border text-start text-xs transition-all ${
+                        active
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-line bg-surface text-muted hover:bg-primary-50/40"
+                      }`}
+                    >
+                      <span className="block font-bold">{choice.title}</span>
+                      <span className={`mt-0.5 block text-[10px] ${active ? "text-primary/80" : "text-muted"}`}>
+                        {choice.count} élève(s) concerné(s)
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-muted mt-1.5 leading-relaxed">
+                {openAudience === "enrolled" ? (
+                  <>
+                    Seuls les élèves dont l&apos;emploi du temps passe par les{" "}
+                    <strong>classes ET les groupes cochés</strong> ci-dessus pourront être
+                    encaissés sur ce créneau.
+                  </>
+                ) : (
+                  <>
+                    Tout élève d&apos;une classe de la <strong>même filière</strong> pourra être
+                    encaissé dessus, même s&apos;il suit un autre groupe ou un autre emploi du temps.
+                  </>
+                )}{" "}
+                Un <strong>passager</strong> occasionnel, lui, reste accepté dans les deux cas : il
+                n&apos;a ni classe ni filière.
+              </p>
+            </div>
 
             {/* Teacher: existing or passager */}
             <div>

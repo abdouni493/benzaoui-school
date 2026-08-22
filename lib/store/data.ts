@@ -291,6 +291,7 @@ const sessionsMapper = makeMapper<ScheduleSession>([
   ["salleIds", "salle_ids"],
   ["openPrice", "open_price"],
   ["isFree", "is_free"],
+  ["openAudience", "open_audience"],
 ]);
 
 const subscriptionsMapper = makeMapper<Subscription>([

@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import type { IndependentSession, Student } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
+import { checkOpenSeanceAudience } from "@/lib/seanceAudience";
 import { TICKET_PAGE_CSS, fmtDate, fmtDateTime, printDocument } from "@/lib/printTemplates";
 import { formatDateFr } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
@@ -300,6 +301,26 @@ export function IndependentPage() {
 
   const isStudentSeance = (o: SeanceOption) => studentSessionIds.has(o.sessionId);
 
+  /**
+   * Le public du créneau, tel que l'Emploi du Temps l'a réglé : cet élève-là
+   * a-t-il le droit d'être encaissé dessus ? Rien à contrôler tant qu'aucun
+   * élève n'est choisi — un passager n'a ni classe ni filière, et la séance
+   * libre existe précisément pour l'encaisser.
+   */
+  const audienceVerdictFor = (o: SeanceOption) => {
+    if (!selectedStudent) return undefined;
+    const session = sessions.find((s) => s.id === o.sessionId);
+    if (!session) return undefined;
+    const verdict = checkOpenSeanceAudience({
+      session,
+      student: selectedStudent,
+      sessions,
+      subscriptions,
+      classes,
+    });
+    return verdict.allowed ? undefined : verdict;
+  };
+
   const filteredOptions = seanceOptions
     .filter((o) => {
       if (itemKindTab !== "all" && o.kind !== itemKindTab) return false;
@@ -328,6 +349,9 @@ export function IndependentPage() {
       )
       .slice(0, 25);
   }, [students, studentSearchQuery]);
+
+  /** Le créneau choisi exclut-il l'élève choisi ? (undefined = tout va bien) */
+  const selectedOutOfAudience = selectedItem ? audienceVerdictFor(selectedItem) : undefined;
 
   /** Tariff of the picked séance, reduction/override included. */
   const listedPrice = customPrice ?? selectedItem?.price ?? 0;
@@ -422,6 +446,22 @@ export function IndependentPage() {
   const handleSubmit = () => {
     if (!selectedItem) {
       alert("Veuillez sélectionner un cours ou un créneau de séance libre.");
+      return;
+    }
+
+    // Le créneau réserve sa place : un élève hors de son public n'y entre pas.
+    // Le contrôle vient AVANT l'encaissement — refuser après avoir pris
+    // l'argent obligerait la réception à rembourser.
+    const refused = audienceVerdictFor(selectedItem);
+    if (refused) {
+      alert(
+        `Cet élève n'est pas dans le public de ce créneau.
+
+${refused.reason}
+
+` +
+          "Choisissez un autre créneau, ou élargissez son public depuis l'Emploi du Temps.",
+      );
       return;
     }
 
@@ -1170,6 +1210,10 @@ export function IndependentPage() {
                 ) : (
                   filteredOptions.map((opt) => {
                     const isSel = selectedItem?.key === opt.key;
+                    // Créneau dont le public exclut l'élève choisi : il reste
+                    // visible et cliquable — la réception doit pouvoir lire
+                    // POURQUOI il ne convient pas — mais il part grisé.
+                    const outOfAudience = audienceVerdictFor(opt);
                     return (
                       <button
                         key={opt.key}
@@ -1178,7 +1222,7 @@ export function IndependentPage() {
                           isSel
                             ? "bg-primary/10 border-primary/40 text-ink"
                             : "hover:bg-primary-50 text-ink border-transparent"
-                        }`}
+                        } ${outOfAudience ? "opacity-60" : ""}`}
                       >
                         <div className="flex justify-between items-start gap-2">
                           <strong className="font-bold block min-w-0 truncate">
@@ -1192,6 +1236,11 @@ export function IndependentPage() {
                             {opt.sessionIsFree && (
                               <Badge tone="warning" className="ml-1.5 text-[8px] px-1 py-0 align-middle">
                                 🎁 Offerte
+                              </Badge>
+                            )}
+                            {outOfAudience && (
+                              <Badge tone="danger" className="ml-1.5 text-[8px] px-1 py-0 align-middle">
+                                Hors public
                               </Badge>
                             )}
                           </strong>
@@ -1235,6 +1284,21 @@ export function IndependentPage() {
                     <strong className="text-primary">{selectedItem.price} DA</strong>
                   </span>
                 </div>
+
+                {/* Public du créneau : le motif se lit AVANT l'encaissement,
+                    pas dans une alerte au moment d'enregistrer. */}
+                {selectedOutOfAudience && (
+                  <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-xs">
+                    <strong className="block text-danger">
+                      Cet élève n&apos;est pas dans le public de ce créneau
+                    </strong>
+                    <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                      {selectedOutOfAudience.reason} Choisissez un autre créneau, ou
+                      élargissez son public depuis l&apos;<strong>Emploi du Temps</strong>. Un
+                      passager occasionnel, lui, reste encaissable dessus.
+                    </span>
+                  </div>
+                )}
 
                 {/* Séance offerte: nobody is paid on it — neither the school,
                     nor the teacher who animates it. A créneau flagged « offert »

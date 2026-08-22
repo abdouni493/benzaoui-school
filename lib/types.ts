@@ -179,6 +179,16 @@ export interface WorkerShift {
   createdAt: string;
 }
 
+/**
+ * Qui peut assister à une séance libre :
+ *   · "enrolled" — seuls les élèves dont l'emploi du temps passe par les
+ *     classes ET les groupes cochés à la création du créneau ;
+ *   · "filiere"  — tout élève d'une classe de la même filière, même s'il suit
+ *     un autre groupe ou un autre créneau.
+ * La règle est appliquée par lib/seanceAudience.ts.
+ */
+export type SeanceAudience = "enrolled" | "filiere";
+
 export interface ScheduleSession {
   id: string;
   classId: string;
@@ -208,6 +218,14 @@ export interface ScheduleSession {
    * Only meaningful when `isOpen` is true.
    */
   isFree?: boolean;
+  /**
+   * Public du créneau : qui la réception peut encaisser dessus. Absent sur les
+   * créneaux créés avant le réglage — aucune restriction n'est alors appliquée,
+   * le guichet accepte n'importe quel élève comme il l'a toujours fait. Les
+   * passagers, eux, ne sont jamais concernés : ils n'ont ni classe ni filière.
+   * Only meaningful when `isOpen` is true.
+   */
+  openAudience?: SeanceAudience;
 }
 
 export interface Subscription {
