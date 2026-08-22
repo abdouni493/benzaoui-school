@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import type { IndependentSession, Student } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
-import { fmtDate, fmtDateTime, printDocument } from "@/lib/printTemplates";
+import { TICKET_PAGE_CSS, fmtDate, fmtDateTime, printDocument } from "@/lib/printTemplates";
 import { formatDateFr } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 
@@ -124,11 +124,12 @@ const RECEIPT_LABELS = {
 
 /** 80 mm cash-drawer ticket: the séance libre receipt is handed over at the
  *  desk in a second, so it prints as a narrow slip instead of a full A4 page.
- *  Appended AFTER `PRINT_BASE_CSS`, so these rules win over the A4 chrome. */
+ *  Document autonome (`baseCss: false`) : le bon n'hérite plus du
+ *  `@page { size: A4 }` commun, qui faisait composer le ticket sur 210 mm de
+ *  large avant de le réduire au tiers de sa taille sur le rouleau. */
 const TICKET_CSS = `
-  @page { size: 80mm auto; margin: 3mm; }
-  @media print { body { padding: 0; margin: 0; font-size: 10px; } }
-  body { width: 74mm; margin: 0 auto; padding: 6px 0; background: #fff; color: #111; font-size: 11px; }
+  ${TICKET_PAGE_CSS}
+  body { padding: 1mm 0; color: #111; font-size: 12px; }
   .ticket { width: 100%; }
   .ticket .school { display: block; font-size: 1.25em; font-weight: 800; letter-spacing: .3px; }
   .ticket .head { text-align: center; line-height: 1.35; padding-bottom: 6px; border-bottom: 1px dashed #999; }
@@ -605,6 +606,7 @@ export function IndependentPage() {
         lang: language,
         bodyHtml,
         extraCss: TICKET_CSS,
+        baseCss: false,
       }),
     );
   };

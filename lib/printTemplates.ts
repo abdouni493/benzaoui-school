@@ -88,12 +88,39 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/** Full-document wrapper: doctype, dir/lang, base CSS, body. */
+/** Feuille de page des tickets de caisse 80 mm, partagée par tous les bons.
+ *
+ * On écrivait `@page { size: 80mm auto; }` : cette valeur n'existe pas. La
+ * propriété `size` accepte `auto`, une ou deux longueurs, ou un format nommé —
+ * jamais une longueur ET `auto`. Le navigateur jetait donc la déclaration,
+ * gardait le `size: A4` de PRINT_BASE_CSS, composait le bon sur 210 mm de large,
+ * puis réduisait la page entière à la largeur du rouleau : le ticket sortait au
+ * tiers de sa taille, perdu au milieu du papier.
+ *
+ * `size: auto` est valide et laisse le pilote imposer sa bobine (80 × 210 mm sur
+ * une POS-80). Marges de page à zéro et corps centré sur 72 mm : les ~4 mm
+ * laissés de chaque côté sont exactement la zone que la tête thermique ne sait
+ * pas imprimer, donc le bon occupe toute la largeur utile sans être rogné.
+ */
+export const TICKET_PAGE_CSS = `
+  @page { size: auto; margin: 0; }
+  * { box-sizing: border-box; }
+  html { background: #fff; }
+  body { width: 72mm; max-width: 100%; margin: 0 auto; background: #fff; color: #000;
+         font-family: 'Segoe UI', Tahoma, Roboto, Helvetica, Arial, sans-serif; }
+`;
+
+/** Full-document wrapper: doctype, dir/lang, base CSS, body.
+ *
+ *  `baseCss: false` donne un document autonome — c'est ce que veulent les
+ *  tickets 80 mm : ni le `@page { size: A4 }` commun, ni le fond coloré, ni les
+ *  cadres de facture dont un bon de caisse n'utilise aucune règle. */
 export function printDocument(opts: {
   title: string;
   lang: Language;
   bodyHtml: string;
   extraCss?: string;
+  baseCss?: boolean;
 }): string {
   const dir = opts.lang === "ar" ? "rtl" : "ltr";
   return `<!DOCTYPE html>
@@ -101,7 +128,7 @@ export function printDocument(opts: {
   <head>
     <meta charset="utf-8" />
     <title>${escapeHtml(opts.title)}</title>
-    <style>${PRINT_BASE_CSS}${opts.extraCss ?? ""}</style>
+    <style>${opts.baseCss === false ? "" : PRINT_BASE_CSS}${opts.extraCss ?? ""}</style>
   </head>
   <body>${opts.bodyHtml}</body>
 </html>`;

@@ -72,18 +72,31 @@ describe("buildRechargeTicket — format 80 mm", () => {
   const html = buildRechargeTicket(base, AT);
 
   it("impose le rouleau de 80 mm, et pas l'A4 hérité du modèle commun", () => {
-    expect(html).toContain("@page { size: 80mm auto; margin: 3mm; }");
-    // La règle 80 mm doit venir APRÈS celle de PRINT_BASE_CSS pour l'emporter.
-    expect(html.lastIndexOf("size: 80mm auto")).toBeGreaterThan(html.indexOf("size: A4"));
-    expect(html).toContain("width: 74mm");
+    // « size: 80mm auto » n'existe pas : le navigateur jetait la déclaration,
+    // gardait le « size: A4 » du modèle commun, composait le bon sur 210 mm
+    // puis réduisait la page à la largeur du rouleau — le ticket sortait au
+    // tiers de sa taille. La feuille A4 ne doit donc plus être là du tout.
+    expect(html).toContain("@page { size: auto; margin: 0; }");
+    expect(html).not.toContain("size: A4");
+    expect(html).not.toContain("80mm auto");
+    // 72 mm centrés dans les 80 mm de la bobine : toute la largeur imprimable,
+    // les ~4 mm restants de chaque côté étant hors de portée de la tête.
+    expect(html).toContain("width: 72mm");
   });
 
   it("n'imprime rien de la facture A4 précédente", () => {
-    // On regarde le CORPS : la feuille de style commune décrit encore les
-    // cadres A4, mais aucune de ces règles n'est utilisée par le ticket.
-    const body = html.slice(html.indexOf("<body>"));
-    for (const gone of ["Modules Souscrits", "signature-block", "NIF:", "Art. Fiscal", "Reçu de Versement"]) {
-      expect(body).not.toContain(gone);
+    // Ni dans le corps, ni dans la feuille de style : le bon est un document
+    // autonome, aucune règle de la facture A4 ne l'accompagne.
+    for (const gone of [
+      "Modules Souscrits",
+      "signature-block",
+      "NIF:",
+      "Art. Fiscal",
+      "Reçu de Versement",
+      ".letterhead",
+      "doc-title-banner",
+    ]) {
+      expect(html).not.toContain(gone);
     }
   });
 
