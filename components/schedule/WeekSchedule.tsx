@@ -2,7 +2,7 @@
 
 import { useData } from "@/lib/store/data";
 import { useTranslation } from "@/lib/i18n/useTranslation";
-import { moduleName, teacherName, groupName, salleName } from "@/lib/helpers";
+import { moduleName, teacherName, groupName, salleName, visibleTimetableSessions } from "@/lib/helpers";
 import { DAYS, type Day, type ScheduleSession } from "@/lib/types";
 import { todayDayKey } from "@/lib/utils";
 import { cn } from "@/lib/utils";
@@ -12,8 +12,10 @@ export function WeekSchedule({ sessions }: { sessions: ScheduleSession[] }) {
   const { t } = useTranslation();
   const today = todayDayKey();
 
+  // Une séance libre expirée ne fait plus partie de la semaine affichée.
+  const shown = visibleTimetableSessions(sessions);
   const byDay = (day: Day) =>
-    sessions
+    shown
       .filter((s) => s.days.includes(day))
       .sort((a, b) => a.startTime.localeCompare(b.startTime));
 

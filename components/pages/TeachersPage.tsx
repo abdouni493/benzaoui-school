@@ -29,7 +29,7 @@ import { DAYS } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
 import { buildTeacherPaymentReport } from "@/lib/reports/teacherPayment";
 import { buildTeacherSettlementReceipt } from "@/lib/reports/teacherSettlement";
-import { DAY_LABELS_FR, formatDateFr, formatDays } from "@/lib/helpers";
+import { DAY_LABELS_FR, formatDateFr, formatDays, visibleTimetableSessions } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 
 /** One unpaid timing of a teacher: a (date, séance) pair with everyone who was
@@ -1496,21 +1496,26 @@ export function TeachersPage() {
                     </div>
                   </div>
 
-                  {/* Timings he is attached to — days of the week included */}
+                  {/* Timings he is attached to — days of the week included. Les
+                      séances libres expirées quittent l'emploi du temps affiché
+                      (l'historique financier plus bas les garde, lui). */}
                   <div className="border border-line rounded-2xl p-4 bg-surface">
                     <h4 className="font-bold text-ink mb-3 text-xs uppercase tracking-wider text-muted">
                       📅 Emplois du temps affectés
                     </h4>
-                    {myTimings.length === 0 ? (
-                      <p className="text-xs text-muted italic text-center py-6">Aucun créneau affecté.</p>
-                    ) : (
-                      <>
-                        {renderTimingRecap(myTimings)}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                          {myTimings.map((s) => renderTimingCard(s))}
-                        </div>
-                      </>
-                    )}
+                    {(() => {
+                      const shownTimings = visibleTimetableSessions(myTimings);
+                      return shownTimings.length === 0 ? (
+                        <p className="text-xs text-muted italic text-center py-6">Aucun créneau affecté.</p>
+                      ) : (
+                        <>
+                          {renderTimingRecap(shownTimings)}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {shownTimings.map((s) => renderTimingCard(s))}
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
 
                   <div className="flex justify-between items-center pt-3 border-t border-line">
@@ -1563,7 +1568,9 @@ export function TeachersPage() {
 
             {/* TAB CONTENT: Info / Schedule */}
             {!selectedTeacher.isPassager && detailsTab === "info" && (() => {
-              const myTimings = sessions
+              // Emploi du temps affiché : les séances libres expirées en sont
+              // retirées (l'onglet « Historique des Séances » garde le passé).
+              const myTimings = visibleTimetableSessions(sessions)
                 .filter((s) => s.teacherId === selectedTeacher.id)
                 .sort(
                   (a, b) =>

@@ -5,7 +5,7 @@ import { useData } from "@/lib/store/data";
 import { useSession } from "@/lib/store/session";
 import { changeOwnPassword } from "@/lib/supabase/createUser";
 import { MatiereTimetable } from "@/components/timetable/MatiereTimetable";
-import { classCascadeLabel } from "@/lib/helpers";
+import { classCascadeLabel, isExpiredOpenSeance, visibleTimetableSessions } from "@/lib/helpers";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -158,7 +158,11 @@ function StudentHomeView({
     (s) =>
       student.subscriptionIds.some(
         (subId) => activeSubs.find((x) => x.id === subId)?.sessionId === s.id
-      ) && s.days.includes(todayIndex)
+      ) &&
+      s.days.includes(todayIndex) &&
+      // Une séance libre dont la période est terminée ne compte plus parmi les
+      // séances « d'aujourd'hui ».
+      !isExpiredOpenSeance(s)
   );
 
   return (
@@ -341,7 +345,10 @@ function StudentScheduleView({
 
   const scopeIds = scopeMode === "mine" ? ownClassIds : peerClassIds;
   const visibleSessions = useMemo(
-    () => sessions.filter((s) => seanceClassIds(s).some((c) => scopeIds.has(c))),
+    () =>
+      visibleTimetableSessions(sessions).filter((s) =>
+        seanceClassIds(s).some((c) => scopeIds.has(c)),
+      ),
     [sessions, scopeIds],
   );
 

@@ -27,7 +27,13 @@ import {
 } from "lucide-react";
 import type { ScheduleSession, Day, SeanceAudience, Subscription, Teacher } from "@/lib/types";
 import { checkOpenSeanceAudience } from "@/lib/seanceAudience";
-import { DAY_LABELS_FR, formatDateFr, salleStartClashes, sessionSalleIds } from "@/lib/helpers";
+import {
+  DAY_LABELS_FR,
+  formatDateFr,
+  isExpiredOpenSeance,
+  salleStartClashes,
+  sessionSalleIds,
+} from "@/lib/helpers";
 import { printHtmlDocument } from "@/lib/print";
 import {
   bannerHtml,
@@ -173,8 +179,10 @@ export function PlannerPage() {
   // et groupes — c'est le réglage qu'on peut toujours élargir ensuite.
   const [openAudience, setOpenAudience] = useState<SeanceAudience>("enrolled");
   const [savingOpenSeance, setSavingOpenSeance] = useState(false);
-  // "Vue" filter: all timings / regular courses only / séances libres only
-  const [kindFilter, setKindFilter] = useState<"all" | "cours" | "open">("all");
+  // "Vue" filter: all timings / regular courses only / séances libres only /
+  // séances libres expirées (masquées partout ailleurs, réunies ici pour le
+  // ménage : les revoir puis les supprimer).
+  const [kindFilter, setKindFilter] = useState<"all" | "cours" | "open" | "expired">("all");
 
   // Helper: consistent coloring by module ID
   const getSessionColor = (modId: string) => {
@@ -763,8 +771,18 @@ export function PlannerPage() {
     return s.salleId === id || (s.salleIds ?? []).includes(id);
   };
 
+  // Une séance libre dont la période est terminée quitte l'emploi du temps :
+  // elle n'est plus proposée nulle part, ni sur le calendrier ni sur les cartes.
+  // On la garde à portée de main dans l'onglet « Expirées » pour la supprimer.
+  const activeSessions = sessions.filter((s) => !isExpiredOpenSeance(s));
+  const expiredSessions = sessions.filter((s) => isExpiredOpenSeance(s));
+
+  // Le vivier de l'onglet courant : les créneaux expirés d'un côté, tout le
+  // reste de l'autre. Alimente aussi la liste déroulante « Séance spécifique ».
+  const kindPool = kindFilter === "expired" ? expiredSessions : activeSessions;
+
   // Filter sessions
-  const filteredSessions = sessions.filter((s) => {
+  const filteredSessions = kindPool.filter((s) => {
     if (kindFilter === "cours" && s.isOpen) return false;
     if (kindFilter === "open" && !s.isOpen) return false;
     if (filterSessionId && s.id !== filterSessionId) return false;
@@ -822,13 +840,18 @@ export function PlannerPage() {
             )}
           </div>
 
-          {/* Type of timing: regular courses vs séances libres */}
+          {/* Type of timing: regular courses vs séances libres. Les séances
+              libres expirées sont retirées des compteurs « Tous / Cours /
+              Séances Libres » et regroupées dans leur propre onglet. */}
           <div className="flex flex-wrap gap-1.5">
             {([
-              { key: "all", label: `Tous (${sessions.length})` },
-              { key: "cours", label: `Cours (${sessions.filter((s) => !s.isOpen).length})` },
-              { key: "open", label: `Séances Libres (${sessions.filter((s) => s.isOpen).length})` },
-            ] as const).map((k) => (
+              { key: "all", label: `Tous (${activeSessions.length})` },
+              { key: "cours", label: `Cours (${activeSessions.filter((s) => !s.isOpen).length})` },
+              { key: "open", label: `Séances Libres (${activeSessions.filter((s) => s.isOpen).length})` },
+              ...(expiredSessions.length > 0
+                ? [{ key: "expired", label: `🗄️ Expirées (${expiredSessions.length})` }]
+                : []),
+            ] as { key: typeof kindFilter; label: string }[]).map((k) => (
               <button
                 key={k.key}
                 onClick={() => setKindFilter(k.key)}
@@ -847,7 +870,7 @@ export function PlannerPage() {
               <label className="block text-[10px] font-bold text-muted uppercase mb-1 font-sans">Séance Spécifique</label>
               <Select value={filterSessionId} onChange={(e) => setFilterSessionId(e.target.value)} className="w-full">
                 <option value="">Tous les cours</option>
-                {sessions.map((s) => (
+                {kindPool.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.isOpen ? `🎯 ${sessionTitle(s)}` : `${getModuleName(s.moduleId)} - ${getGroupName(s.groupId)}`}
                   </option>
@@ -896,6 +919,19 @@ export function PlannerPage() {
           </div>
         </CardBody>
       </Card>
+
+      {/* Expired séances libres: what this archive tab is for. */}
+      {kindFilter === "expired" && (
+        <div className="flex items-start gap-2 rounded-2xl border border-dashed border-line bg-canvas/40 p-3.5 text-[11px] text-muted">
+          <CalendarIcon className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+          <span>
+            Ces séances libres ont dépassé leur période : elles n&apos;apparaissent plus sur aucun emploi
+            du temps (calendrier, cartes, portail élève). Elles sont réunies ici pour être{" "}
+            <strong className="text-ink">consultées puis supprimées</strong> — les cours ordinaires ne sont
+            jamais concernés.
+          </span>
+        </div>
+      )}
 
       {/* Layout View Toggle */}
       <div className="flex justify-end items-center gap-2">

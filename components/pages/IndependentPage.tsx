@@ -31,7 +31,7 @@ import type { IndependentSession, Student } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
 import { checkOpenSeanceAudience } from "@/lib/seanceAudience";
 import { TICKET_PAGE_CSS, fmtDate, fmtDateTime, printDocument } from "@/lib/printTemplates";
-import { formatDateFr } from "@/lib/helpers";
+import { formatDateFr, isExpiredOpenSeance } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 
 /** Everything the séance libre receipt needs, captured at creation time. */
@@ -247,6 +247,9 @@ export function IndependentPage() {
     const list: SeanceOption[] = [];
 
     sessions.forEach((s) => {
+      // Une séance libre dont la période est terminée n'est plus proposée au
+      // guichet : on ne rattache plus aucune présence à un créneau expiré.
+      if (isExpiredOpenSeance(s)) return;
       const sub = subscriptions.find((su) => su.sessionId === s.id);
       const t = teachers.find((te) => te.id === s.teacherId);
       const isOpen = !!s.isOpen;

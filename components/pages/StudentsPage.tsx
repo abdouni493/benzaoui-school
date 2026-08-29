@@ -59,6 +59,7 @@ import {
   enrollmentExpiry,
   formatDateFr,
   formatDays,
+  isExpiredOpenSeance,
   matchesAllWords,
   netPriceFor,
   registrationFeeOptions,
@@ -1460,6 +1461,9 @@ export function StudentsPage() {
     subscriptions.forEach((sub) => {
       const s = sessions.find((se) => se.id === sub.sessionId);
       if (!s) return;
+      // Une séance libre dont la période est terminée ne s'attribue plus : elle
+      // sort de la liste des cours proposés à l'inscription.
+      if (isExpiredOpenSeance(s)) return;
       if (opts.classIds && !opts.classIds.some((cid) => sessionCoversClass(s, cid))) return;
       const cls = classes.find((c) => c.id === s.classId);
       const mod = modules.find((m) => m.id === s.moduleId);

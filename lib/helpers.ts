@@ -557,6 +557,33 @@ export function todayIso(): string {
   return new Date().toLocaleDateString("fr-CA"); // YYYY-MM-DD
 }
 
+/**
+ * Une séance libre est « expirée » quand sa période de dates est entièrement
+ * écoulée : sa `periodEnd` est antérieure à aujourd'hui. Un cours ordinaire n'a
+ * pas de période — il n'expire jamais. Le dernier jour de la période compte
+ * encore comme actif, aligné sur le guichet et le pointage (une séance tenue le
+ * jour même de `periodEnd` reste encaissable).
+ */
+export function isExpiredOpenSeance(
+  session: Pick<ScheduleSession, "isOpen" | "periodEnd">,
+  today: string = todayIso(),
+): boolean {
+  return Boolean(session.isOpen && session.periodEnd && session.periodEnd < today);
+}
+
+/**
+ * Les créneaux à AFFICHER sur un emploi du temps : tous les cours, plus les
+ * séances libres encore dans leur période. Une séance libre dont la période est
+ * terminée disparaît de tous les emplois du temps — inutile de la reproposer,
+ * son public n'existe plus. Sa gestion (modifier / supprimer) reste possible
+ * depuis le Planner, qui garde un filtre dédié pour la retrouver.
+ */
+export function visibleTimetableSessions<
+  T extends Pick<ScheduleSession, "isOpen" | "periodEnd">,
+>(sessions: T[], today: string = todayIso()): T[] {
+  return sessions.filter((s) => !isExpiredOpenSeance(s, today));
+}
+
 /** Add N months to a YYYY-MM-DD date, clamped to the last day of the target month. */
 export function addMonths(dateStr: string, months: number): string {
   const [y, m, d] = dateStr.split("-").map(Number);

@@ -33,6 +33,7 @@ import {
   formatDateFr,
   formatDays,
   matchesAllWords,
+  visibleTimetableSessions,
 } from "@/lib/helpers";
 
 /** Short weekday headers — the board has seven columns, full names never fit. */
@@ -69,7 +70,7 @@ function minutesBetween(start: string, end: string): number {
  */
 export function TimetablesPage() {
   const {
-    sessions,
+    sessions: allSessions,
     classes,
     modules,
     groups,
@@ -79,6 +80,10 @@ export function TimetablesPage() {
     subscriptions,
     filieres,
   } = useData();
+
+  // Cet écran ne montre que les créneaux vivants : une séance libre dont la
+  // période est terminée n'a plus lieu d'être proposée sur l'emploi du temps.
+  const sessions = useMemo(() => visibleTimetableSessions(allSessions), [allSessions]);
 
   // ---- Filters (mirroring the « Ajouter un étudiant » cascade) -------------
   const [search, setSearch] = useState("");
