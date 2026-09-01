@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useData } from "@/lib/store/data";
 import { useSession } from "@/lib/store/session";
+import { useToast } from "@/lib/store/toast";
 import { changeOwnPassword } from "@/lib/supabase/createUser";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -101,8 +102,6 @@ export function TeacherPages({ slug }: PageProps) {
           getSessionInfo={getSessionInfo}
           students={students}
           attendance={attendance}
-          push={push}
-          updateItem={updateItem}
         />
       );
     case "subjects":
@@ -513,18 +512,17 @@ function TeacherAttendanceView({
   getSessionInfo,
   students,
   attendance,
-  push,
-  updateItem,
 }: {
   teacher: Teacher;
   teacherSessions: ScheduleSession[];
   getSessionInfo: (s: ScheduleSession) => any;
   students: Student[];
   attendance: any[];
-  push: any;
-  updateItem: any;
 }) {
   const [activeSession, setActiveSession] = useState<ScheduleSession | null>(null);
+  const [saving, setSaving] = useState<string | null>(null);
+  const { markAttendance } = useData();
+  const { addToast } = useToast();
 
   // Enrolled students for selected session group
   const getEnrolledStudents = (s: ScheduleSession) => {
@@ -544,65 +542,58 @@ function TeacherAttendanceView({
     return record?.status || null;
   };
 
-  const handleToggleAttendance = (student: Student, session: ScheduleSession, status: AttendanceStatus) => {
-    const todayStr = new Date().toISOString().split("T")[0];
-    const existing = attendance.find(
-      (a) => a.studentId === student.id && a.sessionId === session.id && a.timestamp.startsWith(todayStr)
-    );
-
-    const sub = useData.getState().subscriptions.find((s) => s.sessionId === session.id);
-    const cost = sub?.pricePerSession ?? 0;
-
-    if (existing) {
-      if (existing.status === status) return; // already has this status
-
-      // Refund old and deduct new
-      const oldCost = existing.amountDeducted;
-      const newCost = student.isFree ? 0 : status === "absent" ? 0 : cost;
-
-      updateItem("attendance", existing.id, {
-        status,
-        amountDeducted: newCost,
-      });
-
-      // Adjust student balance
-      updateItem("students", student.id, {
-        balance: student.balance + oldCost - newCost,
-      });
-    } else {
-      // Create new attendance record
-      const finalCost = student.isFree ? 0 : status === "absent" ? 0 : cost;
-      const attId = `att-${Math.random()}`;
-
-      push("attendance", {
-        id: attId,
-        studentId: student.id,
-        sessionId: session.id,
-        timestamp: new Date().toISOString(),
-        amountDeducted: finalCost,
-        status,
-      });
-
-      // Deduct balance
-      updateItem("students", student.id, {
-        balance: student.balance - finalCost,
-      });
-
-      // Log teacher payment session if percentage
-      if (teacher.paymentType === "percentage" && status !== "absent") {
-        const teacherDue = Math.round((finalCost * (teacher.percentage ?? 50)) / 100);
-        push("unpaidTeacher", {
-          id: `ut-${Math.random()}`,
-          teacherId: teacher.id,
-          sessionId: session.id,
-          studentId: student.id,
-          amount: teacherDue,
-          date: new Date().toISOString(),
-          paid: false,
+  /**
+   * L'appel de l'enseignant passe par le MÊME chemin serveur que le guichet
+   * (mark_attendance) : c'est lui qui détient toutes les règles d'argent —
+   * séance libre OFFERTE et période gratuite (aucun débit, aucune rémunération
+   * de l'enseignant), abonnement pas encore commencé, réduction de l'élève,
+   * tarif du groupe, garde anti-dette. L'écran écrivait ces lignes lui-même :
+   * il facturait donc une séance offerte et créait une rémunération dessus.
+   */
+  const handleToggleAttendance = async (
+    student: Student,
+    session: ScheduleSession,
+    status: AttendanceStatus,
+  ) => {
+    if (saving) return;
+    setSaving(student.id);
+    try {
+      const res = await markAttendance(student.id, session.id, status);
+      if (!res.ok) {
+        const reasons: Record<string, string> = {
+          "attendance.notEnrolled": "Cet élève n'est pas inscrit sur ce créneau.",
+          "attendance.notScheduledThatDay": "Cette séance n'a pas lieu aujourd'hui.",
+          "attendance.sessionNotFound": "Créneau introuvable.",
+          "scan.debtBlocked": "Solde insuffisant — la réception doit régler la dette d'abord.",
+          "scan.notFound": "Élève introuvable.",
+        };
+        addToast({
+          type: "danger",
+          title: "Présence non enregistrée",
+          message: reasons[res.messageKey] ?? "Enregistrement refusé — veuillez réessayer.",
+          studentName: `${student.firstName} ${student.lastName}`,
         });
+        return;
       }
+      addToast({
+        type: res.free ? "info" : "success",
+        title: res.free
+          ? "Présence enregistrée — SÉANCE OFFERTE"
+          : status === "absent"
+            ? "Absence enregistrée"
+            : "Présence enregistrée",
+        message: res.free
+          ? "Séance offerte : aucun débit sur le solde de l'élève, aucune rémunération sur cette séance."
+          : `${res.cost ?? 0} DA débités.`,
+        studentName: `${student.firstName} ${student.lastName}`,
+        cost: res.cost,
+        newBalance: res.newBalance,
+      });
+    } finally {
+      setSaving(null);
     }
   };
+
 
   return (
     <div className="space-y-6 text-xs">
@@ -658,6 +649,7 @@ function TeacherAttendanceView({
                               size="sm"
                               variant={status === "present" ? "primary" : "outline"}
                               onClick={() => handleToggleAttendance(st, activeSession, "present")}
+                              disabled={saving === st.id}
                             >
                               Présent
                             </Button>
@@ -665,6 +657,7 @@ function TeacherAttendanceView({
                               size="sm"
                               variant={status === "late" ? "secondary" : "outline"}
                               onClick={() => handleToggleAttendance(st, activeSession, "late")}
+                              disabled={saving === st.id}
                             >
                               En Retard
                             </Button>
@@ -672,6 +665,7 @@ function TeacherAttendanceView({
                               size="sm"
                               variant={status === "absent" ? "danger" : "outline"}
                               onClick={() => handleToggleAttendance(st, activeSession, "absent")}
+                              disabled={saving === st.id}
                               className={status === "absent" ? "bg-danger text-white hover:bg-danger/90" : ""}
                             >
                               Absent

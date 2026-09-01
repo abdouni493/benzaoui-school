@@ -129,6 +129,9 @@ export interface TeacherPayment {
   /** frozen snapshot of the settled timings, so the receipt can be reprinted */
   details: TeacherPaymentDetail[];
   paidAt: string;
+  /** the caisse movement written with this settlement — editing or cancelling
+   *  the règlement moves/removes that exact line instead of guessing */
+  cashTxId?: string;
 }
 
 export interface TeacherPaymentDetail {
@@ -410,6 +413,10 @@ export interface TeacherAcompte {
   amount: number;
   description: string;
   date: string;
+  /** the settlement that consumed this advance. An acompte is never destroyed
+   *  when the teacher is paid — it is attached to the règlement, so cancelling
+   *  that règlement makes it payable again. `undefined` = still outstanding. */
+  paymentId?: string;
 }
 export interface TeacherAbsence {
   id: string;
@@ -417,6 +424,8 @@ export interface TeacherAbsence {
   cost: number;
   description: string;
   date: string;
+  /** the settlement that consumed this deduction (see TeacherAcompte) */
+  paymentId?: string;
 }
 
 export interface Subject {

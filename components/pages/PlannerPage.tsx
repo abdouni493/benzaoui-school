@@ -111,6 +111,7 @@ export function PlannerPage() {
     push,
     deleteFrom,
     updateItem,
+    repriceSession,
   } = useData();
   const { language } = useSettings();
 
@@ -164,6 +165,10 @@ export function PlannerPage() {
   const [openEndHour, setOpenEndHour] = useState("10");
   const [openEndMin, setOpenEndMin] = useState("00");
   const [openPrice, setOpenPrice] = useState<number>(0);
+  // Changer le tarif d'un créneau existant : à partir de quelle date les
+  // présences DÉJÀ pointées doivent-elles suivre le nouveau prix ? Vide = le
+  // tarif change pour la suite seulement (le comportement d'avant).
+  const [openRepriceFrom, setOpenRepriceFrom] = useState("");
   // teacher: pick an existing one, or type a "passager" who has no account
   const [openTeacherMode, setOpenTeacherMode] = useState<"existing" | "passager">("existing");
   const [openTeacherSearch, setOpenTeacherSearch] = useState("");
@@ -387,6 +392,7 @@ export function PlannerPage() {
     setOpenEndHour("10");
     setOpenEndMin("00");
     setOpenPrice(0);
+    setOpenRepriceFrom("");
     setOpenTeacherMode("existing");
     setOpenTeacherSearch("");
     setOpenTeacherId("");
@@ -413,6 +419,7 @@ export function PlannerPage() {
     setOpenEndHour(eh);
     setOpenEndMin(em);
     setOpenPrice(subscriptions.find((su) => su.sessionId === s.id)?.pricePerSession ?? s.openPrice ?? 0);
+    setOpenRepriceFrom("");
     const t = teachers.find((te) => te.id === s.teacherId);
     setOpenTeacherMode(t?.isPassager ? "passager" : "existing");
     setOpenTeacherId(s.teacherId ?? "");
@@ -535,10 +542,38 @@ export function PlannerPage() {
       };
 
       if (editingOpenSession) {
+        const oldPrice =
+          subscriptions.find((su) => su.sessionId === editingOpenSession.id)?.pricePerSession ??
+          editingOpenSession.openPrice ??
+          0;
         updateItem("sessions", editingOpenSession.id, payload);
-        const sub = subscriptions.find((su) => su.sessionId === editingOpenSession.id);
-        if (sub) updateItem("subscriptions", sub.id, { pricePerSession: priceToWrite });
-        else push("subscriptions", { id: uid("sub"), sessionId: editingOpenSession.id, pricePerSession: priceToWrite });
+
+        // Le tarif ne vit pas QUE sur le créneau : il est porté par l'abonnement
+        // du créneau, que le scan et les présences lisent. Passer par
+        // reprice_session écrit les deux d'un coup et — quand l'utilisateur le
+        // demande — corrige aussi les présences déjà pointées et la part encore
+        // due à l'enseignant, qui restaient sinon à l'ancien prix.
+        const changed = oldPrice !== priceToWrite;
+        const applyFrom =
+          changed && !openIsFree && openRepriceFrom.trim() ? openRepriceFrom : undefined;
+
+        const res = await repriceSession({
+          sessionId: editingOpenSession.id,
+          price: priceToWrite,
+          from: applyFrom,
+        });
+        if (!res.ok) {
+          alert("Le tarif n'a pas pu être enregistré. Vérifiez votre connexion et réessayez.");
+          return;
+        }
+        if (applyFrom && (res.repriced ?? 0) > 0) {
+          alert(
+            `${res.repriced} présence(s) re-tarifée(s) depuis le ` +
+              `${applyFrom.split("-").reverse().join("/")} : ${res.charged ?? 0} DA débités en plus, ` +
+              `${res.refunded ?? 0} DA rendus aux élèves, ${res.teacherDues ?? 0} part(s) enseignant ` +
+              "encore dues mises à jour. Les séances déjà réglées n'ont pas été touchées.",
+          );
+        }
       } else {
         const sessionId = uid("ses");
         // L'abonnement auto RÉFÉRENCE le créneau (subscriptions.session_id) :
@@ -1542,8 +1577,54 @@ export function PlannerPage() {
                   Un abonnement est créé automatiquement à ce tarif : le créneau apparaîtra dans
                   l&apos;interface <strong>Abonnements</strong> comme s&apos;il y avait été saisi à la main.
                 </p>
+
+                {/* Modifier le tarif d'un créneau DÉJÀ utilisé : les présences
+                    pointées avant restent à l'ancien prix, sauf demande. */}
+                {editingOpenSession && (
+                  <div className="mt-3 rounded-xl border border-warning/30 bg-warning/5 p-3 space-y-2">
+                    <label className="flex cursor-pointer items-start gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={!!openRepriceFrom}
+                        onChange={(e) =>
+                          setOpenRepriceFrom(
+                            e.target.checked
+                              ? editingOpenSession.periodStart ||
+                                  new Date().toLocaleDateString("fr-CA")
+                              : "",
+                          )
+                        }
+                        className="mt-0.5 h-4 w-4 shrink-0"
+                      />
+                      <span>
+                        <strong className="text-ink">
+                          Appliquer le nouveau prix aux séances déjà pointées
+                        </strong>
+                        <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                          Le débit de chaque élève est corrigé (une ligne apparaît dans
+                          l&apos;historique de son solde) et la part{" "}
+                          <strong className="text-ink">encore due</strong> à l&apos;enseignant suit le
+                          nouveau tarif. Les séances{" "}
+                          <strong className="text-ink">déjà réglées</strong> ne sont jamais retouchées.
+                        </span>
+                      </span>
+                    </label>
+                    {!!openRepriceFrom && (
+                      <div className="flex flex-wrap items-center gap-2 border-t border-warning/20 pt-2">
+                        <label className="text-[11px] font-semibold text-muted">À partir du</label>
+                        <Input
+                          type="date"
+                          value={openRepriceFrom}
+                          onChange={(e) => setOpenRepriceFrom(e.target.value)}
+                          className="w-44"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
+
 
             <div>
               <label className="block text-xs font-semibold text-muted mb-1 font-sans">Nom du créneau</label>

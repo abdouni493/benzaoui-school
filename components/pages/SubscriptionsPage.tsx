@@ -52,6 +52,7 @@ export function SubscriptionsPage() {
     attendance,
     setSubscriptionPrice,
     deleteSubscriptionPrice,
+    repriceSession,
     updateSchool,
   } = useData();
 
@@ -69,6 +70,15 @@ export function SubscriptionsPage() {
   const [levelPrice, setLevelPrice] = useState<number>(0);
   const [periodMonths, setPeriodMonths] = useState<number>(0);
   const [busy, setBusy] = useState(false);
+  // Changer le tarif d'un cours peut aussi RE-TARIFER les séances déjà pointées :
+  // le débit de chaque élève est corrigé et la part encore due à l'enseignant
+  // suit le nouveau prix. Désactivé par défaut — le tarif seul ne réécrit pas
+  // l'histoire ; coché, il s'applique à partir de la date choisie.
+  const [applyToPast, setApplyToPast] = useState(false);
+  const [applyFrom, setApplyFrom] = useState(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1).toLocaleDateString("fr-CA");
+  });
 
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
@@ -269,17 +279,30 @@ export function SubscriptionsPage() {
     }
 
     setBusy(true);
-    const res = await setSubscriptionPrice(
+    const res = await repriceSession({
       sessionId,
-      isFormation ? 0 : pricePerSession,
-      isFormation ? levelPrice : undefined,
-      isFormation ? periodMonths : undefined,
-    );
+      price: isFormation ? 0 : pricePerSession,
+      levelPrice: isFormation ? levelPrice : undefined,
+      periodMonths: isFormation ? periodMonths : undefined,
+      from: applyToPast && !isFormation ? applyFrom : undefined,
+    });
     setBusy(false);
 
     if (!res.ok) {
       alert("Enregistrement du tarif impossible. Vérifiez votre connexion et réessayez.");
       return false;
+    }
+    if (applyToPast && !isFormation && (res.repriced ?? 0) > 0) {
+      alert(
+        `Tarif enregistré sur ${res.groups ?? 0} groupe(s).
+
+` +
+          `${res.repriced} présence(s) re-tarifée(s) depuis le ${applyFrom.split("-").reverse().join("/")} : ` +
+          `${res.charged ?? 0} DA débités en plus, ${res.refunded ?? 0} DA rendus aux élèves, ` +
+          `${res.teacherDues ?? 0} part(s) enseignant encore dues mises à jour.
+` +
+          "Les séances déjà réglées à l'enseignant n'ont pas été touchées.",
+      );
     }
     return true;
   };
@@ -895,6 +918,43 @@ export function SubscriptionsPage() {
             </div>
           )}
 
+          {/* Le nouveau tarif descend-il jusqu'aux séances DÉJÀ pointées ? */}
+          {selectedSub && !isFormationSession(selectedSub.sessionId) && (
+            <div className="rounded-xl border border-warning/30 bg-warning/5 p-3 space-y-2">
+              <label className="flex cursor-pointer items-start gap-2 text-xs">
+                <input
+                  type="checkbox"
+                  checked={applyToPast}
+                  onChange={(e) => setApplyToPast(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 shrink-0"
+                />
+                <span>
+                  <strong className="text-ink">Appliquer aussi aux séances déjà pointées</strong>
+                  <span className="mt-0.5 block text-[11px] leading-relaxed text-muted">
+                    Le débit de chaque élève est corrigé (avec sa ligne dans l&apos;historique du solde) et
+                    la part <strong className="text-ink">encore due</strong> à l&apos;enseignant suit le
+                    nouveau prix. Les séances <strong className="text-ink">déjà réglées</strong> à
+                    l&apos;enseignant ne sont jamais retouchées.
+                  </span>
+                </span>
+              </label>
+              {applyToPast && (
+                <div className="flex flex-wrap items-center gap-2 border-t border-warning/20 pt-2">
+                  <label className="text-[11px] font-semibold text-muted">À partir du</label>
+                  <Input
+                    type="date"
+                    value={applyFrom}
+                    onChange={(e) => setApplyFrom(e.target.value)}
+                    className="w-44"
+                  />
+                  <span className="text-[10px] text-muted">
+                    Les présences antérieures gardent leur ancien tarif.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex justify-end gap-2 pt-4">
             <Button variant="outline" onClick={() => setIsEditOpen(false)} disabled={busy}>
               Annuler
@@ -903,6 +963,7 @@ export function SubscriptionsPage() {
               {busy ? "Enregistrement…" : "Enregistrer pour tous les groupes"}
             </Button>
           </div>
+
         </div>
       </Modal>
 

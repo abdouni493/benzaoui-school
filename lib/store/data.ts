@@ -206,6 +206,7 @@ const teacherPaymentsMapper = makeMapper<TeacherPayment>([
   ["description", "description"],
   ["details", "details"],
   ["paidAt", "paid_at"],
+  ["cashTxId", "cash_tx_id"],
 ]);
 
 const receptionMapper = makeMapper<ReceptionStaff>([
@@ -367,6 +368,7 @@ const acomptesMapper = makeMapper<TeacherAcompte>([
   ["amount", "amount"],
   ["description", "description"],
   ["date", "date"],
+  ["paymentId", "payment_id"],
 ]);
 
 const absencesMapper = makeMapper<TeacherAbsence>([
@@ -375,6 +377,7 @@ const absencesMapper = makeMapper<TeacherAbsence>([
   ["cost", "cost"],
   ["description", "description"],
   ["date", "date"],
+  ["paymentId", "payment_id"],
 ]);
 
 const subjectsMapper = makeMapper<Subject>([
@@ -741,7 +744,58 @@ interface DataActions {
     percentage?: number;
     details?: unknown[];
     description?: string;
+    /** also consume the teacher's outstanding acomptes / absence deductions:
+     *  they are ATTACHED to the settlement, not destroyed, so cancelling it
+     *  makes them payable again */
+    settleDeductions?: boolean;
+    acompteIds?: string[];
+    absenceIds?: string[];
   }) => Promise<{ ok: boolean; paymentId?: string; sessions?: number; messageKey?: string }>;
+  /** Removes séances the teacher is owed for but should not be paid on (a
+   *  créneau recorded by mistake, a séance that turned out to be offered).
+   *  Only UNPAID rows can go; a settled one is never touched. */
+  deleteUnpaidTeacherSessions: (
+    teacherId: string,
+    ids: string[],
+  ) => Promise<{ ok: boolean; deleted?: number; amount?: number }>;
+  /** Corrects one settlement of the history (amount / method / label / date);
+   *  the caisse movement follows. The settled timings stay settled — to give
+   *  them back, cancel the settlement instead. */
+  updateTeacherPayment: (
+    paymentId: string,
+    fields: {
+      amount?: number;
+      method?: "fixed" | "percent";
+      percentage?: number;
+      description?: string;
+      paidAt?: string;
+    },
+  ) => Promise<{ ok: boolean; amount?: number; messageKey?: string }>;
+  /** Cancels one settlement: its timings become due again, its acomptes and
+   *  absence deductions become payable again, and its caisse line is removed. */
+  deleteTeacherPayment: (
+    paymentId: string,
+  ) => Promise<{ ok: boolean; restored?: number; amount?: number; messageKey?: string }>;
+  /** Writes ONE tariff for every group of a course AND, when `from` is given,
+   *  re-prices every presence recorded from that day on: the student's debit is
+   *  corrected (with its own balance line) and the teacher's share still due
+   *  follows the new price. Séances already settled to the teacher are never
+   *  touched. */
+  repriceSession: (args: {
+    sessionId: string;
+    price: number;
+    levelPrice?: number;
+    periodMonths?: number;
+    /** YYYY-MM-DD — omit to change the tariff only, like before */
+    from?: string;
+  }) => Promise<{
+    ok: boolean;
+    groups?: number;
+    repriced?: number;
+    charged?: number;
+    refunded?: number;
+    teacherDues?: number;
+  }>;
   /** Stores/updates the printable portal password (staff-only table). */
   setStudentPassword: (studentId: string, password: string) => Promise<void>;
   /** Turns the weekly-absence billing on/off for a single module. */
@@ -1038,7 +1092,18 @@ export const useData = create<DataStore>((set, get) => ({
     return res;
   },
 
-  payTeacherSessions: async ({ teacherId, keys, amount, method, percentage, details, description }) => {
+  payTeacherSessions: async ({
+    teacherId,
+    keys,
+    amount,
+    method,
+    percentage,
+    details,
+    description,
+    settleDeductions,
+    acompteIds,
+    absenceIds,
+  }) => {
     const supabase = createClient();
     const { data, error } = await supabase.rpc("pay_teacher_sessions", {
       p_teacher_id: teacherId,
@@ -1048,12 +1113,94 @@ export const useData = create<DataStore>((set, get) => ({
       p_percentage: percentage ?? null,
       p_details: details ?? [],
       p_description: description ?? "",
+      p_acompte_ids: acompteIds ?? null,
+      p_absence_ids: absenceIds ?? null,
+      p_settle_deductions: !!settleDeductions,
     });
     if (error || !data) {
       console.error("pay_teacher_sessions failed:", error?.message);
       return { ok: false, messageKey: "pay.error" };
     }
     const res = data as { ok: boolean; paymentId?: string; sessions?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  deleteUnpaidTeacherSessions: async (teacherId, ids) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("delete_unpaid_teacher_sessions", {
+      p_teacher_id: teacherId,
+      p_ids: ids,
+    });
+    if (error || !data) {
+      console.error("delete_unpaid_teacher_sessions failed:", error?.message);
+      reportWriteFailure("unpaid_teacher_sessions", error?.message ?? "RPC absente");
+      return { ok: false };
+    }
+    const res = data as { ok: boolean; deleted?: number; amount?: number };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  updateTeacherPayment: async (paymentId, fields) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("update_teacher_payment", {
+      p_payment_id: paymentId,
+      p_amount: fields.amount === undefined ? null : Math.round(fields.amount),
+      p_method: fields.method ?? null,
+      p_percentage: fields.percentage === undefined ? null : Math.round(fields.percentage),
+      p_description: fields.description ?? null,
+      p_paid_at: fields.paidAt ?? null,
+    });
+    if (error || !data) {
+      console.error("update_teacher_payment failed:", error?.message);
+      reportWriteFailure("teacher_payments", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "pay.error" };
+    }
+    const res = data as { ok: boolean; amount?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  deleteTeacherPayment: async (paymentId) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("delete_teacher_payment", {
+      p_payment_id: paymentId,
+    });
+    if (error || !data) {
+      console.error("delete_teacher_payment failed:", error?.message);
+      reportWriteFailure("teacher_payments", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "pay.error" };
+    }
+    const res = data as { ok: boolean; restored?: number; amount?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  repriceSession: async ({ sessionId, price, levelPrice, periodMonths, from }) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("reprice_session", {
+      p_session_id: sessionId,
+      p_price: Math.round(price || 0),
+      p_level_price: levelPrice === undefined ? null : Math.round(levelPrice),
+      p_period_months: periodMonths === undefined ? null : Math.round(periodMonths),
+      p_from: from ?? null,
+    });
+    if (error || !data) {
+      // Migration pas encore passée : on retombe sur l'ancien chemin, qui écrit
+      // au moins le tarif — plutôt que de laisser l'écran croire à un échec.
+      console.error("reprice_session failed:", error?.message);
+      const fallback = await get().setSubscriptionPrice(sessionId, price, levelPrice, periodMonths);
+      return { ok: fallback.ok, groups: fallback.groups };
+    }
+    const res = data as {
+      ok: boolean;
+      groups?: number;
+      repriced?: number;
+      charged?: number;
+      refunded?: number;
+      teacherDues?: number;
+    };
     if (res.ok) await get().fetchAll();
     return res;
   },

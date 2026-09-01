@@ -23,8 +23,22 @@ import {
   Users,
   Clock,
   X,
+  Gift,
+  CalendarDays,
+  Wallet,
+  ReceiptText,
+  CheckSquare,
+  Square,
+  AlertTriangle,
 } from "lucide-react";
-import type { Day, ScheduleSession, Teacher, TeacherPaymentDetail } from "@/lib/types";
+import type {
+  Day,
+  ScheduleSession,
+  Teacher,
+  TeacherPayment,
+  TeacherPaymentDetail,
+  UnpaidTeacherSession,
+} from "@/lib/types";
 import { DAYS } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
 import { buildTeacherPaymentReport } from "@/lib/reports/teacherPayment";
@@ -75,12 +89,16 @@ export function TeachersPage() {
     attendance,
     independent,
     teacherPayments,
+    freePeriods,
     school,
     push,
     deleteFrom,
     updateItem,
     settleTeacherPercentage,
     payTeacherSessions,
+    deleteUnpaidTeacherSessions,
+    updateTeacherPayment,
+    deleteTeacherPayment,
   } = useData();
   const { language } = useSettings();
 
@@ -116,8 +134,22 @@ export function TeachersPage() {
   const [printEnd, setPrintEnd] = useState("");
 
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
-  const [detailsTab, setDetailsTab] = useState<"info" | "finance" | "sessions">("info");
+  const [detailsTab, setDetailsTab] = useState<"info" | "dues" | "finance" | "sessions">("info");
   const [sessionFilter, setSessionFilter] = useState<"all" | "paid" | "unpaid">("all");
+
+  // ---- « Séances dues » : sélection multiple + retrait ----------------------
+  const [selectedDueIds, setSelectedDueIds] = useState<string[]>([]);
+  const [dueScope, setDueScope] = useState<"all" | "payable" | "offered">("all");
+  const [removingDues, setRemovingDues] = useState(false);
+
+  // ---- Historique des règlements : modifier / annuler ----------------------
+  const [editingPayment, setEditingPayment] = useState<TeacherPayment | null>(null);
+  const [payEditAmount, setPayEditAmount] = useState<number>(0);
+  const [payEditMethod, setPayEditMethod] = useState<"fixed" | "percent">("fixed");
+  const [payEditPercentage, setPayEditPercentage] = useState<number>(0);
+  const [payEditDescription, setPayEditDescription] = useState("");
+  const [payEditDate, setPayEditDate] = useState("");
+  const [savingPaymentEdit, setSavingPaymentEdit] = useState(false);
 
   // ---- List search / filters ------------------------------------------------
   const [teacherSearch, setTeacherSearch] = useState("");
@@ -132,14 +164,23 @@ export function TeachersPage() {
   const [expandedTimingKey, setExpandedTimingKey] = useState<string | null>(null);
   const [timingGroupFilter, setTimingGroupFilter] = useState<string>("all");
   const [savingPayment, setSavingPayment] = useState(false);
+  // Acomptes / retenues d'absence déduits du versement (enseignants de l'école)
+  const [deductAcomptes, setDeductAcomptes] = useState(true);
+  const [deductAbsences, setDeductAbsences] = useState(true);
+  const [timingSearch, setTimingSearch] = useState("");
   // Passager teacher created straight from this page
   const [isPassagerCreateOpen, setIsPassagerCreateOpen] = useState(false);
 
   // Helpers
+  /** EVERY unsettled row, offered séances included — this is what the « Séances
+   *  dues » panel lists so a row written by mistake can be removed. */
   const getTeacherUnpaidSessions = (tid: string) => {
     return unpaidTeacher.filter((u) => u.teacherId === tid && !u.paid);
   };
 
+  /** Acomptes / retenues NOT yet consumed by a settlement. A règlement attaches
+   *  them to itself instead of destroying them, so cancelling it gives them
+   *  back — the history tab keeps showing all of them either way. */
   const getTeacherAcomptes = (tid: string) => {
     return acomptes.filter((a) => a.teacherId === tid);
   };
@@ -148,11 +189,54 @@ export function TeachersPage() {
     return absences.filter((a) => a.teacherId === tid);
   };
 
+  const getOpenAcomptes = (tid: string) =>
+    acomptes.filter((a) => a.teacherId === tid && !a.paymentId);
+  const getOpenAbsences = (tid: string) =>
+    absences.filter((a) => a.teacherId === tid && !a.paymentId);
+
+  const dateKeyOf = (iso: string) => new Date(iso).toLocaleDateString("fr-CA");
+
+  const attendanceFor = (studentId: string, sessionId: string, dateKey: string) =>
+    attendance.find(
+      (a) =>
+        a.studentId === studentId &&
+        a.sessionId === sessionId &&
+        dateKeyOf(a.timestamp) === dateKey,
+    );
+
+  /**
+   * Une SÉANCE OFFERTE ne rémunère personne — ni l'école, ni l'élève, ni
+   * l'enseignant. Deux gratuités la déclenchent :
+   *   · le CRÉNEAU coché « offert » sur l'Emploi du Temps (sessions.isFree) ;
+   *   · une PÉRIODE GRATUITE réglée « sans rémunération des enseignants ».
+   * La base n'écrit plus de ligne de rémunération dans ces cas (migration
+   * 20260902) ; ce filtre neutralise en plus celles déjà écrites, pour qu'une
+   * base pas encore migrée n'affiche jamais ces séances comme « à payer ».
+   */
+  const offeredReasonFor = (u: UnpaidTeacherSession): string | null => {
+    const sess = sessions.find((s) => s.id === u.sessionId);
+    if (sess?.isFree) return "Créneau offert";
+    const att = attendanceFor(u.studentId, u.sessionId, dateKeyOf(u.date));
+    if (att?.freePeriodId) {
+      const period = freePeriods.find((f) => f.id === att.freePeriodId);
+      if (period && !period.payTeachers) {
+        return `Période gratuite « ${period.name} » — sans rémunération`;
+      }
+    }
+    return null;
+  };
+
+  const isPayableDue = (u: UnpaidTeacherSession) => offeredReasonFor(u) === null;
+
+  /** Les séances réellement dues : c'est ce total qui doit être réglé. */
+  const getPayableDues = (tid: string) =>
+    unpaidTeacher.filter((u) => u.teacherId === tid && !u.paid && isPayableDue(u));
+
   // Group a teacher's UNPAID séances by day + timing, with each student's
   // exact scan time, fee and teacher share — the "calculation detail" view
   // shown before validating a percentage payment.
   const buildUnpaidDetail = (tid: string) => {
-    const rows = unpaidTeacher.filter((u) => u.teacherId === tid && !u.paid);
+    const rows = getPayableDues(tid);
     const map: Record<string, {
       dateKey: string;
       sessionId: string;
@@ -368,9 +452,9 @@ export function TeachersPage() {
       return t;
     };
 
-    // Registered students, from the teacher's unpaid dues
-    unpaidTeacher
-      .filter((u) => u.teacherId === tid && !u.paid)
+    // Registered students, from the teacher's unpaid dues. Une séance OFFERTE
+    // n'y figure jamais : personne n'est payé dessus.
+    getPayableDues(tid)
       .forEach((u) => {
         const dateKey = new Date(u.date).toLocaleDateString("fr-CA");
         const t = timingFor(u.sessionId, dateKey);
@@ -399,7 +483,11 @@ export function TeachersPage() {
     // `teacherPaid` is their own settlement flag: a créneau attended only by
     // passagers has no unpaid_teacher_sessions row to flip. A séance OFFERTE
     // (`isFree`) is skipped outright: nobody is paid on it, teacher included.
-    const teacherSessionIds = new Set(sessions.filter((s) => s.teacherId === tid).map((s) => s.id));
+    // Un créneau coché « offert » est exclu en bloc, en plus de la case
+    // « offerte » cochée présence par présence au guichet.
+    const teacherSessionIds = new Set(
+      sessions.filter((s) => s.teacherId === tid && !s.isFree).map((s) => s.id),
+    );
     independent
       .filter(
         (ind) =>
@@ -436,7 +524,7 @@ export function TeachersPage() {
   const payTimings = useMemo(
     () => (selectedTeacher ? buildUnpaidTimings(selectedTeacher.id) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedTeacher, unpaidTeacher, independent, attendance, sessions, students, groups, modules, classes],
+    [selectedTeacher, unpaidTeacher, independent, attendance, sessions, students, groups, modules, classes, freePeriods],
   );
 
   const chosenTimings = payTimings.filter((t) => selectedTimingKeys.includes(t.key));
@@ -459,6 +547,18 @@ export function TeachersPage() {
     );
   }, [payMethod, payFixedAmount, payPercentage, chosenTimings]);
 
+  // Acomptes déjà versés et retenues d'absence encore exigibles : ce sont eux
+  // que le règlement déduit. Ils ne sont PAS supprimés en payant — ils sont
+  // rattachés au règlement, pour qu'annuler celui-ci les rende à nouveau dus.
+  const openAcomptes = selectedTeacher ? getOpenAcomptes(selectedTeacher.id) : [];
+  const openAbsences = selectedTeacher ? getOpenAbsences(selectedTeacher.id) : [];
+  const totalOpenAcomptes = openAcomptes.reduce((s, a) => s + a.amount, 0);
+  const totalOpenAbsences = openAbsences.reduce((s, a) => s + a.cost, 0);
+  const appliedAcomptes = deductAcomptes ? totalOpenAcomptes : 0;
+  const appliedAbsences = deductAbsences ? totalOpenAbsences : 0;
+  /** Ce qui sort réellement de la caisse. */
+  const netPayout = Math.max(0, computedPayout - appliedAcomptes - appliedAbsences);
+
   /** Per-timing share, distributed the same way the total is computed. */
   const shareForTiming = (t: UnpaidTiming) => {
     if (payMethod === "percent") {
@@ -473,6 +573,145 @@ export function TeachersPage() {
     return Math.round((computedPayout * t.totalFees) / chosenRevenue);
   };
 
+  // ---------------------------------------------------------------------------
+  // « Séances dues » : une ligne par présence encore à régler, retirable
+  // ---------------------------------------------------------------------------
+  /** Toutes les séances non réglées d'un enseignant, enrichies de leur créneau
+   *  et de la raison qui les rend NON dues (séance offerte) le cas échéant. */
+  const buildDueRows = (tid: string) =>
+    getTeacherUnpaidSessions(tid)
+      .map((u) => {
+        const sess = sessions.find((se) => se.id === u.sessionId);
+        const stu = students.find((st) => st.id === u.studentId);
+        const dateKey = dateKeyOf(u.date);
+        const att = attendanceFor(u.studentId, u.sessionId, dateKey);
+        return {
+          id: u.id,
+          dateKey,
+          sessionId: u.sessionId,
+          title: sess?.isOpen
+            ? sess.title || `Séance libre — ${modules.find((m) => m.id === sess.moduleId)?.name ?? "Séance"}`
+            : modules.find((m) => m.id === sess?.moduleId)?.name ?? "Séance",
+          className: classes.find((c) => c.id === sess?.classId)?.name ?? "—",
+          groupName: groups.find((g) => g.id === sess?.groupId)?.name ?? "—",
+          time: sess ? `${sess.startTime} - ${sess.endTime}` : "—",
+          studentName: stu ? `${stu.firstName} ${stu.lastName}` : "Élève supprimé",
+          fee: att?.amountDeducted ?? 0,
+          waived: att?.waivedAmount ?? 0,
+          amount: u.amount,
+          offeredReason: offeredReasonFor(u),
+        };
+      })
+      .sort((a, b) => b.dateKey.localeCompare(a.dateKey) || a.time.localeCompare(b.time));
+
+  const openDuesTab = (t: Teacher) => {
+    setSelectedTeacher(t);
+    setDetailsTab("dues");
+    setSelectedDueIds([]);
+    setDueScope("all");
+    setIsDetailsOpen(true);
+    setActiveMenuId(null);
+  };
+
+  const handleRemoveDues = async () => {
+    if (!selectedTeacher || selectedDueIds.length === 0) return;
+    const rows = buildDueRows(selectedTeacher.id).filter((r) => selectedDueIds.includes(r.id));
+    const total = rows.reduce((sum, r) => sum + r.amount, 0);
+    if (
+      !confirm(
+        `Retirer ${rows.length} séance(s) due(s) — ${total} DA — de ce qui reste à payer à ` +
+          `${selectedTeacher.firstName} ${selectedTeacher.lastName} ?
+
+` +
+          "Les présences des élèves et leurs soldes ne sont PAS touchés : seule la " +
+          "rémunération encore due sur ces séances disparaît. Action définitive.",
+      )
+    ) {
+      return;
+    }
+    setRemovingDues(true);
+    try {
+      const res = await deleteUnpaidTeacherSessions(selectedTeacher.id, selectedDueIds);
+      if (!res.ok) {
+        alert(
+          "Le retrait a échoué. Si le message parle d'une fonction manquante, passez la " +
+            "migration supabase/migrations/20260902_free_seances_teacher_settlements.sql.",
+        );
+        return;
+      }
+      setSelectedDueIds([]);
+      alert(`${res.deleted ?? 0} séance(s) retirée(s) — ${res.amount ?? 0} DA en moins à régler.`);
+    } finally {
+      setRemovingDues(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Historique des règlements : modifier / annuler
+  // ---------------------------------------------------------------------------
+  const openPaymentEdit = (p: TeacherPayment) => {
+    setEditingPayment(p);
+    setPayEditAmount(p.amount);
+    setPayEditMethod(p.method);
+    setPayEditPercentage(p.percentage ?? 0);
+    setPayEditDescription(p.description ?? "");
+    setPayEditDate(p.paidAt ? p.paidAt.slice(0, 16) : "");
+  };
+
+  const handleSavePaymentEdit = async () => {
+    if (!editingPayment) return;
+    if (payEditAmount < 0) {
+      alert("Le montant versé ne peut pas être négatif.");
+      return;
+    }
+    setSavingPaymentEdit(true);
+    try {
+      const res = await updateTeacherPayment(editingPayment.id, {
+        amount: payEditAmount,
+        method: payEditMethod,
+        percentage: payEditMethod === "percent" ? payEditPercentage : undefined,
+        description: payEditDescription,
+        paidAt: payEditDate ? new Date(payEditDate).toISOString() : undefined,
+      });
+      if (!res.ok) {
+        alert(
+          "La modification a échoué. Si le message parle d'une fonction manquante, passez la " +
+            "migration supabase/migrations/20260902_free_seances_teacher_settlements.sql.",
+        );
+        return;
+      }
+      setEditingPayment(null);
+    } finally {
+      setSavingPaymentEdit(false);
+    }
+  };
+
+  const handleDeletePayment = async (p: TeacherPayment) => {
+    if (
+      !confirm(
+        `Annuler ce règlement de ${p.amount} DA ?
+
+` +
+          "Les créneaux qu'il a réglés redeviennent DUS, les acomptes et retenues qu'il a " +
+          "consommés redeviennent exigibles, et son mouvement de caisse est retiré.",
+      )
+    ) {
+      return;
+    }
+    const res = await deleteTeacherPayment(p.id);
+    if (!res.ok) {
+      alert(
+        "L'annulation a échoué. Si le message parle d'une fonction manquante, passez la " +
+          "migration supabase/migrations/20260902_free_seances_teacher_settlements.sql.",
+      );
+      return;
+    }
+    alert(
+      `Règlement annulé. ${res.restored ?? 0} présence(s) redeviennent dues et ${p.amount} DA ` +
+        "ont été rendus à la caisse.",
+    );
+  };
+
   const openTimingPay = (t: Teacher) => {
     setSelectedTeacher(t);
     const timings = buildUnpaidTimings(t.id);
@@ -482,6 +721,11 @@ export function TeachersPage() {
     setPayPercentage(t.percentage ?? 50);
     setExpandedTimingKey(null);
     setTimingGroupFilter("all");
+    setTimingSearch("");
+    // Un passager n'a ni acompte ni retenue : les deux cases n'ont de sens que
+    // pour un enseignant de l'école.
+    setDeductAcomptes(!t.isPassager);
+    setDeductAbsences(!t.isPassager);
     setIsTimingPayOpen(true);
     setActiveMenuId(null);
   };
@@ -492,8 +736,11 @@ export function TeachersPage() {
       alert("Sélectionnez au moins un créneau à régler.");
       return;
     }
-    if (computedPayout <= 0) {
-      alert("Le montant à verser doit être supérieur à 0 DA.");
+    if (netPayout <= 0) {
+      alert(
+        "Le montant net à verser doit être supérieur à 0 DA. " +
+          "Décochez les acomptes / retenues, ou choisissez d'autres créneaux.",
+      );
       return;
     }
 
@@ -516,11 +763,17 @@ export function TeachersPage() {
       const res = await payTeacherSessions({
         teacherId: selectedTeacher.id,
         keys: selectedTimingKeys,
-        amount: computedPayout,
+        amount: netPayout,
         method: payMethod,
         percentage: payMethod === "percent" ? payPercentage : undefined,
         details,
-        description: `Règlement séances ${selectedTeacher.firstName} ${selectedTeacher.lastName}`,
+        description:
+          `Règlement séances ${selectedTeacher.firstName} ${selectedTeacher.lastName}` +
+          (appliedAcomptes > 0 ? ` — acomptes -${appliedAcomptes} DA` : "") +
+          (appliedAbsences > 0 ? ` — absences -${appliedAbsences} DA` : ""),
+        settleDeductions: appliedAcomptes > 0 || appliedAbsences > 0,
+        acompteIds: deductAcomptes ? openAcomptes.map((a) => a.id) : [],
+        absenceIds: deductAbsences ? openAbsences.map((a) => a.id) : [],
       });
 
       if (!res.ok) {
@@ -530,13 +783,13 @@ export function TeachersPage() {
 
       setIsTimingPayOpen(false);
 
-      if (confirm(`Paiement de ${computedPayout} DA enregistré. Imprimer le bon de paiement ?`)) {
+      if (confirm(`Paiement de ${netPayout} DA enregistré. Imprimer le bon de paiement ?`)) {
         printHtmlDocument(
           buildTeacherSettlementReceipt({
             teacher: selectedTeacher,
             school,
             lang: language,
-            amount: computedPayout,
+            amount: netPayout,
             method: payMethod,
             percentage: payMethod === "percent" ? payPercentage : undefined,
             details,
@@ -868,6 +1121,287 @@ export function TeachersPage() {
     setActiveMenuId(null);
   };
 
+  // ---------------------------------------------------------------------------
+  // Panneau « Séances dues » — tout ce qui reste à payer, ligne par ligne, avec
+  // sélection multiple et retrait. C'est ici qu'une rémunération écrite par
+  // erreur (séance offerte, créneau annulé) se supprime.
+  // ---------------------------------------------------------------------------
+  const renderDuesPanel = (teacher: Teacher) => {
+    const rows = buildDueRows(teacher.id);
+    const payable = rows.filter((r) => !r.offeredReason);
+    const offered = rows.filter((r) => r.offeredReason);
+    const shown = dueScope === "payable" ? payable : dueScope === "offered" ? offered : rows;
+    const shownIds = shown.map((r) => r.id);
+    const allShownSelected =
+      shownIds.length > 0 && shownIds.every((id) => selectedDueIds.includes(id));
+    const selectedRows = rows.filter((r) => selectedDueIds.includes(r.id));
+    const selectedTotal = selectedRows.reduce((sum, r) => sum + r.amount, 0);
+
+    const toggle = (id: string) =>
+      setSelectedDueIds(
+        selectedDueIds.includes(id)
+          ? selectedDueIds.filter((x) => x !== id)
+          : [...selectedDueIds, id],
+      );
+
+    return (
+      <div className="space-y-4">
+        {/* Totals */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="rounded-2xl border border-line bg-canvas p-3">
+            <span className="block text-[10px] font-semibold uppercase text-muted">Séances non réglées</span>
+            <strong className="font-mono text-lg text-ink">{rows.length}</strong>
+          </div>
+          <div className="rounded-2xl border border-warning/30 bg-warning/5 p-3">
+            <span className="block text-[10px] font-semibold uppercase text-muted">Réellement dues</span>
+            <strong className="font-mono text-lg text-warning">{payable.length}</strong>
+            <span className="block text-[10px] text-muted">
+              {payable.reduce((sum, r) => sum + r.amount, 0)} DA
+            </span>
+          </div>
+          <div className="rounded-2xl border border-success/30 bg-success/5 p-3">
+            <span className="block text-[10px] font-semibold uppercase text-muted">Séances offertes</span>
+            <strong className="font-mono text-lg text-success">{offered.length}</strong>
+            <span className="block text-[10px] text-muted">aucune rémunération</span>
+          </div>
+          <div className="rounded-2xl border border-primary/30 bg-primary-50/40 p-3">
+            <span className="block text-[10px] font-semibold uppercase text-muted">Sélection</span>
+            <strong className="font-mono text-lg text-primary">{selectedRows.length}</strong>
+            <span className="block text-[10px] text-muted">{selectedTotal} DA</span>
+          </div>
+        </div>
+
+        {offered.length > 0 && (
+          <div className="flex items-start gap-2 rounded-2xl border border-success/30 bg-success/5 p-3 text-[11px] leading-relaxed text-muted">
+            <Gift className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+            <span>
+              <strong className="text-success">{offered.length} séance(s) offerte(s)</strong> figurent encore
+              ici : elles ont été écrites avant la correction et ne sont JAMAIS comptées dans ce que
+              l&apos;enseignant doit toucher. Sélectionnez-les et retirez-les pour nettoyer la liste — les
+              présences des élèves et leurs soldes ne bougent pas.
+            </span>
+          </div>
+        )}
+
+        {/* Filters + bulk actions */}
+        <div className="flex flex-wrap items-center gap-2">
+          {([
+            { key: "all", label: `Toutes (${rows.length})` },
+            { key: "payable", label: `Dues (${payable.length})` },
+            { key: "offered", label: `Offertes (${offered.length})` },
+          ] as const).map((f) => (
+            <button
+              key={f.key}
+              onClick={() => setDueScope(f.key)}
+              className={`rounded-lg px-3 py-1.5 text-[10px] font-bold transition-all ${
+                dueScope === f.key ? "bg-primary text-white shadow-sm" : "bg-canvas text-muted hover:text-ink"
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+          <span className="flex-1" />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              setSelectedDueIds(
+                allShownSelected
+                  ? selectedDueIds.filter((id) => !shownIds.includes(id))
+                  : [...new Set([...selectedDueIds, ...shownIds])],
+              )
+            }
+            disabled={shownIds.length === 0}
+          >
+            {allShownSelected ? <Square className="h-3.5 w-3.5" /> : <CheckSquare className="h-3.5 w-3.5" />}
+            {allShownSelected ? "Tout décocher" : "Tout sélectionner"}
+          </Button>
+          {offered.length > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setSelectedDueIds(offered.map((r) => r.id))}
+              className="border-success/40 text-success hover:bg-success/10"
+            >
+              <Gift className="h-3.5 w-3.5" /> Sélectionner les offertes
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="danger"
+            onClick={handleRemoveDues}
+            disabled={selectedDueIds.length === 0 || removingDues}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            {removingDues ? "Retrait..." : `Retirer (${selectedDueIds.length})`}
+          </Button>
+        </div>
+
+        {/* The list itself */}
+        <div className="overflow-hidden rounded-2xl border border-line bg-surface">
+          <div className="max-h-[46vh] overflow-y-auto">
+            <table className="w-full border-collapse text-left text-xs">
+              <thead className="sticky top-0 z-10">
+                <tr className="border-b border-line bg-canvas text-[10px] font-bold uppercase tracking-wider text-muted">
+                  <th className="w-10 p-3"></th>
+                  <th className="p-3">Date</th>
+                  <th className="p-3">Créneau</th>
+                  <th className="p-3">Élève</th>
+                  <th className="p-3 text-right">Tarif élève</th>
+                  <th className="p-3 text-right">Part enseignant</th>
+                  <th className="p-3 text-right">État</th>
+                </tr>
+              </thead>
+              <tbody>
+                {shown.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="p-8 text-center italic text-muted">
+                      Aucune séance dans ce filtre — tout est réglé.
+                    </td>
+                  </tr>
+                ) : (
+                  shown.map((r) => {
+                    const checked = selectedDueIds.includes(r.id);
+                    return (
+                      <tr
+                        key={r.id}
+                        onClick={() => toggle(r.id)}
+                        className={`cursor-pointer border-b border-line/60 transition-colors last:border-0 ${
+                          checked ? "bg-primary-50/50" : r.offeredReason ? "bg-success/5" : "hover:bg-canvas/40"
+                        }`}
+                      >
+                        <td className="p-3">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggle(r.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            className="h-4 w-4"
+                          />
+                        </td>
+                        <td className="p-3 font-mono text-[10px] text-ink">{formatDateFr(r.dateKey)}</td>
+                        <td className="p-3">
+                          <strong className="block max-w-[200px] truncate text-ink">{r.title}</strong>
+                          <span className="block text-[10px] text-muted">
+                            {r.className} · Gr: {r.groupName} · <span className="font-mono">{r.time}</span>
+                          </span>
+                        </td>
+                        <td className="p-3 text-ink">{r.studentName}</td>
+                        <td className="p-3 text-right font-mono">
+                          {r.fee} DA
+                          {r.waived > 0 && (
+                            <span className="block text-[9px] text-success">offert : {r.waived} DA</span>
+                          )}
+                        </td>
+                        <td className="p-3 text-right font-mono font-bold text-primary">{r.amount} DA</td>
+                        <td className="p-3 text-right">
+                          {r.offeredReason ? (
+                            <Badge tone="success" className="text-[9px]" title={r.offeredReason}>
+                              <Gift className="h-3 w-3" /> Offerte
+                            </Badge>
+                          ) : (
+                            <Badge tone="warning" className="text-[9px]">Due</Badge>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-canvas p-3">
+          <span className="text-[11px] text-muted">
+            Retirer une séance due ne touche NI la présence de l&apos;élève, NI son solde : seule la
+            rémunération encore à verser disparaît.
+          </span>
+          <Button size="sm" onClick={() => { setIsDetailsOpen(false); openTimingPay(teacher); }}>
+            <DollarSign className="h-3.5 w-3.5" /> Régler les séances dues
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
+  // ---------------------------------------------------------------------------
+  // Panneau « Historique des règlements » — réimprimer, modifier, annuler
+  // ---------------------------------------------------------------------------
+  const renderPaymentsPanel = (teacher: Teacher) => {
+    const myPayments = teacherPayments
+      .filter((p) => p.teacherId === teacher.id)
+      .sort((a, b) => b.paidAt.localeCompare(a.paidAt));
+
+    return (
+      <div className="rounded-2xl border border-line bg-surface p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h4 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted">
+            <Wallet className="h-4 w-4" /> Historique des règlements
+          </h4>
+          <Badge tone="success" className="font-mono font-bold">
+            {myPayments.reduce((s, p) => s + p.amount, 0)} DA versés
+          </Badge>
+        </div>
+
+        {myPayments.length === 0 ? (
+          <p className="py-6 text-center text-xs italic text-muted">Aucun règlement enregistré.</p>
+        ) : (
+          <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+            {myPayments.map((p) => (
+              <div
+                key={p.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-success/20 bg-success/5 p-3 text-xs"
+              >
+                <div className="min-w-0 flex-1">
+                  <span className="block font-bold text-ink">
+                    {p.amount} DA
+                    <Badge tone={p.method === "percent" ? "primary" : "neutral"} className="ml-1.5 text-[9px]">
+                      {p.method === "percent" ? `${p.percentage ?? 0} %` : "Montant fixe"}
+                    </Badge>
+                  </span>
+                  <span className="block text-[10px] text-muted">
+                    {p.sessionsCount} créneau(x) · {p.studentsCount} présence(s) ·{" "}
+                    {new Date(p.paidAt).toLocaleString("fr-DZ", {
+                      day: "2-digit", month: "2-digit", year: "numeric",
+                      hour: "2-digit", minute: "2-digit",
+                    })}
+                  </span>
+                  {p.description && (
+                    <span className="mt-0.5 block truncate text-[10px] text-muted/80">{p.description}</span>
+                  )}
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  <button
+                    onClick={() => reprintSettlement(p.id)}
+                    className="rounded-lg p-1.5 text-primary hover:bg-primary-50"
+                    title="Réimprimer le bon"
+                  >
+                    <Printer className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => openPaymentEdit(p)}
+                    className="rounded-lg p-1.5 text-ink hover:bg-primary-50"
+                    title="Modifier ce règlement"
+                  >
+                    <Edit className="h-4 w-4" />
+                  </button>
+                  <button
+                    onClick={() => handleDeletePayment(p)}
+                    className="rounded-lg p-1.5 text-danger hover:bg-danger/10"
+                    title="Annuler ce règlement (les séances redeviennent dues)"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const openPrint = (t: Teacher) => {
     setSelectedTeacher(t);
     setPrintStart("");
@@ -936,7 +1470,9 @@ export function TeachersPage() {
               .includes(teacherSearch.toLowerCase());
           })
           .map((t) => {
-          const unpaidSess = getTeacherUnpaidSessions(t.id);
+          // Ce que la carte annonce doit être ce que l'écran de règlement
+          // proposera : les séances OFFERTES n'y comptent pas.
+          const unpaidSess = getPayableDues(t.id);
           const unpaidMonths = getUnpaidMonthsList(t);
           const unpaidTimingsCount = buildUnpaidTimings(t.id).length;
 
@@ -975,10 +1511,18 @@ export function TeachersPage() {
                         <Eye className="h-3.5 w-3.5" /> Détails
                       </button>
                       <button
-                        onClick={() => (t.isPassager ? openTimingPay(t) : openPay(t))}
+                        onClick={() =>
+                          t.paymentType === "monthly" && !t.isPassager ? openPay(t) : openTimingPay(t)
+                        }
                         className="flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-bold rounded-xl bg-success/15 text-success border border-success/30 hover:bg-success/25 transition-colors"
                       >
                         <DollarSign className="h-3.5 w-3.5" /> Payer
+                      </button>
+                      <button
+                        onClick={() => openDuesTab(t)}
+                        className="flex items-center justify-center gap-1.5 py-2 px-3 text-xs font-bold rounded-xl bg-warning/15 text-warning border border-warning/30 hover:bg-warning/25 transition-colors"
+                      >
+                        <ReceiptText className="h-3.5 w-3.5" /> Séances dues
                       </button>
                       {!t.isPassager && (
                         <>
@@ -1453,50 +1997,20 @@ export function TeachersPage() {
                       )}
                     </div>
 
-                    {/* Payments history */}
-                    <div className="border border-line rounded-2xl p-4 bg-surface">
-                      <h4 className="font-bold text-ink mb-3 text-xs uppercase tracking-wider text-muted">
-                        💸 Historique des règlements
-                      </h4>
-                      {myPayments.length === 0 ? (
-                        <p className="text-xs text-muted italic text-center py-6">Aucun règlement enregistré.</p>
-                      ) : (
-                        <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-                          {myPayments.map((p) => (
-                            <div
-                              key={p.id}
-                              className="flex items-center justify-between gap-3 p-3 rounded-xl border border-success/20 bg-success/5 text-xs"
-                            >
-                              <div className="min-w-0">
-                                <span className="font-bold text-ink block">
-                                  {p.amount} DA
-                                  <Badge tone={p.method === "percent" ? "primary" : "neutral"} className="ml-1.5 text-[9px]">
-                                    {p.method === "percent" ? `${p.percentage ?? 0}%` : "Montant fixe"}
-                                  </Badge>
-                                </span>
-                                <span className="text-[10px] text-muted block">
-                                  {p.sessionsCount} créneau(x) ·{" "}
-                                  {new Date(p.paidAt).toLocaleString("fr-DZ", {
-                                    day: "2-digit", month: "2-digit", year: "numeric",
-                                    hour: "2-digit", minute: "2-digit",
-                                  })}
-                                </span>
-                              </div>
-                              <button
-                                onClick={() => reprintSettlement(p.id)}
-                                className="p-1.5 rounded-lg hover:bg-primary-50 text-primary shrink-0"
-                                title="Réimprimer le bon"
-                              >
-                                <Printer className="h-4 w-4" />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    {/* Payments history — réimprimable, modifiable, annulable */}
+                    {renderPaymentsPanel(selectedTeacher)}
+                  </div>
+
+                  {/* Séances dues — sélection multiple et retrait */}
+                  <div className="rounded-2xl border border-line bg-surface p-4">
+                    <h4 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted">
+                      <ReceiptText className="h-4 w-4" /> Séances dues
+                    </h4>
+                    {renderDuesPanel(selectedTeacher)}
                   </div>
 
                   {/* Timings he is attached to — days of the week included. Les
+
                       séances libres expirées quittent l'emploi du temps affiché
                       (l'historique financier plus bas les garde, lui). */}
                   <div className="border border-line rounded-2xl p-4 bg-surface">
@@ -1545,7 +2059,23 @@ export function TeachersPage() {
                 📅 Emploi du Temps
               </button>
               <button
+                onClick={() => { setDetailsTab("dues"); setSelectedDueIds([]); }}
+                className={`px-4 py-2 text-xs font-bold rounded-t-xl transition-colors border-b-2 -mb-0.5 ${
+                  detailsTab === "dues"
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted hover:text-ink hover:bg-canvas/50"
+                }`}
+              >
+                🧾 Séances dues
+                {getPayableDues(selectedTeacher.id).length > 0 && (
+                  <Badge tone="warning" className="ml-1.5 text-[9px]">
+                    {getPayableDues(selectedTeacher.id).length}
+                  </Badge>
+                )}
+              </button>
+              <button
                 onClick={() => setDetailsTab("finance")}
+
                 className={`px-4 py-2 text-xs font-bold rounded-t-xl transition-colors border-b-2 -mb-0.5 ${
                   detailsTab === "finance"
                     ? "border-primary text-primary"
@@ -1650,7 +2180,11 @@ export function TeachersPage() {
               );
             })()}
 
+            {/* TAB CONTENT: Séances dues — sélection multiple + retrait */}
+            {!selectedTeacher.isPassager && detailsTab === "dues" && renderDuesPanel(selectedTeacher)}
+
             {/* TAB CONTENT: Finance History */}
+
             {!selectedTeacher.isPassager && detailsTab === "finance" && (() => {
               const teacherAcomptes = getTeacherAcomptes(selectedTeacher.id).map(ac => ({
                 id: ac.id,
@@ -1690,14 +2224,36 @@ export function TeachersPage() {
 
               return (
                 <div className="space-y-4">
-                  <div className="grid grid-cols-3 gap-3">
+                  {/* Un acompte / une retenue n'est plus DÉTRUIT au moment de
+                      payer : il est rattaché au règlement. La tuile distingue
+                      donc le total historique de ce qui reste à déduire. */}
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
                     <div className="bg-canvas border border-line p-3 rounded-xl text-center">
-                      <span className="text-muted text-[10px] uppercase block font-semibold">Total Acomptes</span>
-                      <strong className="text-warning text-base font-mono">{teacherAcomptes.reduce((s, a) => s + a.amount, 0)} DA</strong>
+                      <span className="text-muted text-[10px] uppercase block font-semibold">Acomptes en attente</span>
+                      <strong className="text-warning text-base font-mono">
+                        {getOpenAcomptes(selectedTeacher.id).reduce((s, a) => s + a.amount, 0)} DA
+                      </strong>
+                      <span className="text-[9px] text-muted block">
+                        sur {teacherAcomptes.reduce((s, a) => s + a.amount, 0)} DA au total
+                      </span>
                     </div>
                     <div className="bg-canvas border border-line p-3 rounded-xl text-center">
-                      <span className="text-muted text-[10px] uppercase block font-semibold">Total Absences</span>
-                      <strong className="text-danger text-base font-mono">{teacherAbsences.reduce((s, a) => s + a.amount, 0)} DA</strong>
+                      <span className="text-muted text-[10px] uppercase block font-semibold">Retenues en attente</span>
+                      <strong className="text-danger text-base font-mono">
+                        {getOpenAbsences(selectedTeacher.id).reduce((s, a) => s + a.cost, 0)} DA
+                      </strong>
+                      <span className="text-[9px] text-muted block">
+                        sur {teacherAbsences.reduce((s, a) => s + a.amount, 0)} DA au total
+                      </span>
+                    </div>
+                    <div className="bg-canvas border border-line p-3 rounded-xl text-center">
+                      <span className="text-muted text-[10px] uppercase block font-semibold">Séances dues</span>
+                      <strong className="text-primary text-base font-mono">
+                        {getPayableDues(selectedTeacher.id).reduce((s, u) => s + u.amount, 0)} DA
+                      </strong>
+                      <span className="text-[9px] text-muted block">
+                        {getPayableDues(selectedTeacher.id).length} présence(s)
+                      </span>
                     </div>
                     <div className="bg-canvas border border-line p-3 rounded-xl text-center">
                       <span className="text-muted text-[10px] uppercase block font-semibold">Total Payé</span>
@@ -1705,10 +2261,16 @@ export function TeachersPage() {
                     </div>
                   </div>
 
+
+                  {/* Règlements structurés : réimprimables, modifiables,
+                      annulables. Le journal brut de la caisse reste dessous. */}
+                  {renderPaymentsPanel(selectedTeacher)}
+
                   <div className="border border-line rounded-2xl p-4 bg-surface">
                     <h4 className="font-bold text-ink mb-3 text-xs uppercase tracking-wider text-muted">
                       🕒 Journal des transactions financières
                     </h4>
+
                     {allFinancialLogs.length === 0 ? (
                       <p className="text-xs text-muted italic text-center py-6">Aucun acompte, absence ou paiement enregistré.</p>
                     ) : (
@@ -1740,7 +2302,9 @@ export function TeachersPage() {
             {/* TAB CONTENT: Sessions History */}
             {!selectedTeacher.isPassager && detailsTab === "sessions" && (() => {
               const allTeacherSessions = unpaidTeacher.filter((u) => u.teacherId === selectedTeacher.id);
-              const unpaidSessions = allTeacherSessions.filter((u) => !u.paid);
+              // Une séance OFFERTE n'est pas une séance due : elle ne compte ni
+              // dans le nombre, ni dans le montant à régler.
+              const unpaidSessions = allTeacherSessions.filter((u) => !u.paid && isPayableDue(u));
               const paidSessions = allTeacherSessions.filter((u) => u.paid);
 
               const filteredSessionsList = allTeacherSessions.filter((u) => {
@@ -2151,284 +2715,575 @@ export function TeachersPage() {
           </div>
         </div>
       </Modal>
-
-      {/* ---------------------------------------------------------------- */}
-      {/* Per-timing settlement: only UNPAID timings, fixed or percentage   */}
-      {/* ---------------------------------------------------------------- */}
+      {/* ------------------------------------------------------------------ */}
+      {/* NOUVEAU RÈGLEMENT — l'écran de travail complet :                     */}
+      {/*   colonne gauche  : les créneaux à régler, dépliables élève par élève */}
+      {/*   colonne droite  : le mode de calcul, les retenues, le net à verser  */}
+      {/* Une SÉANCE OFFERTE n'apparaît jamais ici : personne n'est payé dessus.*/}
+      {/* ------------------------------------------------------------------ */}
       <Modal
         open={isTimingPayOpen}
         onClose={() => setIsTimingPayOpen(false)}
-        title="Règlement des séances de l'enseignant"
-        wide
+        title="Nouveau règlement"
+        subtitle={
+          selectedTeacher
+            ? `${selectedTeacher.firstName} ${selectedTeacher.lastName} — choisissez les créneaux, le mode de calcul, puis validez le versement.`
+            : undefined
+        }
+        size="xl"
       >
-        {selectedTeacher && (
-          <div className="space-y-4">
-            <div className="bg-canvas border border-line rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <strong className="text-ink text-sm block">
-                  {selectedTeacher.firstName} {selectedTeacher.lastName}
-                </strong>
-                <span className="text-[11px] text-muted">
-                  {selectedTeacher.isPassager ? "Enseignant passager (sans compte)" : "Enseignant de l'école"}
-                  {selectedTeacher.phone ? ` · ${selectedTeacher.phone}` : ""}
-                </span>
+        {selectedTeacher && (() => {
+          const query = timingSearch.trim().toLowerCase();
+          const visibleTimings = query
+            ? payTimings.filter((t) =>
+                `${t.title} ${t.moduleName} ${t.className} ${t.groupName} ${t.dateKey} ${t.students
+                  .map((s) => s.name)
+                  .join(" ")}`
+                  .toLowerCase()
+                  .includes(query),
+              )
+            : payTimings;
+          const visibleKeys = visibleTimings.map((t) => t.key);
+          const allVisibleChosen =
+            visibleKeys.length > 0 && visibleKeys.every((k) => selectedTimingKeys.includes(k));
+          const totalDue = payTimings.reduce((s, t) => s + t.totalShare, 0);
+          const dateSpan = chosenTimings.length
+            ? [...chosenTimings]
+                .map((t) => t.dateKey)
+                .sort()
+                .filter((_, i, arr) => i === 0 || i === arr.length - 1)
+            : [];
+
+          return (
+            <div className="space-y-5">
+              {/* ---- Bandeau enseignant ---------------------------------- */}
+              <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-primary/25 bg-gradient-to-r from-primary-50/70 to-transparent p-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full border border-primary/25 bg-primary/10 text-sm font-bold tracking-wider text-primary">
+                    {selectedTeacher.firstName.charAt(0).toUpperCase()}
+                    {selectedTeacher.lastName.charAt(0).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <strong className="block text-base text-ink">
+                      {selectedTeacher.firstName} {selectedTeacher.lastName}
+                    </strong>
+                    <span className="block text-[11px] text-muted">
+                      {selectedTeacher.isPassager
+                        ? "Enseignant passager — réglé à la séance"
+                        : selectedTeacher.paymentType === "monthly"
+                          ? `Salaire fixe ${selectedTeacher.monthlyAmount ?? 0} DA / mois`
+                          : `Rémunération ${selectedTeacher.percentage ?? 0} % par élève présent`}
+                      {selectedTeacher.phone ? ` · ${selectedTeacher.phone}` : ""}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone="warning" className="font-bold">
+                    {payTimings.length} créneau(x) à régler
+                  </Badge>
+                  <Badge tone="primary" className="font-mono font-bold">
+                    {totalDue} DA dus
+                  </Badge>
+                </div>
               </div>
-              <div className="flex gap-2">
-                <Badge tone="warning" className="font-bold">{payTimings.length} créneau(x) non payé(s)</Badge>
-                <Badge tone="primary" className="font-bold">{chosenPresents} présence(s) sélectionnée(s)</Badge>
+
+              {payTimings.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-success/40 bg-success/5 py-12 text-center">
+                  <strong className="block text-sm text-success">Rien à régler.</strong>
+                  <span className="mt-1 block text-[11px] text-muted">
+                    Tous les créneaux de cet enseignant ont déjà été payés — et les séances
+                    offertes ne se paient jamais.
+                  </span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
+                  {/* =========== COLONNE GAUCHE : les créneaux =========== */}
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="relative min-w-[12rem] flex-1">
+                        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                        <Input
+                          value={timingSearch}
+                          onChange={(e) => setTimingSearch(e.target.value)}
+                          placeholder="Filtrer par date, module, classe, élève..."
+                          className="pl-9"
+                        />
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          setSelectedTimingKeys(
+                            allVisibleChosen
+                              ? selectedTimingKeys.filter((k) => !visibleKeys.includes(k))
+                              : [...new Set([...selectedTimingKeys, ...visibleKeys])],
+                          )
+                        }
+                      >
+                        {allVisibleChosen ? <Square className="h-3.5 w-3.5" /> : <CheckSquare className="h-3.5 w-3.5" />}
+                        {allVisibleChosen ? "Tout décocher" : "Tout cocher"}
+                      </Button>
+                    </div>
+
+                    <div className="max-h-[52vh] space-y-2 overflow-y-auto pr-1">
+                      {visibleTimings.length === 0 && (
+                        <p className="rounded-2xl border border-dashed border-line py-8 text-center text-xs italic text-muted">
+                          Aucun créneau ne correspond à ce filtre.
+                        </p>
+                      )}
+                      {visibleTimings.map((t) => {
+                        const checked = selectedTimingKeys.includes(t.key);
+                        const expanded = expandedTimingKey === t.key;
+                        const groupsInTiming = [...new Set(t.students.map((s) => s.groupName))];
+                        const visibleStudents =
+                          timingGroupFilter === "all"
+                            ? t.students
+                            : t.students.filter((s) => s.groupName === timingGroupFilter);
+                        return (
+                          <div
+                            key={t.key}
+                            className={`overflow-hidden rounded-2xl border transition-colors ${
+                              checked ? "border-primary/40 bg-primary-50/30" : "border-line bg-canvas/20"
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2 p-3">
+                              <label className="flex min-w-0 cursor-pointer items-start gap-2.5">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() =>
+                                    setSelectedTimingKeys(
+                                      checked
+                                        ? selectedTimingKeys.filter((k) => k !== t.key)
+                                        : [...selectedTimingKeys, t.key],
+                                    )
+                                  }
+                                  className="mt-0.5 h-4 w-4 shrink-0"
+                                />
+                                <span className="min-w-0">
+                                  <strong className="flex items-center gap-1.5 text-xs text-ink">
+                                    <CalendarDays className="h-3.5 w-3.5 text-primary" />
+                                    {formatDateFr(t.dateKey)} — {t.title}
+                                    {t.isOpen && (
+                                      <Badge tone="success" className="text-[9px]">Séance libre</Badge>
+                                    )}
+                                  </strong>
+                                  <span className="mt-0.5 block text-[10px] text-muted">
+                                    {t.className} · Gr: {t.groupName} ·{" "}
+                                    <span className="font-mono">
+                                      {t.startTime} - {t.endTime}
+                                    </span>
+                                  </span>
+                                </span>
+                              </label>
+                              <div className="flex shrink-0 items-center gap-2">
+                                <Badge tone="primary" className="font-mono text-[10px] font-bold">
+                                  <Users className="mr-1 inline h-3 w-3" />
+                                  {t.students.length}
+                                  {t.passagers > 0 && ` (${t.passagers} pass.)`}
+                                </Badge>
+                                <Badge tone="neutral" className="font-mono text-[10px] font-bold">
+                                  {t.totalFees} DA encaissés
+                                </Badge>
+                                {checked && (
+                                  <Badge tone="success" className="font-mono text-[10px] font-bold">
+                                    → {shareForTiming(t)} DA
+                                  </Badge>
+                                )}
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => setExpandedTimingKey(expanded ? null : t.key)}
+                                >
+                                  {expanded ? "Masquer" : "Détails"}
+                                </Button>
+                              </div>
+                            </div>
+
+                            {expanded && (
+                              <div className="space-y-2 border-t border-line bg-surface p-3">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="mr-1 text-[10px] font-bold uppercase text-muted">Filtrer :</span>
+                                  {["all", ...groupsInTiming].map((g) => (
+                                    <button
+                                      key={g}
+                                      onClick={() => setTimingGroupFilter(g)}
+                                      className={`rounded-lg px-2 py-1 text-[10px] font-bold transition-all ${
+                                        timingGroupFilter === g
+                                          ? "bg-primary text-white"
+                                          : "bg-canvas text-muted hover:text-ink"
+                                      }`}
+                                    >
+                                      {g === "all"
+                                        ? `Tous (${t.students.length})`
+                                        : `${g} (${t.students.filter((s) => s.groupName === g).length})`}
+                                    </button>
+                                  ))}
+                                </div>
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="text-left text-[10px] font-bold uppercase text-muted">
+                                      <th className="py-1">Élève</th>
+                                      <th className="py-1">Groupe</th>
+                                      <th className="py-1">Heure</th>
+                                      <th className="py-1">Statut</th>
+                                      <th className="py-1 text-right">Tarif élève</th>
+                                      <th className="py-1 text-right">
+                                        Part prof {payMethod === "percent" ? `(${payPercentage} %)` : ""}
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {visibleStudents.map((st, i) => (
+                                      <tr key={i} className="border-t border-line/50">
+                                        <td className="py-1.5 font-semibold text-ink">
+                                          {st.name}
+                                          {st.isPassager && (
+                                            <Badge tone="warning" className="ml-1.5 text-[8px]">Passager</Badge>
+                                          )}
+                                        </td>
+                                        <td className="py-1.5 text-muted">{st.groupName}</td>
+                                        <td className="py-1.5 font-mono">{st.time}</td>
+                                        <td className="py-1.5">
+                                          <Badge
+                                            tone={st.status === "En Retard" ? "warning" : "success"}
+                                            className="text-[9px]"
+                                          >
+                                            {st.status}
+                                          </Badge>
+                                        </td>
+                                        <td className="py-1.5 text-right font-mono">{st.fee} DA</td>
+                                        <td className="py-1.5 text-right font-mono font-bold text-primary">
+                                          {payMethod === "percent"
+                                            ? `${Math.round((st.fee * payPercentage) / 100)} DA`
+                                            : "—"}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* =========== COLONNE DROITE : le calcul =========== */}
+                  <div className="space-y-3 lg:sticky lg:top-2 lg:self-start">
+                    {/* Ce qui est sélectionné */}
+                    <div className="rounded-2xl border border-line bg-canvas p-4">
+                      <span className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                        Ce que couvre ce règlement
+                      </span>
+                      <div className="grid grid-cols-2 gap-2 text-center">
+                        <div className="rounded-xl border border-line bg-surface p-2">
+                          <span className="block text-[9px] uppercase text-muted">Créneaux</span>
+                          <strong className="font-mono text-base text-ink">{chosenTimings.length}</strong>
+                        </div>
+                        <div className="rounded-xl border border-line bg-surface p-2">
+                          <span className="block text-[9px] uppercase text-muted">Présences</span>
+                          <strong className="font-mono text-base text-ink">{chosenPresents}</strong>
+                        </div>
+                        <div className="rounded-xl border border-line bg-surface p-2">
+                          <span className="block text-[9px] uppercase text-muted">Passagers</span>
+                          <strong className="font-mono text-base text-warning">{chosenPassagers}</strong>
+                        </div>
+                        <div className="rounded-xl border border-line bg-surface p-2">
+                          <span className="block text-[9px] uppercase text-muted">Encaissé</span>
+                          <strong className="font-mono text-base text-success">{chosenRevenue} DA</strong>
+                        </div>
+                      </div>
+                      {dateSpan.length > 0 && (
+                        <p className="mt-2 text-center text-[10px] text-muted">
+                          Période : {formatDateFr(dateSpan[0])}
+                          {dateSpan.length > 1 && ` → ${formatDateFr(dateSpan[1])}`}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Mode de calcul */}
+                    <div className="space-y-3 rounded-2xl border border-primary/25 bg-primary-50/40 p-4">
+                      <span className="block text-[10px] font-bold uppercase tracking-wider text-primary">
+                        Mode de rémunération
+                      </span>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPayMethod("fixed")}
+                          className={`rounded-xl border p-3 text-left transition-all ${
+                            payMethod === "fixed"
+                              ? "border-primary bg-primary/10 ring-2 ring-primary/25"
+                              : "border-line bg-surface"
+                          }`}
+                        >
+                          <span className="mb-1 flex items-center gap-1.5">
+                            <DollarSign className={`h-4 w-4 ${payMethod === "fixed" ? "text-primary" : "text-muted"}`} />
+                            <span className="text-xs font-bold text-ink">Montant fixe</span>
+                          </span>
+                          <span className="block text-[10px] leading-normal text-muted">
+                            Vous saisissez la somme.
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPayMethod("percent")}
+                          className={`rounded-xl border p-3 text-left transition-all ${
+                            payMethod === "percent"
+                              ? "border-primary bg-primary/10 ring-2 ring-primary/25"
+                              : "border-line bg-surface"
+                          }`}
+                        >
+                          <span className="mb-1 flex items-center gap-1.5">
+                            <Percent className={`h-4 w-4 ${payMethod === "percent" ? "text-primary" : "text-muted"}`} />
+                            <span className="text-xs font-bold text-ink">Pourcentage</span>
+                          </span>
+                          <span className="block text-[10px] leading-normal text-muted">
+                            % du tarif de chaque élève.
+                          </span>
+                        </button>
+                      </div>
+
+                      {payMethod === "fixed" ? (
+                        <div>
+                          <label className="mb-1 block text-[10px] font-semibold text-muted">
+                            Montant brut à verser (DA) *
+                          </label>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={payFixedAmount || ""}
+                            onChange={(e) => setPayFixedAmount(Number(e.target.value))}
+                            placeholder="Ex: 4000"
+                          />
+                        </div>
+                      ) : (
+                        <div>
+                          <label className="mb-1 block text-[10px] font-semibold text-muted">
+                            Pourcentage par élève présent (%)
+                          </label>
+                          <Input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={payPercentage || ""}
+                            onChange={(e) => setPayPercentage(Number(e.target.value))}
+                          />
+                          <p className="mt-1.5 text-[10px] text-muted">
+                            {chosenRevenue} DA encaissés × {payPercentage} % ={" "}
+                            <strong className="text-primary">{computedPayout} DA</strong>
+                          </p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Retenues — seulement pour un enseignant de l'école */}
+                    {!selectedTeacher.isPassager && (totalOpenAcomptes > 0 || totalOpenAbsences > 0) && (
+                      <div className="space-y-2 rounded-2xl border border-danger/25 bg-danger/5 p-4">
+                        <span className="block text-[10px] font-bold uppercase tracking-wider text-danger">
+                          Retenues à déduire
+                        </span>
+                        {totalOpenAcomptes > 0 && (
+                          <label className="flex cursor-pointer items-center justify-between gap-2 text-xs">
+                            <span className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={deductAcomptes}
+                                onChange={(e) => setDeductAcomptes(e.target.checked)}
+                                className="h-4 w-4"
+                              />
+                              <span className="text-ink">
+                                Acomptes déjà versés
+                                <span className="block text-[10px] text-muted">
+                                  {openAcomptes.length} avance(s)
+                                </span>
+                              </span>
+                            </span>
+                            <strong className="font-mono text-danger">-{totalOpenAcomptes} DA</strong>
+                          </label>
+                        )}
+                        {totalOpenAbsences > 0 && (
+                          <label className="flex cursor-pointer items-center justify-between gap-2 text-xs">
+                            <span className="flex items-center gap-2">
+                              <input
+                                type="checkbox"
+                                checked={deductAbsences}
+                                onChange={(e) => setDeductAbsences(e.target.checked)}
+                                className="h-4 w-4"
+                              />
+                              <span className="text-ink">
+                                Retenues pour absence
+                                <span className="block text-[10px] text-muted">
+                                  {openAbsences.length} retenue(s)
+                                </span>
+                              </span>
+                            </span>
+                            <strong className="font-mono text-danger">-{totalOpenAbsences} DA</strong>
+                          </label>
+                        )}
+                        <p className="border-t border-danger/20 pt-2 text-[10px] leading-relaxed text-muted">
+                          Cochées, elles sont <strong>rattachées</strong> à ce règlement — jamais
+                          supprimées. Annuler le règlement les rend à nouveau exigibles.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Total */}
+                    <div className="space-y-1.5 rounded-2xl border-2 border-success/40 bg-success/5 p-4 text-xs">
+                      <div className="flex justify-between">
+                        <span className="text-muted">Part enseignant brute</span>
+                        <strong className="font-mono text-ink">{computedPayout} DA</strong>
+                      </div>
+                      {appliedAcomptes > 0 && (
+                        <div className="flex justify-between text-danger">
+                          <span>Acomptes</span>
+                          <strong className="font-mono">-{appliedAcomptes} DA</strong>
+                        </div>
+                      )}
+                      {appliedAbsences > 0 && (
+                        <div className="flex justify-between text-danger">
+                          <span>Absences</span>
+                          <strong className="font-mono">-{appliedAbsences} DA</strong>
+                        </div>
+                      )}
+                      <div className="flex items-end justify-between border-t border-success/30 pt-2">
+                        <span className="text-[10px] font-bold uppercase text-muted">Net à verser</span>
+                        <strong className="font-mono text-2xl font-black text-success">{netPayout} DA</strong>
+                      </div>
+                      <p className="text-[10px] text-muted">
+                        {chosenTimings.length} créneau(x) · {chosenPresents} présence(s)
+                        {chosenPassagers > 0 && ` · ${chosenPassagers} passager(s)`}
+                      </p>
+                    </div>
+
+                    {netPayout <= 0 && (
+                      <div className="flex items-start gap-2 rounded-2xl border border-warning/30 bg-warning/5 p-3 text-[11px] text-muted">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                        <span>
+                          Rien à verser en l&apos;état : les retenues couvrent (ou dépassent) la part
+                          due. Décochez une retenue, ou sélectionnez d&apos;autres créneaux.
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <Button variant="outline" className="flex-1" onClick={() => setIsTimingPayOpen(false)}>
+                        Annuler
+                      </Button>
+                      <Button
+                        variant="success"
+                        className="flex-1"
+                        onClick={handleTimingPayment}
+                        disabled={savingPayment || netPayout <= 0 || selectedTimingKeys.length === 0}
+                      >
+                        {savingPayment ? "Enregistrement..." : `Payer ${netPayout} DA`}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Modifier un règlement de l'historique                               */}
+      {/* ------------------------------------------------------------------ */}
+      <Modal
+        open={!!editingPayment}
+        onClose={() => setEditingPayment(null)}
+        title="Modifier le règlement"
+        subtitle="Le mouvement de caisse suit le nouveau montant. Les créneaux réglés restent réglés — pour les rendre, annulez le règlement."
+      >
+        {editingPayment && (
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-line bg-canvas p-3 text-[11px] text-muted">
+              Règlement du{" "}
+              <strong className="text-ink">
+                {new Date(editingPayment.paidAt).toLocaleString("fr-DZ", {
+                  day: "2-digit", month: "2-digit", year: "numeric",
+                  hour: "2-digit", minute: "2-digit",
+                })}
+              </strong>{" "}
+              · {editingPayment.sessionsCount} créneau(x) · {editingPayment.studentsCount} présence(s)
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-muted">Montant versé (DA) *</label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={payEditAmount || ""}
+                  onChange={(e) => setPayEditAmount(Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-muted">Date et heure</label>
+                <Input
+                  type="datetime-local"
+                  value={payEditDate}
+                  onChange={(e) => setPayEditDate(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-muted">Mode</label>
+                <Select
+                  value={payEditMethod}
+                  onChange={(e) => setPayEditMethod(e.target.value as "fixed" | "percent")}
+                >
+                  <option value="fixed">Montant fixe</option>
+                  <option value="percent">Pourcentage</option>
+                </Select>
+              </div>
+              {payEditMethod === "percent" && (
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-muted">Pourcentage (%)</label>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={payEditPercentage || ""}
+                    onChange={(e) => setPayEditPercentage(Number(e.target.value))}
+                  />
+                </div>
+              )}
+              <div className="sm:col-span-2">
+                <label className="mb-1 block text-xs font-semibold text-muted">Libellé</label>
+                <Input
+                  value={payEditDescription}
+                  onChange={(e) => setPayEditDescription(e.target.value)}
+                  placeholder="Règlement séances..."
+                />
               </div>
             </div>
 
-            {payTimings.length === 0 ? (
-              <p className="text-xs text-success font-bold text-center py-10 border border-dashed border-line rounded-2xl">
-                Tous les créneaux de cet enseignant ont déjà été réglés.
-              </p>
-            ) : (
-              <>
-                {/* Summary of what is being paid */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <div className="bg-canvas border border-line p-3 rounded-xl text-center">
-                    <span className="text-muted text-[10px] uppercase block font-semibold">Créneaux</span>
-                    <strong className="text-ink text-base font-mono">{chosenTimings.length}</strong>
-                  </div>
-                  <div className="bg-canvas border border-line p-3 rounded-xl text-center">
-                    <span className="text-muted text-[10px] uppercase block font-semibold">Élèves présents</span>
-                    <strong className="text-ink text-base font-mono">{chosenPresents}</strong>
-                  </div>
-                  <div className="bg-canvas border border-line p-3 rounded-xl text-center">
-                    <span className="text-muted text-[10px] uppercase block font-semibold">Dont passagers</span>
-                    <strong className="text-warning text-base font-mono">{chosenPassagers}</strong>
-                  </div>
-                  <div className="bg-canvas border border-line p-3 rounded-xl text-center">
-                    <span className="text-muted text-[10px] uppercase block font-semibold">Montant généré</span>
-                    <strong className="text-success text-base font-mono">{chosenRevenue} DA</strong>
-                  </div>
-                </div>
-
-                {/* Payment method */}
-                <div className="rounded-2xl border border-primary/25 bg-primary-50/40 p-4 space-y-3">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-primary">
-                    Mode de rémunération
-                  </span>
-                  <div className="grid grid-cols-2 gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setPayMethod("fixed")}
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        payMethod === "fixed" ? "border-primary bg-primary/10 ring-2 ring-primary/25" : "border-line bg-surface"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <DollarSign className={`h-4 w-4 ${payMethod === "fixed" ? "text-primary" : "text-muted"}`} />
-                        <span className="font-bold text-xs text-ink">Montant fixe</span>
-                      </div>
-                      <span className="text-[10px] text-muted block leading-normal">
-                        Vous saisissez directement la somme à verser.
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPayMethod("percent")}
-                      className={`p-3 rounded-xl border text-left transition-all ${
-                        payMethod === "percent" ? "border-primary bg-primary/10 ring-2 ring-primary/25" : "border-line bg-surface"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 mb-1">
-                        <Percent className={`h-4 w-4 ${payMethod === "percent" ? "text-primary" : "text-muted"}`} />
-                        <span className="font-bold text-xs text-ink">Pourcentage</span>
-                      </div>
-                      <span className="text-[10px] text-muted block leading-normal">
-                        % appliqué au tarif de chaque élève présent — calcul automatique.
-                      </span>
-                    </button>
-                  </div>
-
-                  {payMethod === "fixed" ? (
-                    <div>
-                      <label className="block text-[10px] font-semibold text-muted mb-1">Montant à verser (DA) *</label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={payFixedAmount || ""}
-                        onChange={(e) => setPayFixedAmount(Number(e.target.value))}
-                        placeholder="Ex: 4000"
-                        className="w-48"
-                      />
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap items-end gap-4">
-                      <div>
-                        <label className="block text-[10px] font-semibold text-muted mb-1">
-                          Pourcentage par élève / par module (%)
-                        </label>
-                        <Input
-                          type="number"
-                          min={0}
-                          max={100}
-                          value={payPercentage || ""}
-                          onChange={(e) => setPayPercentage(Number(e.target.value))}
-                          className="w-32"
-                        />
-                      </div>
-                      <div className="pb-1.5 text-xs">
-                        <span className="block text-[10px] font-semibold text-muted mb-1">Calcul automatique</span>
-                        <strong className="text-primary">
-                          {chosenRevenue} DA × {payPercentage}% = {computedPayout} DA
-                        </strong>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Timings list, each expandable to the students present */}
-                <div className="space-y-2 max-h-[38vh] overflow-y-auto pr-1">
-                  {payTimings.map((t) => {
-                    const checked = selectedTimingKeys.includes(t.key);
-                    const expanded = expandedTimingKey === t.key;
-                    const groupsInTiming = [...new Set(t.students.map((s) => s.groupName))];
-                    const visibleStudents =
-                      timingGroupFilter === "all"
-                        ? t.students
-                        : t.students.filter((s) => s.groupName === timingGroupFilter);
-                    return (
-                      <div key={t.key} className="border border-line rounded-2xl bg-canvas/20 overflow-hidden">
-                        <div className="flex flex-wrap items-center justify-between gap-2 p-3">
-                          <label className="flex items-start gap-2.5 min-w-0 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={checked}
-                              onChange={() =>
-                                setSelectedTimingKeys(
-                                  checked
-                                    ? selectedTimingKeys.filter((k) => k !== t.key)
-                                    : [...selectedTimingKeys, t.key],
-                                )
-                              }
-                              className="h-4 w-4 mt-0.5 shrink-0"
-                            />
-                            <span className="min-w-0">
-                              <strong className="text-ink block text-xs">
-                                📅 {formatDateFr(t.dateKey)} — {t.title}
-                                {t.isOpen && <Badge tone="success" className="ml-1.5 text-[9px]">Séance libre</Badge>}
-                              </strong>
-                              <span className="text-[10px] text-muted block">
-                                {t.className} · Gr: {t.groupName} ·{" "}
-                                <span className="font-mono">{t.startTime} - {t.endTime}</span>
-                              </span>
-                            </span>
-                          </label>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <Badge tone="primary" className="font-mono font-bold text-[10px]">
-                              <Users className="h-3 w-3 inline mr-1" />
-                              {t.students.length}
-                              {t.passagers > 0 && ` (${t.passagers} pass.)`}
-                            </Badge>
-                            <Badge tone="success" className="font-mono font-bold text-[10px]">{t.totalFees} DA</Badge>
-                            {checked && (
-                              <Badge tone="warning" className="font-mono font-bold text-[10px]">
-                                → {shareForTiming(t)} DA
-                              </Badge>
-                            )}
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => setExpandedTimingKey(expanded ? null : t.key)}
-                            >
-                              {expanded ? "Masquer" : "Détails élèves"}
-                            </Button>
-                          </div>
-                        </div>
-
-                        {expanded && (
-                          <div className="border-t border-line bg-surface p-3 space-y-2">
-                            {/* Filter the presence list by group */}
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="text-[10px] uppercase font-bold text-muted mr-1">Filtrer :</span>
-                              {["all", ...groupsInTiming].map((g) => (
-                                <button
-                                  key={g}
-                                  onClick={() => setTimingGroupFilter(g)}
-                                  className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all ${
-                                    timingGroupFilter === g ? "bg-primary text-white" : "bg-canvas text-muted hover:text-ink"
-                                  }`}
-                                >
-                                  {g === "all" ? `Tous (${t.students.length})` : `${g} (${t.students.filter((s) => s.groupName === g).length})`}
-                                </button>
-                              ))}
-                            </div>
-                            <table className="w-full text-xs">
-                              <thead>
-                                <tr className="text-[10px] uppercase text-muted font-bold text-left">
-                                  <th className="py-1">Élève</th>
-                                  <th className="py-1">Groupe</th>
-                                  <th className="py-1">Heure</th>
-                                  <th className="py-1">Statut</th>
-                                  <th className="py-1 text-right">Tarif élève</th>
-                                  <th className="py-1 text-right">
-                                    Part prof {payMethod === "percent" ? `(${payPercentage}%)` : ""}
-                                  </th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {visibleStudents.map((st, i) => (
-                                  <tr key={i} className="border-t border-line/50">
-                                    <td className="py-1.5 font-semibold text-ink">
-                                      {st.name}
-                                      {st.isPassager && (
-                                        <Badge tone="warning" className="ml-1.5 text-[8px]">Passager</Badge>
-                                      )}
-                                    </td>
-                                    <td className="py-1.5 text-muted">{st.groupName}</td>
-                                    <td className="py-1.5 font-mono">{st.time}</td>
-                                    <td className="py-1.5">
-                                      <Badge tone={st.status === "En Retard" ? "warning" : "success"} className="text-[9px]">
-                                        {st.status}
-                                      </Badge>
-                                    </td>
-                                    <td className="py-1.5 text-right font-mono">{st.fee} DA</td>
-                                    <td className="py-1.5 text-right font-mono font-bold text-primary">
-                                      {payMethod === "percent"
-                                        ? Math.round((st.fee * payPercentage) / 100)
-                                        : "—"}{" "}
-                                      {payMethod === "percent" ? "DA" : ""}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="rounded-2xl border-2 border-success/40 bg-success/5 p-4 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <span className="text-[10px] uppercase font-bold text-muted block">Montant à verser</span>
-                    <strong className="text-success text-xl font-black">{computedPayout} DA</strong>
-                    <span className="text-[10px] text-muted block mt-0.5">
-                      {chosenTimings.length} créneau(x) · {chosenPresents} présence(s)
-                      {chosenPassagers > 0 && ` · ${chosenPassagers} passager(s)`}
-                    </span>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" onClick={() => setIsTimingPayOpen(false)}>Annuler</Button>
-                    <Button
-                      onClick={handleTimingPayment}
-                      disabled={savingPayment || computedPayout <= 0 || selectedTimingKeys.length === 0}
-                    >
-                      {savingPayment ? "Enregistrement..." : `Payer ${computedPayout} DA`}
-                    </Button>
-                  </div>
-                </div>
-              </>
-            )}
+            <div className="flex justify-between gap-2 border-t border-line pt-4">
+              <Button
+                variant="danger"
+                onClick={async () => {
+                  const p = editingPayment;
+                  setEditingPayment(null);
+                  await handleDeletePayment(p);
+                }}
+              >
+                <Trash2 className="h-4 w-4" /> Annuler ce règlement
+              </Button>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={() => setEditingPayment(null)}>Fermer</Button>
+                <Button onClick={handleSavePaymentEdit} disabled={savingPaymentEdit}>
+                  {savingPaymentEdit ? "Enregistrement..." : "Enregistrer"}
+                </Button>
+              </div>
+            </div>
           </div>
         )}
       </Modal>
 
       {/* Print Salary Modal */}
+
       <Modal open={isPrintOpen} onClose={() => setIsPrintOpen(false)} title="Sélectionner la période d'impression">
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
