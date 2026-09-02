@@ -31,6 +31,7 @@ import { useSettings, rollCallKey, type AttendanceOpenMode } from "@/lib/store/s
 import { formatDA } from "@/lib/utils";
 import {
   formatDateFr,
+  freePeriodCovering,
   netPriceFor,
   rollCallOpensAt,
   isRollCallOpen as isRollCallOpenFor,
@@ -216,16 +217,8 @@ export function AttendancePage() {
   };
 
   /** Free period covering that séance on the sheet date (séance offerte). */
-  const freePeriodFor = (ses: ScheduleSession): FreePeriod | undefined => {
-    const classIds = [ses.classId, ...(ses.classIds ?? [])];
-    return freePeriods.find(
-      (fp) =>
-        fp.active &&
-        fp.startDate <= sheetDate &&
-        fp.endDate >= sheetDate &&
-        (fp.allClasses || fp.classIds.some((id) => classIds.includes(id))),
-    );
-  };
+  const freePeriodFor = (ses: ScheduleSession): FreePeriod | undefined =>
+    freePeriodCovering(freePeriods, [ses.classId, ...(ses.classIds ?? [])], sheetDate);
 
   // A sheet in the future can be consulted, but nothing can be marked on it.
   const isFutureSheet = sheetDate > todayStr;

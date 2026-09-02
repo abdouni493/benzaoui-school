@@ -31,7 +31,7 @@ import type { IndependentSession, Student } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
 import { checkOpenSeanceAudience } from "@/lib/seanceAudience";
 import { TICKET_PAGE_CSS, fmtDate, fmtDateTime, printDocument } from "@/lib/printTemplates";
-import { formatDateFr, isExpiredOpenSeance } from "@/lib/helpers";
+import { formatDateFr, freePeriodCovering, isExpiredOpenSeance } from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
 
 /** Everything the séance libre receipt needs, captured at creation time. */
@@ -72,6 +72,9 @@ interface SeanceOption {
   periodLabel?: string;
   /** the whole séance libre timing is offered — every présence on it is free */
   sessionIsFree: boolean;
+  /** classes the timing covers — a séance libre spans several of them. A
+   *  période gratuite applies as soon as it covers ONE of them. */
+  classIds: string[];
 }
 
 const RECEIPT_LABELS = {
@@ -177,6 +180,7 @@ export function IndependentPage() {
     classes,
     groups,
     salles,
+    freePeriods,
     push,
     deleteFrom,
     updateItem,
@@ -283,6 +287,7 @@ export function IndependentPage() {
             ? `${formatDateFr(s.periodStart)} → ${formatDateFr(s.periodEnd)}`
             : undefined,
         sessionIsFree: isOpen && !!s.isFree,
+        classIds: isOpen && s.classIds?.length ? s.classIds : [s.classId],
       });
     });
 
@@ -356,12 +361,30 @@ export function IndependentPage() {
   /** Le créneau choisi exclut-il l'élève choisi ? (undefined = tout va bien) */
   const selectedOutOfAudience = selectedItem ? audienceVerdictFor(selectedItem) : undefined;
 
+  /**
+   * Période gratuite couvrant le créneau choisi, à la date choisie.
+   *
+   * Le guichet ignorait complètement les périodes gratuites : la même séance
+   * était offerte quand l'élève badgeait, et encaissée quand la réception la
+   * saisissait à la main. D'où « la période gratuite marche pour certains
+   * élèves et pas pour d'autres ». Un PASSAGER n'est pas concerné : il n'a ni
+   * classe ni abonnement, et la séance libre existe pour l'encaisser.
+   */
+  const freePeriodForSelected = useMemo(() => {
+    if (!selectedItem || !selectedStudent) return undefined;
+    return freePeriodCovering(freePeriods, selectedItem.classIds, casualDate);
+  }, [freePeriods, selectedItem, selectedStudent, casualDate]);
+
+  /** Trois façons d'offrir la séance : la case cochée au guichet, le créneau
+   *  coché « offert » sur le planning, une période gratuite en cours. */
+  const seanceIsOffered = isFreeSeance || !!freePeriodForSelected;
+
   /** Tariff of the picked séance, reduction/override included. */
   const listedPrice = customPrice ?? selectedItem?.price ?? 0;
   /** What is actually cashed: nothing at all on an offered séance. */
-  const effectivePrice = isFreeSeance ? 0 : listedPrice;
+  const effectivePrice = seanceIsOffered ? 0 : listedPrice;
   /** What the school gives away when the séance is offered. */
-  const waivedPrice = isFreeSeance ? listedPrice : 0;
+  const waivedPrice = seanceIsOffered ? listedPrice : 0;
 
   /** Reverse lookup used by the list/cards to describe a stored séance. */
   const optionForSession = (sessionId?: string) =>
@@ -469,7 +492,7 @@ ${refused.reason}
     }
 
     // An amount to cash must be validated first; an offered séance skips it.
-    if (!isFreeSeance && !paymentValidated) {
+    if (!seanceIsOffered && !paymentValidated) {
       alert("Validez d'abord l'encaissement du paiement.");
       return;
     }
@@ -491,7 +514,7 @@ ${refused.reason}
         passagerName: passagerName || undefined,
         itemLabel: selectedItem.label,
         price,
-        isFree: isFreeSeance,
+        isFree: seanceIsOffered,
         waivedAmount: waived,
         date: casualDate,
         sessionId: selectedItem.sessionId,
@@ -510,7 +533,7 @@ ${refused.reason}
       passagerName: passagerName || undefined,
       itemLabel: selectedItem.label,
       price,
-      isFree: isFreeSeance,
+      isFree: seanceIsOffered,
       waivedAmount: waived,
       date: casualDate,
       sessionId: selectedItem.sessionId,
@@ -523,7 +546,7 @@ ${refused.reason}
 
     // Séance offerte: nothing is debited, nothing is cashed, and the teacher
     // earns no share for it (see buildUnpaidTimings on the Enseignants screen).
-    if (!isFreeSeance) {
+    if (!seanceIsOffered) {
       // Registered student: the séance is debited from his balance right away.
       if (selectedStudent) {
         const student = students.find((st) => st.id === selectedStudent.id);
@@ -569,7 +592,7 @@ ${refused.reason}
       timeLabel: selectedItem.timeLabel,
       daysLabel: selectedItem.daysLabel,
       price,
-      isFree: isFreeSeance,
+      isFree: seanceIsOffered,
       waived,
       date: casualDate,
       createdAt: nowIso,
@@ -1144,7 +1167,7 @@ ${refused.reason}
                     {selectedStudent.isFree ? selectedStudent.balance : selectedStudent.balance - effectivePrice} DA
                   </strong>
                   {selectedStudent.isFree && " (élève gratuit — aucun débit)"}
-                  {isFreeSeance && " — séance offerte, aucun débit"}
+                  {seanceIsOffered && " — séance offerte, aucun débit"}
                 </span>
               </div>
             ) : (
@@ -1304,21 +1327,24 @@ ${refused.reason}
                 )}
 
                 {/* Séance offerte: nobody is paid on it — neither the school,
-                    nor the teacher who animates it. A créneau flagged « offert »
-                    on the planning forces this on and locks it. */}
+                    nor the teacher who animates it. Two settings force it on and
+                    lock it: a créneau flagged « offert » on the planning, and a
+                    période gratuite covering the student's class that day. */}
                 <label
                   className={`flex items-start gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
-                    selectedItem.sessionIsFree ? "cursor-not-allowed" : "cursor-pointer"
+                    selectedItem.sessionIsFree || freePeriodForSelected
+                      ? "cursor-not-allowed"
+                      : "cursor-pointer"
                   } ${
-                    isFreeSeance
+                    seanceIsOffered
                       ? "border-warning/40 bg-warning/10"
                       : "border-line bg-canvas/30 hover:bg-primary-50/40"
                   }`}
                 >
                   <input
                     type="checkbox"
-                    checked={isFreeSeance}
-                    disabled={selectedItem.sessionIsFree}
+                    checked={seanceIsOffered}
+                    disabled={selectedItem.sessionIsFree || !!freePeriodForSelected}
                     onChange={(e) => { setIsFreeSeance(e.target.checked); setPaymentValidated(false); }}
                     className="mt-0.5 h-4 w-4 shrink-0"
                   />
@@ -1334,12 +1360,20 @@ ${refused.reason}
                         🎁 Ce créneau est configuré comme « offert » dans le planning — toute présence y est gratuite.
                       </span>
                     )}
+                    {freePeriodForSelected && (
+                      <span className="mt-1 block text-[10px] font-bold text-warning">
+                        🎁 Période gratuite « {freePeriodForSelected.name} » en cours du{" "}
+                        {formatDateFr(freePeriodForSelected.startDate)} au{" "}
+                        {formatDateFr(freePeriodForSelected.endDate)} : cet élève ne peut pas être
+                        encaissé sur cette date, sa séance est offerte comme au badge.
+                      </span>
+                    )}
                   </span>
                 </label>
 
                 <div>
                   <label className="block text-xs font-semibold text-muted mb-1 font-sans">
-                    {isFreeSeance ? "Valeur de la séance offerte (DA)" : "3. Montant à encaisser (DA)"}
+                    {seanceIsOffered ? "Valeur de la séance offerte (DA)" : "3. Montant à encaisser (DA)"}
                   </label>
                   <Input
                     type="number"
@@ -1353,7 +1387,7 @@ ${refused.reason}
                   </p>
                 </div>
 
-                {isFreeSeance ? (
+                {seanceIsOffered ? (
                   <div className="rounded-xl border border-warning/30 bg-warning/10 p-3.5 text-xs">
                     <div className="flex items-center justify-between">
                       <span className="font-semibold text-warning">Total à encaisser :</span>
@@ -1403,7 +1437,7 @@ ${refused.reason}
           <span className="text-[10px] text-muted">
             {!selectedItem
               ? "Sélectionnez d'abord un emploi du temps."
-              : isFreeSeance
+              : seanceIsOffered
                 ? `Séance offerte — 0 DA encaissé (valeur ${waivedPrice} DA).`
                 : paymentValidated
                   ? `Paiement validé — ${effectivePrice} DA seront encaissés.`
@@ -1413,13 +1447,13 @@ ${refused.reason}
             <Button variant="outline" onClick={() => setIsFormOpen(false)}>Annuler</Button>
             <Button
               onClick={handleSubmit}
-              disabled={!selectedItem || (!isFreeSeance && !paymentValidated)}
+              disabled={!selectedItem || (!seanceIsOffered && !paymentValidated)}
               className="flex items-center gap-2"
             >
               <Check className="h-4 w-4" />
               {selectedCasual
                 ? "Enregistrer les modifications"
-                : isFreeSeance
+                : seanceIsOffered
                   ? "Enregistrer la séance offerte"
                   : "Valider & Encaisser"}
             </Button>

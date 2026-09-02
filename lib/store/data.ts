@@ -795,6 +795,26 @@ interface DataActions {
     charged?: number;
     refunded?: number;
     teacherDues?: number;
+    teacherDuesRemoved?: number;
+  }>;
+  /** Applies the gratuities decided AFTER the fact to presences already
+   *  recorded: a student charged on a séance that is now offered (créneau
+   *  « offert », période gratuite) is REFUNDED, the price moves to the
+   *  presence's `waivedAmount`, and the teacher's unsettled share on it goes
+   *  away when he earns nothing. Money is only ever given back, never taken.
+   *  Séances already settled to the teacher are never touched. */
+  applyOfferedRules: (args?: {
+    /** YYYY-MM-DD — omit for the whole history */
+    from?: string;
+    to?: string;
+    sessionId?: string;
+  }) => Promise<{
+    ok: boolean;
+    presences?: number;
+    refunded?: number;
+    stamped?: number;
+    duesRemoved?: number;
+    duesUpdated?: number;
   }>;
   /** Stores/updates the printable portal password (staff-only table). */
   setStudentPassword: (studentId: string, password: string) => Promise<void>;
@@ -833,11 +853,15 @@ interface DataActions {
     key: K,
     item: Database[K] extends Array<infer T> ? T : never,
   ) => Promise<boolean>;
+  /** Patche la ligne (localement d'abord, puis en base). Résout à `true` quand
+   *  la base l'a acceptée — ce qu'un appelant doit attendre avant de lancer une
+   *  RPC qui LIT cette ligne (une période gratuite qu'on vient d'activer, par
+   *  exemple), sans quoi la RPC peut passer avant l'écriture. */
   updateItem: <K extends keyof Database>(
     key: K,
     id: string,
     updatedFields: Partial<Database[K] extends Array<infer T> ? T : never>,
-  ) => void;
+  ) => Promise<boolean>;
   cashMove: (
     type: "deposit" | "withdraw",
     amount: number,
@@ -1200,6 +1224,32 @@ export const useData = create<DataStore>((set, get) => ({
       charged?: number;
       refunded?: number;
       teacherDues?: number;
+      teacherDuesRemoved?: number;
+    };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  applyOfferedRules: async (args = {}) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("apply_offered_rules", {
+      p_from: args.from ?? null,
+      p_to: args.to ?? null,
+      p_session_id: args.sessionId ?? null,
+    });
+    if (error || !data) {
+      // Migration pas encore passée : la gratuité s'applique quand même aux
+      // présences À VENIR, seules celles déjà pointées restent facturées.
+      console.error("apply_offered_rules failed:", error?.message);
+      return { ok: false };
+    }
+    const res = data as {
+      ok: boolean;
+      presences?: number;
+      refunded?: number;
+      stamped?: number;
+      duesRemoved?: number;
+      duesUpdated?: number;
     };
     if (res.ok) await get().fetchAll();
     return res;
@@ -1330,14 +1380,14 @@ export const useData = create<DataStore>((set, get) => ({
     return false;
   },
 
-  updateItem: (key, id, updatedFields) => {
+  updateItem: async (key, id, updatedFields) => {
     set((state) => ({
       [key]: (state[key] as Array<{ id: string }>).map((x) =>
         x.id === id ? { ...x, ...updatedFields } : x,
       ),
     }) as Partial<DataStore>);
 
-    if (key === "school") return;
+    if (key === "school") return true;
 
     const supabase = createClient();
 
@@ -1416,14 +1466,16 @@ export const useData = create<DataStore>((set, get) => ({
 
     const cfg = TABLES[key as Exclude<keyof Database, "school">];
     const row = cfg.toRow(updatedFields);
-    if (Object.keys(row).length === 0) return;
-    void writeWithSchemaFallback(row, (patch) =>
+    if (Object.keys(row).length === 0) return true;
+    const error = await writeWithSchemaFallback(row, (patch) =>
       supabase.from(cfg.table).update(patch).eq("id", id),
-    ).then((error) => {
-      if (!error) return;
+    );
+    if (error) {
       console.error(`Failed to update ${cfg.table}:`, error);
       reportWriteFailure(cfg.table, error);
-    });
+      return false;
+    }
+    return true;
   },
 
   deleteFrom: (key, id) => {

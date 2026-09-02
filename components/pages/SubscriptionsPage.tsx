@@ -39,6 +39,13 @@ import {
 } from "lucide-react";
 import type { FreePeriod, FreePeriodStat, Subscription, ScheduleSession } from "@/lib/types";
 
+/** Point de départ par défaut d'une re-tarification : le 1er du mois en cours —
+ *  la facturation d'un mois entamé se corrige d'un bloc, pas séance par séance. */
+function firstOfThisMonth() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), 1).toLocaleDateString("fr-CA");
+}
+
 export function SubscriptionsPage() {
   const {
     school,
@@ -70,15 +77,14 @@ export function SubscriptionsPage() {
   const [levelPrice, setLevelPrice] = useState<number>(0);
   const [periodMonths, setPeriodMonths] = useState<number>(0);
   const [busy, setBusy] = useState(false);
-  // Changer le tarif d'un cours peut aussi RE-TARIFER les séances déjà pointées :
-  // le débit de chaque élève est corrigé et la part encore due à l'enseignant
-  // suit le nouveau prix. Désactivé par défaut — le tarif seul ne réécrit pas
-  // l'histoire ; coché, il s'applique à partir de la date choisie.
-  const [applyToPast, setApplyToPast] = useState(false);
-  const [applyFrom, setApplyFrom] = useState(() => {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1).toLocaleDateString("fr-CA");
-  });
+  // Changer le tarif d'un cours RE-TARIFE aussi les séances déjà pointées : le
+  // débit de chaque élève est corrigé et la part encore due à l'enseignant suit
+  // le nouveau prix. ACTIVÉ par défaut — un tarif changé qui ne descend ni chez
+  // l'élève ni chez l'enseignant ne veut rien dire : l'écran Abonnements
+  // affichait le nouveau prix pendant que l'écran Enseignants devait encore
+  // l'ancien. Décochable, et la date de départ reste réglable.
+  const [applyToPast, setApplyToPast] = useState(true);
+  const [applyFrom, setApplyFrom] = useState(firstOfThisMonth);
 
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
@@ -278,13 +284,36 @@ export function SubscriptionsPage() {
       return false;
     }
 
+    // Re-tarifer touche à de l'argent déjà passé : on le dit AVANT, en nommant
+    // la date, pour qu'il soit encore possible de reculer.
+    //
+    // Un créneau OFFERT est hors sujet : son tarif est 0 par décision, et le
+    // re-tarifer écraserait la valeur de ce qui a été offert (waived_amount),
+    // que les rapports comptent comme le coût de la gratuité.
+    const rewritesPast = applyToPast && !isFormation && !isOfferedSession(sessionId);
+    if (rewritesPast) {
+      const fromLabel = applyFrom.split("-").reverse().join("/");
+      if (
+        !confirm(
+          `Appliquer ${pricePerSession} DA à TOUTES les séances pointées depuis le ${fromLabel} ?` +
+            "\n\n• Le solde de chaque élève est corrigé de la différence, avec une ligne dans son historique." +
+            "\n• La part ENCORE DUE à l'enseignant suit le nouveau tarif." +
+            "\n• Les séances déjà réglées à l'enseignant ne sont jamais retouchées." +
+            "\n• Les séances offertes restent offertes : personne n'y est débité." +
+            "\n\nDécochez « Appliquer aussi aux séances déjà pointées » pour ne changer que le tarif des prochaines séances.",
+        )
+      ) {
+        return false;
+      }
+    }
+
     setBusy(true);
     const res = await repriceSession({
       sessionId,
       price: isFormation ? 0 : pricePerSession,
       levelPrice: isFormation ? levelPrice : undefined,
       periodMonths: isFormation ? periodMonths : undefined,
-      from: applyToPast && !isFormation ? applyFrom : undefined,
+      from: rewritesPast ? applyFrom : undefined,
     });
     setBusy(false);
 
@@ -292,16 +321,23 @@ export function SubscriptionsPage() {
       alert("Enregistrement du tarif impossible. Vérifiez votre connexion et réessayez.");
       return false;
     }
-    if (applyToPast && !isFormation && (res.repriced ?? 0) > 0) {
-      alert(
-        `Tarif enregistré sur ${res.groups ?? 0} groupe(s).
 
-` +
-          `${res.repriced} présence(s) re-tarifée(s) depuis le ${applyFrom.split("-").reverse().join("/")} : ` +
+    // La part encore due à l'enseignant est réalignée à CHAQUE enregistrement,
+    // même sans re-tarification : c'est ce qui manquait pour que l'écran
+    // Enseignants cesse de réclamer l'ancien montant.
+    const duesTouched = (res.teacherDues ?? 0) + (res.teacherDuesRemoved ?? 0);
+    if (rewritesPast && (res.repriced ?? 0) > 0) {
+      alert(
+        `Tarif enregistré sur ${res.groups ?? 0} groupe(s).` +
+          `\n\n${res.repriced} présence(s) re-tarifée(s) depuis le ${applyFrom.split("-").reverse().join("/")} : ` +
           `${res.charged ?? 0} DA débités en plus, ${res.refunded ?? 0} DA rendus aux élèves, ` +
-          `${res.teacherDues ?? 0} part(s) enseignant encore dues mises à jour.
-` +
-          "Les séances déjà réglées à l'enseignant n'ont pas été touchées.",
+          `${duesTouched} part(s) enseignant encore dues mises à jour.` +
+          "\nLes séances déjà réglées à l'enseignant n'ont pas été touchées.",
+      );
+    } else if (duesTouched > 0) {
+      alert(
+        `Tarif enregistré sur ${res.groups ?? 0} groupe(s).` +
+          `\n\n${duesTouched} part(s) enseignant encore dues ont été remises au bon montant.`,
       );
     }
     return true;
@@ -355,10 +391,15 @@ export function SubscriptionsPage() {
     setPeriodMonths(0);
     setSearchQuery("");
     setSelectedSub(null);
+    setApplyToPast(true);
+    setApplyFrom(firstOfThisMonth());
   };
 
   const openEdit = (sub: Subscription) => {
     setSelectedSub(sub);
+    // Chaque ouverture repart du réglage par défaut : le mois en cours, appliqué.
+    setApplyToPast(true);
+    setApplyFrom(firstOfThisMonth());
     setPricePerSession(sub.pricePerSession);
     setLevelPrice(sub.levelPrice ?? 0);
     setPeriodMonths(sub.periodMonths ?? 0);
@@ -919,7 +960,9 @@ export function SubscriptionsPage() {
           )}
 
           {/* Le nouveau tarif descend-il jusqu'aux séances DÉJÀ pointées ? */}
-          {selectedSub && !isFormationSession(selectedSub.sessionId) && (
+          {selectedSub &&
+            !isFormationSession(selectedSub.sessionId) &&
+            !isOfferedSession(selectedSub.sessionId) && (
             <div className="rounded-xl border border-warning/30 bg-warning/5 p-3 space-y-2">
               <label className="flex cursor-pointer items-start gap-2 text-xs">
                 <input
@@ -935,6 +978,9 @@ export function SubscriptionsPage() {
                     la part <strong className="text-ink">encore due</strong> à l&apos;enseignant suit le
                     nouveau prix. Les séances <strong className="text-ink">déjà réglées</strong> à
                     l&apos;enseignant ne sont jamais retouchées.
+                    <br />
+                    Décochez pour que le nouveau tarif ne vaille que{" "}
+                    <strong className="text-ink">à partir de la prochaine séance</strong>.
                   </span>
                 </span>
               </label>
@@ -1094,6 +1140,7 @@ function FreePeriodsPanel() {
     updateItem,
     deleteFrom,
     fetchFreePeriodStats,
+    applyOfferedRules,
   } = db;
 
   const [stats, setStats] = useState<FreePeriodStat[]>([]);
@@ -1185,7 +1232,7 @@ function FreePeriodsPanel() {
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!startDate || !endDate) {
       setError("Indiquez une date de début et une date de fin.");
       return;
@@ -1214,20 +1261,56 @@ function FreePeriodsPanel() {
     };
 
     if (editing) {
-      updateItem("freePeriods", editing.id, payload);
+      await updateItem("freePeriods", editing.id, payload);
     } else {
-      push("freePeriods", {
+      await push("freePeriods", {
         id: uid("fp"),
         createdAt: new Date().toISOString(),
         ...payload,
       });
     }
     setIsFormOpen(false);
+    // Une période couvre presque toujours des jours DÉJÀ passés. Sans ce
+    // rattrapage, les élèves qui avaient badgé avant sa création restaient
+    // débités — et l'enseignant payé sur eux — pendant que ceux d'après
+    // passaient gratuitement : c'est le « ça marche pour certains élèves
+    // seulement » que ce rattrapage fait disparaître.
+    await reconcileOffered(active ? { from: startDate, to: endDate } : null);
   };
 
-  const handleToggleActive = (fp: FreePeriod) => {
-    updateItem("freePeriods", fp.id, { active: !fp.active });
+  /** Applique la gratuité aux présences DÉJÀ pointées sur la fenêtre donnée :
+   *  l'élève débité à tort est remboursé et la séance due non réglée disparaît.
+   *  Rien n'est jamais repris à personne — suspendre ou supprimer une période
+   *  (range null) ne re-débite donc aucun élève. */
+  const reconcileOffered = async (range: { from: string; to: string } | null) => {
+    if (!range) return;
+    const res = await applyOfferedRules(range);
+    if (!res.ok) {
+      alert(
+        "La période est enregistrée, mais les présences déjà pointées n'ont pas pu être " +
+          "rattrapées. Si le message parle d'une fonction manquante, passez la migration " +
+          "supabase/migrations/20260903_price_sync_and_offered_reconcile.sql.",
+      );
+      return;
+    }
+    if ((res.presences ?? 0) > 0 || (res.duesRemoved ?? 0) > 0) {
+      alert(
+        `${res.presences ?? 0} présence(s) déjà pointée(s) sont devenues offertes : ` +
+          `${res.refunded ?? 0} DA rendus aux élèves` +
+          ((res.duesRemoved ?? 0) > 0
+            ? `, ${res.duesRemoved} séance(s) retirée(s) de ce qui reste dû aux enseignants`
+            : "") +
+          ".\nLes règlements déjà versés n'ont pas été touchés.",
+      );
+    }
+  };
+
+  const handleToggleActive = async (fp: FreePeriod) => {
+    await updateItem("freePeriods", fp.id, { active: !fp.active });
     setMenuId(null);
+    // Réactiver une période rattrape ce qui a été pointé pendant qu'elle
+    // dormait ; la suspendre ne reprend rien à personne.
+    await reconcileOffered(!fp.active ? { from: fp.startDate, to: fp.endDate } : null);
   };
 
   const handleDelete = (fp: FreePeriod) => {

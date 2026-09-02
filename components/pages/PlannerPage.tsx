@@ -112,6 +112,7 @@ export function PlannerPage() {
     deleteFrom,
     updateItem,
     repriceSession,
+    applyOfferedRules,
   } = useData();
   const { language } = useSettings();
 
@@ -546,7 +547,8 @@ export function PlannerPage() {
           subscriptions.find((su) => su.sessionId === editingOpenSession.id)?.pricePerSession ??
           editingOpenSession.openPrice ??
           0;
-        updateItem("sessions", editingOpenSession.id, payload);
+        const becameFree = openIsFree && !editingOpenSession.isFree;
+        await updateItem("sessions", editingOpenSession.id, payload);
 
         // Le tarif ne vit pas QUE sur le créneau : il est porté par l'abonnement
         // du créneau, que le scan et les présences lisent. Passer par
@@ -570,9 +572,33 @@ export function PlannerPage() {
           alert(
             `${res.repriced} présence(s) re-tarifée(s) depuis le ` +
               `${applyFrom.split("-").reverse().join("/")} : ${res.charged ?? 0} DA débités en plus, ` +
-              `${res.refunded ?? 0} DA rendus aux élèves, ${res.teacherDues ?? 0} part(s) enseignant ` +
+              `${res.refunded ?? 0} DA rendus aux élèves, ` +
+              `${(res.teacherDues ?? 0) + (res.teacherDuesRemoved ?? 0)} part(s) enseignant ` +
               "encore dues mises à jour. Les séances déjà réglées n'ont pas été touchées.",
           );
+        }
+
+        // Cocher « offert » sur un créneau DÉJÀ utilisé ne rattrapait pas les
+        // présences pointées avant : elles restaient débitées et l'enseignant
+        // restait payé dessus. On rend maintenant ce qui a été pris.
+        if (becameFree) {
+          const back = await applyOfferedRules({ sessionId: editingOpenSession.id });
+          if (!back.ok) {
+            alert(
+              "Le créneau est enregistré comme offert, mais les présences déjà pointées " +
+                "n'ont pas pu être remboursées. Si le message parle d'une fonction manquante, " +
+                "passez la migration supabase/migrations/20260903_price_sync_and_offered_reconcile.sql.",
+            );
+          } else if ((back.presences ?? 0) > 0 || (back.duesRemoved ?? 0) > 0) {
+            alert(
+              `${back.presences ?? 0} présence(s) déjà pointée(s) sur ce créneau sont devenues ` +
+                `offertes : ${back.refunded ?? 0} DA rendus aux élèves` +
+                ((back.duesRemoved ?? 0) > 0
+                  ? `, ${back.duesRemoved} séance(s) retirée(s) de ce qui reste dû à l'enseignant`
+                  : "") +
+                ".",
+            );
+          }
         }
       } else {
         const sessionId = uid("ses");

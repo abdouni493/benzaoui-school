@@ -32,6 +32,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import type {
+  AttendanceRecord,
   Day,
   ScheduleSession,
   Teacher,
@@ -43,8 +44,42 @@ import { DAYS } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
 import { buildTeacherPaymentReport } from "@/lib/reports/teacherPayment";
 import { buildTeacherSettlementReceipt } from "@/lib/reports/teacherSettlement";
-import { DAY_LABELS_FR, formatDateFr, formatDays, visibleTimetableSessions } from "@/lib/helpers";
+import {
+  DAY_LABELS_FR,
+  FREE_REASON_LABELS,
+  formatDateFr,
+  formatDays,
+  freeReasonOf,
+  teacherShareOf,
+  visibleTimetableSessions,
+} from "@/lib/helpers";
 import { useSettings } from "@/lib/store/settings";
+
+/** Une ligne du tableau d'un créneau : un élève présent, ou un passager.
+ *
+ *  `billable` sépare les deux populations que l'écran mélangeait jusqu'ici :
+ *  celles qui font monter le versement (une séance due, non réglée) et celles
+ *  qui ne rapportent rien à l'enseignant (séance offerte, période gratuite non
+ *  rémunérée, élève gratuit, présence déjà réglée). Les secondes n'étaient PAS
+ *  affichées du tout — le créneau semblait n'avoir eu que les élèves payants.
+ *  Elles sont désormais listées, avec la raison, et comptent 0 DA. */
+interface TimingStudent {
+  /** vide pour un passager (il n'a pas de fiche élève) */
+  studentId: string;
+  name: string;
+  groupName: string;
+  time: string;
+  status: string;
+  /** ce que la présence a valu à l'école (débité, ou offert) */
+  fee: number;
+  /** part de l'enseignant — 0 dès que `billable` est faux */
+  share: number;
+  isPassager: boolean;
+  /** cette présence entre-t-elle dans le calcul du versement ? */
+  billable: boolean;
+  /** pourquoi elle n'y entre pas */
+  note?: string;
+}
 
 /** One unpaid timing of a teacher: a (date, séance) pair with everyone who was
  *  present on it — registered students AND passagers. */
@@ -59,16 +94,10 @@ interface UnpaidTiming {
   groupName: string;
   startTime: string;
   endTime: string;
-  students: {
-    name: string;
-    groupName: string;
-    time: string;
-    status: string;
-    fee: number;
-    share: number;
-    isPassager: boolean;
-  }[];
+  students: TimingStudent[];
   passagers: number;
+  /** encaissé par l'école sur les seules présences rémunérées : c'est la base
+   *  du calcul au pourcentage et de la répartition d'un montant fixe */
   totalFees: number;
   totalShare: number;
 }
@@ -228,6 +257,78 @@ export function TeachersPage() {
 
   const isPayableDue = (u: UnpaidTeacherSession) => offeredReasonFor(u) === null;
 
+  // Deux index, reconstruits seulement quand les données changent. Sans eux,
+  // lister les présences non rémunérées relirait TOUT l'historique une fois par
+  // créneau et par enseignant — la grille des enseignants en appelle une par
+  // carte affichée.
+  /** Présences par créneau-jour : "sessionId|YYYY-MM-DD". */
+  const presencesByTiming = useMemo(() => {
+    const idx = new Map<string, AttendanceRecord[]>();
+    attendance.forEach((a) => {
+      const key = `${a.sessionId}|${new Date(a.timestamp).toLocaleDateString("fr-CA")}`;
+      const list = idx.get(key);
+      if (list) list.push(a);
+      else idx.set(key, [a]);
+    });
+    return idx;
+  }, [attendance]);
+
+  /** Présences DÉJÀ réglées à un enseignant : "studentId|sessionId|YYYY-MM-DD". */
+  const settledDueKeys = useMemo(() => {
+    const keys = new Set<string>();
+    unpaidTeacher.forEach((u) => {
+      if (!u.paid) return;
+      keys.add(`${u.studentId}|${u.sessionId}|${new Date(u.date).toLocaleDateString("fr-CA")}`);
+    });
+    return keys;
+  }, [unpaidTeacher]);
+
+  /**
+   * Les présences d'un créneau qui ne rémunèrent PAS l'enseignant.
+   *
+   * L'écran de règlement se construisait uniquement à partir des séances DUES.
+   * Un élève présent sur lequel l'enseignant ne gagne rien — séance offerte,
+   * période gratuite non rémunérée, élève gratuit, ou présence déjà réglée lors
+   * d'un versement précédent — n'apparaissait donc nulle part : le créneau
+   * affichait « 3 présents » quand la salle en avait vu 11. On les liste
+   * maintenant, avec la raison, à 0 DA de part enseignant.
+   *
+   * `seen` contient les élèves déjà posés par les séances dues, pour ne jamais
+   * afficher deux fois la même présence.
+   */
+  const unbilledPresencesOf = (
+    sessionId: string,
+    dateKey: string,
+    seen: Set<string>,
+  ): TimingStudent[] => {
+    const sess = sessions.find((se) => se.id === sessionId);
+    const groupName = sess ? groups.find((g) => g.id === sess.groupId)?.name ?? "-" : "-";
+
+    return (presencesByTiming.get(`${sessionId}|${dateKey}`) ?? [])
+      .filter((a) => !seen.has(a.studentId))
+      .map((a) => {
+        const stu = students.find((st) => st.id === a.studentId);
+        const settled = settledDueKeys.has(`${a.studentId}|${sessionId}|${dateKey}`);
+        const reason = freeReasonOf(a, { studentIsFree: stu?.isFree });
+        return {
+          studentId: a.studentId,
+          name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
+          groupName,
+          time: new Date(a.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          status: a.status === "late" ? "En Retard" : "Présent",
+          fee: a.amountDeducted > 0 ? a.amountDeducted : a.waivedAmount ?? 0,
+          share: 0,
+          isPassager: false,
+          billable: false,
+          note: settled
+            ? "déjà réglée"
+            : reason
+              ? FREE_REASON_LABELS[reason]
+              : "non rémunérée",
+        };
+      });
+  };
+
   /** Les séances réellement dues : c'est ce total qui doit être réglé. */
   const getPayableDues = (tid: string) =>
     unpaidTeacher.filter((u) => u.teacherId === tid && !u.paid && isPayableDue(u));
@@ -245,7 +346,7 @@ export function TeachersPage() {
       groupName: string;
       startTime: string;
       endTime: string;
-      students: { name: string; time: string; status: string; fee: number; share: number }[];
+      students: TimingStudent[];
       totalFees: number;
       totalPayout: number;
     }> = {};
@@ -276,7 +377,9 @@ export function TeachersPage() {
           new Date(a.timestamp).toLocaleDateString("fr-CA") === dateKey
       );
       map[key].students.push({
+        studentId: u.studentId,
         name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
+        groupName: sess ? groups.find((g) => g.id === sess.groupId)?.name ?? "-" : "-",
         time: new Date(att?.timestamp ?? u.date).toLocaleTimeString([], {
           hour: "2-digit",
           minute: "2-digit",
@@ -284,9 +387,17 @@ export function TeachersPage() {
         status: att?.status === "late" ? "En Retard" : "Présent",
         fee: att?.amountDeducted ?? 0,
         share: u.amount,
+        isPassager: false,
+        billable: true,
       });
       map[key].totalFees += att?.amountDeducted ?? 0;
       map[key].totalPayout += u.amount;
+    });
+
+    // Le reste de la salle : présent, mais rien à payer dessus.
+    Object.values(map).forEach((t) => {
+      const seen = new Set(t.students.map((st) => st.studentId));
+      t.students.push(...unbilledPresencesOf(t.sessionId, t.dateKey, seen));
     });
 
     return Object.values(map).sort(
@@ -467,6 +578,7 @@ export function TeachersPage() {
         );
         const sess = sessions.find((s) => s.id === u.sessionId);
         t.students.push({
+          studentId: u.studentId,
           name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
           groupName: sess ? groups.find((g) => g.id === sess.groupId)?.name ?? "-" : "-",
           time: new Date(att?.timestamp ?? u.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
@@ -474,6 +586,7 @@ export function TeachersPage() {
           fee: att?.amountDeducted ?? 0,
           share: u.amount,
           isPassager: false,
+          billable: true,
         });
         t.totalFees += att?.amountDeducted ?? 0;
         t.totalShare += u.amount;
@@ -502,6 +615,7 @@ export function TeachersPage() {
         // A passager alone can also create the timing: he still generated money.
         const t = map.get(key) ?? timingFor(ind.sessionId!, ind.date);
         t.students.push({
+          studentId: "",
           name: ind.passagerName ?? "Passager",
           groupName: "Passager",
           time: ind.startTime ?? "-",
@@ -509,10 +623,19 @@ export function TeachersPage() {
           fee: ind.price,
           share: 0,
           isPassager: true,
+          billable: true,
         });
         t.passagers += 1;
         t.totalFees += ind.price;
       });
+
+    // Le reste de la salle : présent, mais rien à payer dessus. Ces lignes ne
+    // touchent NI totalFees NI totalShare — elles ne font que rendre le créneau
+    // lisible, en montrant qui était là et pourquoi il ne rapporte rien.
+    map.forEach((t) => {
+      const seen = new Set(t.students.filter((st) => !st.isPassager).map((st) => st.studentId));
+      t.students.push(...unbilledPresencesOf(t.sessionId, t.dateKey, seen));
+    });
 
     return [...map.values()].sort(
       (a, b) => b.dateKey.localeCompare(a.dateKey) || a.startTime.localeCompare(b.startTime),
@@ -528,7 +651,15 @@ export function TeachersPage() {
   );
 
   const chosenTimings = payTimings.filter((t) => selectedTimingKeys.includes(t.key));
+  /** Tout le monde présent sur les créneaux cochés — c'est ce que l'écran
+   *  montre, et c'est ce qui manquait : un créneau à moitié offert paraissait
+   *  vide. */
   const chosenPresents = chosenTimings.reduce((s, t) => s + t.students.length, 0);
+  /** Les seules présences qui font monter le versement. */
+  const chosenBillable = chosenTimings.reduce(
+    (s, t) => s + t.students.filter((st) => st.billable).length,
+    0,
+  );
   const chosenPassagers = chosenTimings.reduce((s, t) => s + t.passagers, 0);
   const chosenRevenue = chosenTimings.reduce((s, t) => s + t.totalFees, 0);
 
@@ -537,14 +668,14 @@ export function TeachersPage() {
    *  - "fixed": whatever the user typed.
    *  - "percent": the percentage is applied to what each student generated
    *    (module cost × %), summed over every présence — computed automatically.
+   *
+   * Une présence NON rémunérée (séance offerte, période gratuite sans paie,
+   * présence déjà réglée) est affichée mais ne pèse rien ici : l'école n'a rien
+   * encaissé dessus, il n'y a donc pas de pourcentage à en tirer.
    */
   const computedPayout = useMemo(() => {
     if (payMethod === "fixed") return Math.max(0, Math.round(payFixedAmount || 0));
-    const pct = Math.min(Math.max(payPercentage || 0, 0), 100);
-    return chosenTimings.reduce(
-      (sum, t) => sum + t.students.reduce((s, st) => s + Math.round((st.fee * pct) / 100), 0),
-      0,
-    );
+    return chosenTimings.reduce((sum, t) => sum + teacherShareOf(t.students, payPercentage), 0);
   }, [payMethod, payFixedAmount, payPercentage, chosenTimings]);
 
   // Acomptes déjà versés et retenues d'absence encore exigibles : ce sont eux
@@ -561,10 +692,7 @@ export function TeachersPage() {
 
   /** Per-timing share, distributed the same way the total is computed. */
   const shareForTiming = (t: UnpaidTiming) => {
-    if (payMethod === "percent") {
-      const pct = Math.min(Math.max(payPercentage || 0, 0), 100);
-      return t.students.reduce((s, st) => s + Math.round((st.fee * pct) / 100), 0);
-    }
+    if (payMethod === "percent") return teacherShareOf(t.students, payPercentage);
     // Fixed amount: spread proportionally to what each timing generated so the
     // printed slip still adds up to the amount actually paid.
     if (chosenRevenue <= 0) {
@@ -752,7 +880,7 @@ export function TeachersPage() {
       groupName: t.groupName,
       startTime: t.startTime,
       endTime: t.endTime,
-      presents: t.students.length,
+      presents: t.students.filter((st) => st.billable).length,
       passagers: t.passagers,
       gross: t.totalFees,
       share: shareForTiming(t),
@@ -2496,12 +2624,12 @@ export function TeachersPage() {
                   <>
                     <div className="flex justify-between border-t border-line/50 pt-2 mt-2">
                       <span>Séances impayées accumulées:</span>
-                      <strong className="text-ink">{getTeacherUnpaidSessions(selectedTeacher.id).length} séances</strong>
+                      <strong className="text-ink">{getPayableDues(selectedTeacher.id).length} séances</strong>
                     </div>
                     <div className="flex justify-between">
                       <span>Rémunération séances brute:</span>
                       <strong className="text-primary">
-                        {getTeacherUnpaidSessions(selectedTeacher.id).reduce((sum, s) => sum + s.amount, 0)} DA
+                        {getPayableDues(selectedTeacher.id).reduce((sum, s) => sum + s.amount, 0)} DA
                       </strong>
                     </div>
                     <div className="flex justify-between text-danger">
@@ -2519,7 +2647,7 @@ export function TeachersPage() {
                     <div className="flex justify-between border-t border-line pt-2 font-bold text-sm text-success">
                       <span>Net à Payer:</span>
                       <span>
-                        {getTeacherUnpaidSessions(selectedTeacher.id).reduce((sum, s) => sum + s.amount, 0) -
+                        {getPayableDues(selectedTeacher.id).reduce((sum, s) => sum + s.amount, 0) -
                           getTeacherAcomptes(selectedTeacher.id).reduce((sum, a) => sum + a.amount, 0) -
                           getTeacherAbsences(selectedTeacher.id).reduce((sum, ab) => sum + ab.cost, 0)}{" "}
                         DA
@@ -2579,6 +2707,10 @@ export function TeachersPage() {
           const totalShare = detail.reduce((s, d) => s + d.totalPayout, 0);
           const totalFees = detail.reduce((s, d) => s + d.totalFees, 0);
           const totalPresences = detail.reduce((s, d) => s + d.students.length, 0);
+          const totalBillable = detail.reduce(
+            (s, d) => s + d.students.filter((st) => st.billable).length,
+            0,
+          );
           const totAcomptes = getTeacherAcomptes(selectedTeacher.id).reduce((s, a) => s + a.amount, 0);
           const totAbsences = getTeacherAbsences(selectedTeacher.id).reduce((s, a) => s + a.cost, 0);
           const net = totalShare - totAcomptes - totAbsences;
@@ -2593,6 +2725,7 @@ export function TeachersPage() {
                 <div className="bg-canvas border border-line p-3 rounded-xl text-center">
                   <span className="text-muted text-[10px] uppercase block font-semibold">Présences</span>
                   <strong className="text-ink text-base font-mono">{totalPresences}</strong>
+                  <span className="block text-[9px] text-muted">dont {totalBillable} rémunérée(s)</span>
                 </div>
                 <div className="bg-canvas border border-line p-3 rounded-xl text-center">
                   <span className="text-muted text-[10px] uppercase block font-semibold">Revenu élèves</span>
@@ -2636,8 +2769,20 @@ export function TeachersPage() {
                         </thead>
                         <tbody>
                           {d.students.map((st, i) => (
-                            <tr key={i} className="border-t border-line/50">
-                              <td className="py-1.5 font-semibold text-ink">{st.name}</td>
+                            <tr
+                              key={i}
+                              className={`border-t border-line/50 ${
+                                st.billable ? "" : "bg-warning/5 text-muted"
+                              }`}
+                            >
+                              <td className="py-1.5 font-semibold text-ink">
+                                {st.name}
+                                {!st.billable && (
+                                  <span className="ml-1.5 text-[9px] font-normal text-warning">
+                                    🎁 {st.note}
+                                  </span>
+                                )}
+                              </td>
                               <td className="py-1.5 font-mono">{st.time}</td>
                               <td className="py-1.5">
                                 <Badge tone={st.status === "En Retard" ? "warning" : "success"} className="text-[9px]">
@@ -2645,7 +2790,13 @@ export function TeachersPage() {
                                 </Badge>
                               </td>
                               <td className="py-1.5 text-right font-mono">{st.fee} DA</td>
-                              <td className="py-1.5 text-right font-mono font-bold text-primary">{st.share} DA</td>
+                              <td
+                                className={`py-1.5 text-right font-mono font-bold ${
+                                  st.billable ? "text-primary" : "text-muted"
+                                }`}
+                              >
+                                {st.share} DA
+                              </td>
                             </tr>
                           ))}
                         </tbody>
@@ -2657,7 +2808,10 @@ export function TeachersPage() {
 
               <div className="bg-canvas border border-line rounded-2xl p-3 text-xs space-y-1.5">
                 <div className="flex justify-between">
-                  <span>Part enseignant brute ({detail.length} séance(s), {totalPresences} présence(s)) :</span>
+                  <span>
+                    Part enseignant brute ({detail.length} séance(s), {totalBillable} présence(s)
+                    rémunérée(s){totalPresences > totalBillable ? ` sur ${totalPresences}` : ""}) :
+                  </span>
                   <strong className="text-primary">{totalShare} DA</strong>
                 </div>
                 <div className="flex justify-between text-danger">
@@ -2879,9 +3033,14 @@ export function TeachersPage() {
                               <div className="flex shrink-0 items-center gap-2">
                                 <Badge tone="primary" className="font-mono text-[10px] font-bold">
                                   <Users className="mr-1 inline h-3 w-3" />
-                                  {t.students.length}
+                                  {t.students.length} présent{t.students.length > 1 ? "s" : ""}
                                   {t.passagers > 0 && ` (${t.passagers} pass.)`}
                                 </Badge>
+                                {t.students.some((st) => !st.billable) && (
+                                  <Badge tone="warning" className="font-mono text-[10px] font-bold">
+                                    🎁 {t.students.filter((st) => !st.billable).length} offerte(s)
+                                  </Badge>
+                                )}
                                 <Badge tone="neutral" className="font-mono text-[10px] font-bold">
                                   {t.totalFees} DA encaissés
                                 </Badge>
@@ -2935,11 +3094,21 @@ export function TeachersPage() {
                                   </thead>
                                   <tbody>
                                     {visibleStudents.map((st, i) => (
-                                      <tr key={i} className="border-t border-line/50">
+                                      <tr
+                                        key={i}
+                                        className={`border-t border-line/50 ${
+                                          st.billable ? "" : "bg-warning/5 text-muted"
+                                        }`}
+                                      >
                                         <td className="py-1.5 font-semibold text-ink">
                                           {st.name}
                                           {st.isPassager && (
                                             <Badge tone="warning" className="ml-1.5 text-[8px]">Passager</Badge>
+                                          )}
+                                          {!st.billable && (
+                                            <span className="ml-1.5 text-[9px] font-normal text-warning">
+                                              🎁 {st.note}
+                                            </span>
                                           )}
                                         </td>
                                         <td className="py-1.5 text-muted">{st.groupName}</td>
@@ -2953,10 +3122,16 @@ export function TeachersPage() {
                                           </Badge>
                                         </td>
                                         <td className="py-1.5 text-right font-mono">{st.fee} DA</td>
-                                        <td className="py-1.5 text-right font-mono font-bold text-primary">
-                                          {payMethod === "percent"
-                                            ? `${Math.round((st.fee * payPercentage) / 100)} DA`
-                                            : "—"}
+                                        <td
+                                          className={`py-1.5 text-right font-mono font-bold ${
+                                            st.billable ? "text-primary" : "text-muted"
+                                          }`}
+                                        >
+                                          {!st.billable
+                                            ? "0 DA"
+                                            : payMethod === "percent"
+                                              ? `${Math.round((st.fee * payPercentage) / 100)} DA`
+                                              : "—"}
                                         </td>
                                       </tr>
                                     ))}
@@ -2985,6 +3160,9 @@ export function TeachersPage() {
                         <div className="rounded-xl border border-line bg-surface p-2">
                           <span className="block text-[9px] uppercase text-muted">Présences</span>
                           <strong className="font-mono text-base text-ink">{chosenPresents}</strong>
+                          <span className="block text-[9px] text-muted">
+                            dont {chosenBillable} rémunérée{chosenBillable > 1 ? "s" : ""}
+                          </span>
                         </div>
                         <div className="rounded-xl border border-line bg-surface p-2">
                           <span className="block text-[9px] uppercase text-muted">Passagers</span>
@@ -3152,7 +3330,10 @@ export function TeachersPage() {
                         <strong className="font-mono text-2xl font-black text-success">{netPayout} DA</strong>
                       </div>
                       <p className="text-[10px] text-muted">
-                        {chosenTimings.length} créneau(x) · {chosenPresents} présence(s)
+                        {chosenTimings.length} créneau(x) · {chosenBillable} présence(s) rémunérée(s)
+                        {chosenPresents > chosenBillable
+                          ? ` sur ${chosenPresents} présente(s)`
+                          : ""}
                         {chosenPassagers > 0 && ` · ${chosenPassagers} passager(s)`}
                       </p>
                     </div>

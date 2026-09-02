@@ -107,6 +107,61 @@ export const FREE_REASON_HINTS: Record<NonNullable<FreeReason>, string> = {
   zeroPrice: "Rien à débiter : le tarif de ce créneau est de 0 DA.",
 };
 
+// ---- Période gratuite en vigueur ---------------------------------------------
+
+/** Le strict minimum qu'une période gratuite doit exposer pour être testée. */
+type FreePeriodRule = {
+  active: boolean;
+  startDate: string;
+  endDate: string;
+  allClasses: boolean;
+  classIds: string[];
+};
+
+/**
+ * La période gratuite qui couvre ces classes à cette date, ou `undefined`.
+ *
+ * Miroir exact de la fonction SQL `active_free_period` : mêmes bornes incluses,
+ * même règle de recouvrement (une seule classe couverte suffit — un créneau de
+ * séance libre en porte plusieurs). Chaque écran en avait sa propre copie, et
+ * le guichet des séances libres n'en avait aucune : la même séance sortait
+ * offerte au badge et facturée au comptoir.
+ */
+export function freePeriodCovering<T extends FreePeriodRule>(
+  periods: T[],
+  classIds: (string | undefined)[],
+  date: string,
+): T | undefined {
+  const covered = classIds.filter(Boolean) as string[];
+  return periods.find(
+    (fp) =>
+      fp.active &&
+      fp.startDate <= date &&
+      fp.endDate >= date &&
+      (fp.allClasses || fp.classIds.some((id) => covered.includes(id))),
+  );
+}
+
+// ---- Rémunération d'un enseignant au pourcentage -----------------------------
+
+/**
+ * Part de l'enseignant sur une liste de présences.
+ *
+ * `billable` est ce qui manquait : une présence OFFERTE (créneau offert,
+ * période gratuite sans rémunération, élève gratuit) ou DÉJÀ RÉGLÉE reste
+ * affichée à l'écran — l'enseignant doit voir qui était là — mais l'école n'a
+ * rien encaissé dessus, elle ne peut donc pas en verser un pourcentage.
+ * L'arrondi se fait présence par présence, comme au scan : c'est ce qui garde
+ * l'écran de règlement d'accord avec `unpaid_teacher_sessions`.
+ */
+export function teacherShareOf(
+  rows: { fee: number; billable: boolean }[],
+  percentage: number,
+): number {
+  const pct = Math.min(Math.max(percentage || 0, 0), 100);
+  return rows.reduce((sum, r) => sum + (r.billable ? Math.round((r.fee * pct) / 100) : 0), 0);
+}
+
 // ---- Ordre d'affichage des fiches --------------------------------------------
 
 /** Date d'inscription en millisecondes.
