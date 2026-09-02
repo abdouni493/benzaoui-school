@@ -35,6 +35,7 @@ import type {
   AttendanceRecord,
   Day,
   ScheduleSession,
+  Subscription,
   Teacher,
   TeacherPayment,
   TeacherPaymentDetail,
@@ -50,6 +51,7 @@ import {
   formatDateFr,
   formatDays,
   freeReasonOf,
+  liveDueFee,
   teacherShareOf,
   visibleTimetableSessions,
 } from "@/lib/helpers";
@@ -111,6 +113,7 @@ export function TeachersPage() {
     classes,
     salles,
     students,
+    subscriptions,
     unpaidTeacher,
     acomptes,
     absences,
@@ -284,6 +287,68 @@ export function TeachersPage() {
   }, [unpaidTeacher]);
 
   /**
+   * Ce qu'une séance ENCORE due vaut AU TARIF ACTUEL de l'abonnement.
+   *
+   * `unpaid_teacher_sessions.amount` et `attendance.amount_deducted` sont figés
+   * au scan. Corriger le tarif d'un créneau sur l'écran Abonnements ne les
+   * rétro-tarifait pas (sauf à réécrire l'historique des élèves avec une date de
+   * départ) : l'écran de paiement continuait donc de proposer l'ANCIEN montant.
+   * On recalcule ici, pour chaque présence NON réglée, ce qu'elle vaut au prix
+   * courant :
+   *
+   *     part enseignant = tarif actuel de l'élève (remise comprise) × % du prof
+   *
+   * Le tarif suit l'abonnement du créneau, exactement comme au guichet. Une
+   * séance DÉJÀ réglée garde son montant historique (jamais recalculé), et on
+   * retombe sur le montant figé quand l'abonnement ou l'élève a disparu.
+   */
+  const liveDues = useMemo(() => {
+    const attIdx = new Map<string, AttendanceRecord>();
+    attendance.forEach((a) => {
+      attIdx.set(
+        `${a.studentId}|${a.sessionId}|${new Date(a.timestamp).toLocaleDateString("fr-CA")}`,
+        a,
+      );
+    });
+    const subBySession = new Map<string, Subscription>();
+    subscriptions.forEach((su) => {
+      if (!subBySession.has(su.sessionId)) subBySession.set(su.sessionId, su);
+    });
+    const stuById = new Map(students.map((s) => [s.id, s]));
+    const pctByTeacher = new Map(teachers.map((t) => [t.id, t.percentage ?? 0]));
+    const feeById = new Map<string, number>();
+    const shareById = new Map<string, number>();
+    unpaidTeacher.forEach((u) => {
+      if (u.paid) return;
+      const att = attIdx.get(
+        `${u.studentId}|${u.sessionId}|${new Date(u.date).toLocaleDateString("fr-CA")}`,
+      );
+      // « Valeur de la présence » figée : le débit de l'élève, ou — séance
+      // offerte mais rémunérée — le prix mis de côté. Sert de repli quand
+      // l'abonnement n'existe plus.
+      const frozen = att
+        ? att.amountDeducted > 0
+          ? att.amountDeducted
+          : att.waivedAmount ?? 0
+        : u.amount;
+      const fee = liveDueFee(subBySession.get(u.sessionId), stuById.get(u.studentId), frozen);
+      const pct = Math.min(Math.max(pctByTeacher.get(u.teacherId) ?? 0, 0), 100);
+      feeById.set(u.id, fee);
+      shareById.set(u.id, Math.round((fee * pct) / 100));
+    });
+    return { feeById, shareById };
+  }, [unpaidTeacher, attendance, subscriptions, students, teachers]);
+
+  /** Tarif élève d'une présence encore due, au prix courant (montant figé en
+   *  repli quand la présence est déjà réglée ou l'abonnement supprimé). */
+  const dueFee = (u: UnpaidTeacherSession, frozen: number) =>
+    liveDues.feeById.get(u.id) ?? Math.max(0, Math.round(frozen || 0));
+
+  /** Part enseignant d'une présence : recalculée au tarif courant tant qu'elle
+   *  n'est pas réglée, figée sur son montant historique une fois payée. */
+  const dueShare = (u: UnpaidTeacherSession) => liveDues.shareById.get(u.id) ?? u.amount;
+
+  /**
    * Les présences d'un créneau qui ne rémunèrent PAS l'enseignant.
    *
    * L'écran de règlement se construisait uniquement à partir des séances DUES.
@@ -385,13 +450,13 @@ export function TeachersPage() {
           minute: "2-digit",
         }),
         status: att?.status === "late" ? "En Retard" : "Présent",
-        fee: att?.amountDeducted ?? 0,
-        share: u.amount,
+        fee: dueFee(u, att?.amountDeducted ?? 0),
+        share: dueShare(u),
         isPassager: false,
         billable: true,
       });
-      map[key].totalFees += att?.amountDeducted ?? 0;
-      map[key].totalPayout += u.amount;
+      map[key].totalFees += dueFee(u, att?.amountDeducted ?? 0);
+      map[key].totalPayout += dueShare(u);
     });
 
     // Le reste de la salle : présent, mais rien à payer dessus.
@@ -583,13 +648,13 @@ export function TeachersPage() {
           groupName: sess ? groups.find((g) => g.id === sess.groupId)?.name ?? "-" : "-",
           time: new Date(att?.timestamp ?? u.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           status: att?.status === "late" ? "En Retard" : "Présent",
-          fee: att?.amountDeducted ?? 0,
-          share: u.amount,
+          fee: dueFee(u, att?.amountDeducted ?? 0),
+          share: dueShare(u),
           isPassager: false,
           billable: true,
         });
-        t.totalFees += att?.amountDeducted ?? 0;
-        t.totalShare += u.amount;
+        t.totalFees += dueFee(u, att?.amountDeducted ?? 0);
+        t.totalShare += dueShare(u);
       });
 
     // Passagers of the same timings (séances libres, no student account).
@@ -647,7 +712,7 @@ export function TeachersPage() {
   const payTimings = useMemo(
     () => (selectedTeacher ? buildUnpaidTimings(selectedTeacher.id) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedTeacher, unpaidTeacher, independent, attendance, sessions, students, groups, modules, classes, freePeriods],
+    [selectedTeacher, unpaidTeacher, independent, attendance, sessions, students, groups, modules, classes, freePeriods, liveDues, subscriptions],
   );
 
   const chosenTimings = payTimings.filter((t) => selectedTimingKeys.includes(t.key));
@@ -724,9 +789,9 @@ export function TeachersPage() {
           groupName: groups.find((g) => g.id === sess?.groupId)?.name ?? "—",
           time: sess ? `${sess.startTime} - ${sess.endTime}` : "—",
           studentName: stu ? `${stu.firstName} ${stu.lastName}` : "Élève supprimé",
-          fee: att?.amountDeducted ?? 0,
+          fee: dueFee(u, att?.amountDeducted ?? 0),
           waived: att?.waivedAmount ?? 0,
-          amount: u.amount,
+          amount: dueShare(u),
           offeredReason: offeredReasonFor(u),
         };
       })
@@ -1783,7 +1848,7 @@ export function TeachersPage() {
                       ? `${unpaidSess.length} présence(s)`
                       : t.paymentType === "monthly"
                         ? `${unpaidMonths.length * (t.monthlyAmount ?? 0)} DA`
-                        : `${unpaidSess.reduce((sum, s) => sum + s.amount, 0)} DA`}
+                        : `${unpaidSess.reduce((sum, s) => sum + dueShare(s), 0)} DA`}
                   </Badge>
                 </div>
               </CardBody>
@@ -2377,7 +2442,7 @@ export function TeachersPage() {
                     <div className="bg-canvas border border-line p-3 rounded-xl text-center">
                       <span className="text-muted text-[10px] uppercase block font-semibold">Séances dues</span>
                       <strong className="text-primary text-base font-mono">
-                        {getPayableDues(selectedTeacher.id).reduce((s, u) => s + u.amount, 0)} DA
+                        {getPayableDues(selectedTeacher.id).reduce((s, u) => s + dueShare(u), 0)} DA
                       </strong>
                       <span className="text-[9px] text-muted block">
                         {getPayableDues(selectedTeacher.id).length} présence(s)
@@ -2463,7 +2528,7 @@ export function TeachersPage() {
                         <span className="text-muted text-[10px] uppercase block font-semibold">En attente</span>
                         <strong className="text-warning text-base font-mono">{unpaidSessions.length}</strong>
                       </div>
-                      <Badge tone="warning">Dues ({unpaidSessions.reduce((s, a) => s + a.amount, 0)} DA)</Badge>
+                      <Badge tone="warning">Dues ({unpaidSessions.reduce((s, a) => s + dueShare(a), 0)} DA)</Badge>
                     </div>
                   </div>
 
@@ -2519,7 +2584,7 @@ export function TeachersPage() {
                                     <span className="font-bold text-ink block">{moduleName}</span>
                                     <span className="text-[10px] text-muted">{groupName}</span>
                                   </td>
-                                  <td className="p-3 font-bold text-primary font-mono">{u.amount} DA</td>
+                                  <td className="p-3 font-bold text-primary font-mono">{dueShare(u)} DA</td>
                                   <td className="p-3 text-right">
                                     <Badge tone={u.paid ? "success" : "warning"} className="font-bold">
                                       {u.paid ? "Payée" : "En attente"}
@@ -2629,7 +2694,7 @@ export function TeachersPage() {
                     <div className="flex justify-between">
                       <span>Rémunération séances brute:</span>
                       <strong className="text-primary">
-                        {getPayableDues(selectedTeacher.id).reduce((sum, s) => sum + s.amount, 0)} DA
+                        {getPayableDues(selectedTeacher.id).reduce((sum, s) => sum + dueShare(s), 0)} DA
                       </strong>
                     </div>
                     <div className="flex justify-between text-danger">
@@ -2647,7 +2712,7 @@ export function TeachersPage() {
                     <div className="flex justify-between border-t border-line pt-2 font-bold text-sm text-success">
                       <span>Net à Payer:</span>
                       <span>
-                        {getPayableDues(selectedTeacher.id).reduce((sum, s) => sum + s.amount, 0) -
+                        {getPayableDues(selectedTeacher.id).reduce((sum, s) => sum + dueShare(s), 0) -
                           getTeacherAcomptes(selectedTeacher.id).reduce((sum, a) => sum + a.amount, 0) -
                           getTeacherAbsences(selectedTeacher.id).reduce((sum, ab) => sum + ab.cost, 0)}{" "}
                         DA

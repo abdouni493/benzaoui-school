@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
-import { freePeriodCovering, teacherShareOf } from "@/lib/helpers";
+import { freePeriodCovering, liveDueFee, teacherShareOf } from "@/lib/helpers";
+import type { Student, Subscription } from "@/lib/types";
 
 /** Une période gratuite réduite à ce que la règle regarde. */
 const period = (o: Partial<Parameters<typeof freePeriodCovering>[0][number]> = {}) => ({
@@ -103,5 +104,55 @@ describe("teacherShareOf — le pourcentage ne porte que sur ce qui a été enca
         50,
       ),
     ).toBe(0);
+  });
+});
+
+describe("liveDueFee — une séance non réglée suit le tarif ACTUEL, pas celui du scan", () => {
+  const sub = (price: number): Subscription => ({
+    id: "sub1",
+    sessionId: "ses1",
+    pricePerSession: price,
+  });
+  const student = (discount?: Student["subscriptionDiscounts"]): Student => ({
+    id: "stu1",
+    firstName: "A",
+    lastName: "B",
+    birthDate: "",
+    phone: "",
+    email: "",
+    rfid: "",
+    balance: 0,
+    isFree: false,
+    subscriptionIds: ["sub1"],
+    subscriptionDiscounts: discount,
+  });
+
+  it("chiffre au nouveau prix de l'abonnement, en ignorant le montant figé", () => {
+    // Tarif passé de 100 à 200 : la séance encore due vaut 200, pas les 100
+    // débités au scan (frozenFee).
+    expect(liveDueFee(sub(200), student(), 100)).toBe(200);
+  });
+
+  it("applique la remise de l'élève sur le tarif courant", () => {
+    // 200 DA, remise -20 % ⇒ 160 DA, exactement ce que le guichet débiterait.
+    expect(liveDueFee(sub(200), student({ sub1: { type: "percent", value: 20 } }), 100)).toBe(160);
+  });
+
+  it("retombe sur le montant figé quand l'abonnement a disparu", () => {
+    expect(liveDueFee(undefined, student(), 100)).toBe(100);
+  });
+
+  it("retombe sur le montant figé quand l'élève a disparu", () => {
+    expect(liveDueFee(sub(200), undefined, 100)).toBe(100);
+  });
+
+  it("compose avec teacherShareOf : nouveau tarif × % × nombre d'élèves", () => {
+    // 3 élèves présents, tarif corrigé à 200 DA, prof à 50 %.
+    const rows = [1, 2, 3].map(() => ({
+      fee: liveDueFee(sub(200), student(), 100),
+      billable: true,
+    }));
+    // 3 × round(200 × 0,5) = 300, et non 3 × round(100 × 0,5) = 150.
+    expect(teacherShareOf(rows, 50)).toBe(300);
   });
 });

@@ -386,6 +386,30 @@ export function studentSeancePrice(student: Student, sub: Subscription): number 
   return netPriceFor(sub.pricePerSession, student.subscriptionDiscounts?.[sub.id]);
 }
 
+/**
+ * Ce qu'une présence ENCORE due vaut au tarif ACTUEL de l'abonnement — la
+ * remise de l'élève comprise — plutôt que le montant figé au scan.
+ *
+ * `unpaid_teacher_sessions.amount` et `attendance.amount_deducted` sont figés au
+ * moment du badge. Corriger le tarif d'un créneau sur l'écran Abonnements ne les
+ * rétro-tarifait pas (sauf à réécrire l'historique des élèves avec une date de
+ * départ) : l'écran de paiement de l'enseignant continuait donc de réclamer
+ * l'ancien montant. Chiffrer les séances NON réglées à ce prix courant remet
+ * les deux écrans d'accord, et le versement (le RPC fait confiance au montant
+ * calculé côté client) suit le bon tarif.
+ *
+ * Retombe sur le montant figé quand l'abonnement ou l'élève a disparu — on ne
+ * peut alors plus connaître le tarif courant.
+ */
+export function liveDueFee(
+  subscription: Subscription | undefined,
+  student: Student | undefined,
+  frozenFee: number,
+): number {
+  if (subscription && student) return studentSeancePrice(student, subscription);
+  return Math.max(0, Math.round(frozenFee || 0));
+}
+
 export function subscriptionLabel(db: Database, sub: Subscription): string {
   const session = db.sessions.find((s) => s.id === sub.sessionId);
   return session ? sessionLabel(db, session, { withGroup: false }) : "—";
