@@ -632,6 +632,10 @@ export interface ScanResult {
   otherGroup?: boolean;
   /** the group he is actually enrolled in (only set when otherGroup) */
   ownGroupName?: string;
+  /** the student has NO enrollment on this course at all: he was admitted on
+   *  the créneau because his class is part of its public (same class, same
+   *  year, same filière). Billed at the créneau's listed price. */
+  viaClass?: boolean;
   /** the séance was offered: presence written, balance intact. Set both by a
    *  "période gratuite" and by a séance libre créneau flagged as offered. */
   free?: boolean;

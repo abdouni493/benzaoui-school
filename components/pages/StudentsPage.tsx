@@ -3112,6 +3112,18 @@ export function StudentsPage() {
                       <div>
                         <h4 className="flex items-center gap-1.5 text-sm font-bold text-ink transition-colors hover:text-primary">
                           {stu.firstName} {stu.lastName}
+                          {/* Alarme visible sans ouvrir la fiche : l'élève a
+                              suivi des séances qu'il n'a pas payées. Depuis que
+                              le badge n'est plus refusé pour solde épuisé, la
+                              dette est la seule trace de ce qui est dû. */}
+                          {stu.balance < 0 && (
+                            <span
+                              title={`Séances suivies non payées : ${-stu.balance} DA`}
+                              className="flex items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white"
+                            >
+                              <AlertTriangle className="h-2.5 w-2.5" /> Dette {-stu.balance} DA
+                            </span>
+                          )}
                           {/* Alarme visible sans ouvrir la fiche : l'inscription
                               n'a jamais été réglée. */}
                           {(stu.registrationDue ?? 0) > 0 && (
@@ -3148,6 +3160,21 @@ export function StudentsPage() {
                         {stu.balance} DA
                       </strong>
                     </div>
+
+                    {stu.balance < 0 && (
+                      <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5">
+                        <span className="flex items-center gap-1 text-[10px] font-bold text-danger">
+                          <AlertTriangle className="h-3 w-3 animate-pulse" />
+                          SÉANCES NON PAYÉES : {-stu.balance} DA dus
+                        </span>
+                        <button
+                          onClick={() => openPayDebt(stu)}
+                          className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
+                        >
+                          Régler
+                        </button>
+                      </div>
+                    )}
 
                     {stu.registrationDue && stu.registrationDue > 0 ? (
                       <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5">
@@ -3391,6 +3418,38 @@ export function StudentsPage() {
                 {selectedStudent.isFree ? "Études gratuites" : `${selectedStudent.balance} DA`}
               </Badge>
             </div>
+
+            {/* Ce que l'élève doit, en haut de sa fiche et non au fond d'un
+                onglet : c'est la question qu'on se pose en ouvrant la fiche. Le
+                badge du chiffre ne suffit pas — un solde négatif se lit comme un
+                solde tant qu'on ne le nomme pas « dette ». */}
+            {(selectedStudent.balance < 0 || (selectedStudent.registrationDue ?? 0) > 0) && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-danger/50 bg-danger/10 p-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 animate-pulse text-danger" />
+                  <div>
+                    <strong className="block text-xs font-bold text-danger">
+                      DETTE :{" "}
+                      {(selectedStudent.balance < 0 ? -selectedStudent.balance : 0) +
+                        (selectedStudent.registrationDue ?? 0)}{" "}
+                      DA à régler
+                    </strong>
+                    <span className="text-[10px] text-danger/90">
+                      {selectedStudent.balance < 0 && (
+                        <>Séances suivies et non payées : {-selectedStudent.balance} DA. </>
+                      )}
+                      {(selectedStudent.registrationDue ?? 0) > 0 && (
+                        <>Frais d&apos;inscription impayés : {selectedStudent.registrationDue} DA. </>
+                      )}
+                      Chaque nouvelle séance creuse la dette d&apos;autant.
+                    </span>
+                  </div>
+                </div>
+                <Button size="sm" variant="danger" onClick={() => openPayDebt(selectedStudent)}>
+                  <DollarSign className="me-1 h-3.5 w-3.5" /> Régler la dette
+                </Button>
+              </div>
+            )}
 
             {/* Navigation Tabs inside details modal */}
             <div className="flex border-b border-line gap-2">
@@ -3791,6 +3850,7 @@ export function StudentsPage() {
                                     // clair, et non seulement dans une infobulle.
                                     const reason = freeReasonOf(att, {
                                       studentIsFree: selectedStudent.isFree,
+                                      sessionIsFree: !!s?.isFree,
                                     });
                                     if (!reason) {
                                       return (

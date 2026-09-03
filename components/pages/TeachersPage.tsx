@@ -374,7 +374,10 @@ export function TeachersPage() {
       .map((a) => {
         const stu = students.find((st) => st.id === a.studentId);
         const settled = settledDueKeys.has(`${a.studentId}|${sessionId}|${dateKey}`);
-        const reason = freeReasonOf(a, { studentIsFree: stu?.isFree });
+        const reason = freeReasonOf(a, {
+          studentIsFree: stu?.isFree,
+          sessionIsFree: !!sess?.isFree,
+        });
         return {
           studentId: a.studentId,
           name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",

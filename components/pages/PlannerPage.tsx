@@ -1356,7 +1356,7 @@ export function PlannerPage() {
                 {([
                   {
                     key: "enrolled",
-                    title: "Ses classes et groupes",
+                    title: "Ses classes (même année)",
                     count: audienceCounts.enrolled,
                   },
                   {
@@ -1388,14 +1388,14 @@ export function PlannerPage() {
               <p className="text-[10px] text-muted mt-1.5 leading-relaxed">
                 {openAudience === "enrolled" ? (
                   <>
-                    Seuls les élèves dont l&apos;emploi du temps passe par les{" "}
-                    <strong>classes ET les groupes cochés</strong> ci-dessus pourront être
-                    encaissés sur ce créneau.
+                    Tout élève des <strong>classes cochées</strong> ci-dessus — et de toute classe
+                    de <strong>même niveau, même année et même filière</strong> — pourra badger et
+                    être encaissé sur ce créneau, quel que soit son groupe.
                   </>
                 ) : (
                   <>
                     Tout élève d&apos;une classe de la <strong>même filière</strong> pourra être
-                    encaissé dessus, même s&apos;il suit un autre groupe ou un autre emploi du temps.
+                    encaissé dessus, <strong>toutes années confondues</strong>.
                   </>
                 )}{" "}
                 Un <strong>passager</strong> occasionnel, lui, reste accepté dans les deux cas : il

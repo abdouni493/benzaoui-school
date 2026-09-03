@@ -1,24 +1,32 @@
 /**
  * Qui a le droit d'assister à une séance libre.
  *
- * Un créneau de séance libre est créé sur l'Emploi du Temps en cochant des
- * classes, des groupes, des salles et un enseignant. Jusqu'ici ces cases ne
- * décrivaient que le créneau : au guichet, N'IMPORTE quel élève pouvait être
- * encaissé dessus, y compris un élève d'une autre filière qui n'avait rien à y
- * faire. Le créneau porte désormais son public :
+ * Un créneau est créé sur l'Emploi du Temps en cochant des classes, des
+ * groupes, des salles et un enseignant. Une ligne de `classes` porte exactement
+ * ce que la réception coche : le niveau (primaire/moyen/lycée), l'année et la
+ * filière. Le public d'un créneau se lit donc sur la CLASSE, jamais sur le
+ * groupe :
  *
- *   · "enrolled" — seuls les élèves dont l'emploi du temps passe par les
- *     classes ET les groupes cochés ;
- *   · "filiere"  — tout élève d'une classe de la même filière, même s'il suit
- *     un autre groupe ou un autre créneau.
+ *   · "enrolled" — les classes cochées, ÉLARGIES à leurs jumelles : toute
+ *     classe de même niveau, même année et même filière. C'est le réglage
+ *     courant, et il suffit à laisser badger toute la promotion ;
+ *   · "filiere"  — en plus, toutes les années de la filière.
  *
  * "enrolled" est inclus dans "filiere" : élargir le public n'enlève jamais
  * personne. Un créneau sans réglage (créé avant, ou base pas encore migrée)
  * n'impose rien — le guichet continue de tout accepter, comme avant.
  *
+ * Le GROUPE ne restreint plus rien. Il décrit le créneau ; il ne décidait de
+ * personne d'utile, et fermait la porte à des élèves de la classe visée qui
+ * suivaient un autre groupe — le motif exact du refus signalé au guichet.
+ *
  * Les passagers ne sont pas concernés : ils n'ont ni classe ni filière, et la
  * séance libre existe précisément pour les encaisser. La règle ne porte donc
  * que sur les élèves inscrits.
+ *
+ * Miroir exact des fonctions SQL `class_peer_ids`, `session_audience_class_ids`
+ * et `student_session_rank` : le guichet et le badge doivent rendre le même
+ * verdict, sinon la même séance est acceptée d'un côté et refusée de l'autre.
  */
 
 import type {
@@ -71,15 +79,60 @@ export function enrolledSessionsOf(
   return sessions.filter((s) => sessionIds.has(s.id));
 }
 
-/** Filières des classes citées, les classes sans filière (formations) étant
- *  ignorées : deux formations ne partagent pas une filière vide. */
-function filiereIdsOf(classIds: string[], classes: SchoolClass[]): Set<string> {
-  const out = new Set<string>();
-  for (const id of classIds) {
-    const f = classes.find((c) => c.id === id)?.filiereId;
-    if (f) out.add(f);
-  }
-  return out;
+/** Les classes auxquelles l'élève est rattaché — celles des emplois du temps
+ *  qu'il suit, faute d'une colonne « classe » sur sa fiche. */
+export function studentClassIds(
+  student: Student,
+  sessions: ScheduleSession[],
+  subscriptions: Subscription[],
+): string[] {
+  return [
+    ...new Set(enrolledSessionsOf(student, sessions, subscriptions).map((s) => s.classId)),
+  ];
+}
+
+/** Une année comparable : « 3 », « 3 » et «  3  » désignent la même promotion. */
+const yearKey = (c?: SchoolClass) => (c?.year ?? "").trim();
+
+/** Ces deux classes désignent-elles la même population d'élèves ? */
+function isPeerClass(a: SchoolClass, b: SchoolClass): boolean {
+  if (a.id === b.id) return true;
+  if (a.type !== b.type) return false;
+  // Une formation n'a ni année ni filière : elle se rapproche par son niveau,
+  // jamais par « pas de filière », qui les réunirait toutes.
+  if (a.type === "formation") return a.formationLevel === b.formationLevel;
+  return (
+    a.coursLevel === b.coursLevel &&
+    yearKey(a) === yearKey(b) &&
+    (a.filiereId ?? null) === (b.filiereId ?? null)
+  );
+}
+
+/** Les classes qui désignent la même population que celles citées. */
+export function classPeerIds(classIds: string[], classes: SchoolClass[]): string[] {
+  const picked = classes.filter((c) => classIds.includes(c.id));
+  return classes.filter((c) => picked.some((p) => isPeerClass(c, p))).map((c) => c.id);
+}
+
+/** Les classes admises sur un créneau, réglage de public compris. */
+export function sessionAudienceClassIds(
+  session: ScheduleSession,
+  classes: SchoolClass[],
+): string[] {
+  const pickedIds = openSeanceClassIds(session);
+  const peers = classPeerIds(pickedIds, classes);
+  if (session.openAudience !== "filiere") return peers;
+
+  // Toute la filière : l'année ne compte plus. Les jumelles restent du lot —
+  // élargir le public ne doit jamais en retirer.
+  const picked = classes.filter((c) => pickedIds.includes(c.id));
+  const filiereIds = new Set(picked.map((c) => c.filiereId).filter(Boolean));
+  return [
+    ...new Set([
+      ...peers,
+      ...classes.filter((c) => c.filiereId && filiereIds.has(c.filiereId)).map((c) => c.id),
+    ]),
+  ];
 }
 
 /** Le public d'un créneau, ou undefined quand il n'en porte aucun. */
@@ -113,35 +166,15 @@ export function checkOpenSeanceAudience(input: AudienceCheckInput): AudienceVerd
     };
   }
 
-  const classIds = openSeanceClassIds(session);
-  const groupIds = openSeanceGroupIds(session);
+  const admitted = new Set(sessionAudienceClassIds(session, classes));
+  const his = studentClassIds(student, sessions, subscriptions);
+  if (his.some((id) => admitted.has(id))) return { allowed: true };
 
-  if (audience === "enrolled") {
-    const ok = enrolled.some(
-      (s) => classIds.includes(s.classId) && groupIds.includes(s.groupId),
-    );
-    return ok
-      ? { allowed: true }
-      : {
-          allowed: false,
-          reason:
-            "Ce créneau est réservé aux élèves des classes et des groupes cochés à sa création : l'emploi du temps de cet élève n'en fait pas partie.",
-        };
-  }
-
-  // "filiere" : la même filière suffit, quel que soit le groupe ou le créneau.
-  const studentClassIds = [...new Set(enrolled.map((s) => s.classId))];
-  if (studentClassIds.some((id) => classIds.includes(id))) return { allowed: true };
-
-  const wanted = filiereIdsOf(classIds, classes);
-  const his = filiereIdsOf(studentClassIds, classes);
-  const ok = [...his].some((f) => wanted.has(f));
-
-  return ok
-    ? { allowed: true }
-    : {
-        allowed: false,
-        reason:
-          "Ce créneau est ouvert aux élèves de sa filière : cet élève suit une autre filière.",
-      };
+  return {
+    allowed: false,
+    reason:
+      audience === "filiere"
+        ? "Ce créneau est ouvert aux élèves de sa filière : cet élève suit une autre filière."
+        : "Ce créneau est réservé aux classes cochées à sa création — et à celles de même année et même filière : la classe de cet élève n'en fait pas partie.",
+  };
 }

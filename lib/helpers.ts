@@ -73,16 +73,22 @@ export type FreeReason =
  * ne laisse que le prix non facturé dans `waivedAmount`. Une présence de ce
  * type s'affichait donc « -0 DA » en rouge, comme si la facturation avait
  * échoué, alors qu'elle avait été offerte volontairement.
+ *
+ * Un créneau offert créé SANS tarif ne met rien de côté non plus (0 DA offert
+ * de 0 DA) : sa gratuité ne se lit que sur le créneau, d'où `sessionIsFree`.
+ * Sans lui l'écran annonçait « tarif à 0 » — un défaut de paramétrage — là où
+ * l'école avait délibérément offert la séance.
  */
 export function freeReasonOf(
   att: Pick<AttendanceRecord, "amountDeducted" | "freePeriodId" | "preStart" | "waivedAmount">,
-  opts: { studentIsFree?: boolean } = {},
+  opts: { studentIsFree?: boolean; sessionIsFree?: boolean } = {},
 ): FreeReason {
   if (att.amountDeducted > 0) return null;
   if (att.freePeriodId) return "freePeriod";
   if (att.preStart) return "preStart";
-  // Aucune colonne dédiée : c'est le prix mis de côté qui trahit la gratuité.
-  if ((att.waivedAmount ?? 0) > 0) return "freeSeance";
+  // Aucune colonne dédiée : c'est le prix mis de côté, ou le créneau lui-même,
+  // qui trahit la gratuité.
+  if ((att.waivedAmount ?? 0) > 0 || opts.sessionIsFree) return "freeSeance";
   if (opts.studentIsFree) return "freeStudent";
   return "zeroPrice";
 }

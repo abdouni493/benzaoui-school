@@ -245,11 +245,19 @@ export function useScanProcessor() {
               result.enrollmentStart ? ` (début le ${result.enrollmentStart.split("-").reverse().join("/")})` : ""
             } : séance offerte, aucun débit sur le solde.`
           : "";
-        const substitution = result.otherGroup
-          ? ` Rattrapage : présence enregistrée sur le groupe ${result.groupName ?? "suivi"}${
-              result.ownGroupName ? ` (inscrit en ${result.ownGroupName})` : ""
-            }.`
-          : "";
+        // Un élève admis par sa CLASSE n'a aucun abonnement sur ce cours : ce
+        // n'est pas un rattrapage, et la réception doit le savoir — c'est le
+        // moment de lui vendre l'inscription.
+        const substitution = result.viaClass
+          ? ` Admis au titre de sa classe : aucun abonnement sur ce cours, la séance est facturée au tarif du créneau.`
+          : result.otherGroup
+            ? ` Rattrapage : présence enregistrée sur le groupe ${result.groupName ?? "suivi"}${
+                result.ownGroupName ? ` (inscrit en ${result.ownGroupName})` : ""
+              }.`
+            : "";
+        // La dette vient-elle de cette séance, ou existait-elle déjà ?
+        const owed = result.newBalance !== undefined && result.newBalance < 0 ? -result.newBalance : 0;
+        const debtJustCreated = isDebt && (result.cost ?? 0) > 0;
 
         // Show success toast — with the exact séance the scan was matched to
         addToast({
@@ -257,20 +265,26 @@ export function useScanProcessor() {
           title: isAlready
             ? "Déjà pointé — aucun débit"
             : isDebt
-              ? "Présence enregistrée — SOLDE EN DETTE"
+              ? `Présence enregistrée — DETTE ${owed} DA`
               : isFreePeriod || isFreeSeance
                 ? "Présence Enregistrée — GRATUIT"
                 : isPreStart
                   ? "Présence Enregistrée — AVANT LE DÉBUT (aucun débit)"
                   : isLate
                     ? "Présence en Retard"
-                    : result.otherGroup
-                      ? "Présence Enregistrée — Rattrapage"
-                      : "Présence Enregistrée",
+                    : result.viaClass
+                      ? "Présence Enregistrée — Élève de la classe"
+                      : result.otherGroup
+                        ? "Présence Enregistrée — Rattrapage"
+                        : "Présence Enregistrée",
           message: isAlready
             ? `L'élève a déjà pointé pour ${sessionInfo ?? "cette séance"} aujourd'hui.${substitution}`
             : isDebt
-              ? `${sessionInfo ? `Séance ${sessionInfo}. ` : ""}Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée.${substitution}`
+              ? `${sessionInfo ? `Séance ${sessionInfo}. ` : ""}${
+                  debtJustCreated
+                    ? `Séance suivie sans provision : ${result.cost} DA débités, le solde tombe à -${owed} DA.`
+                    : `L'élève doit déjà ${owed} DA.`
+                } À réclamer à la caisse.${substitution}${freeNote}${preStartNote}`
               : `${isLate ? "Présence validée avec RETARD" : "Présence enregistrée avec succès"}${sessionInfo ? ` — ${sessionInfo}` : ""}.${substitution}${freeNote}${preStartNote}`,
           studentName: studentName(student),
           cost: result.cost,

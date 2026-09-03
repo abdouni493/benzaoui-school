@@ -29,6 +29,12 @@ describe("freeReasonOf", () => {
     expect(freeReasonOf(att({ waivedAmount: 650 }))).toBe("freeSeance");
   });
 
+  it("reconnaît un créneau offert SANS tarif, qui ne met rien de côté", () => {
+    // Un créneau coché « offerte » à sa création écrit un tarif de 0 DA :
+    // waivedAmount vaut 0 lui aussi, et l'écran annonçait « tarif à 0 ».
+    expect(freeReasonOf(att(), { sessionIsFree: true })).toBe("freeSeance");
+  });
+
   it("reconnaît un élève gratuit, qui ne met rien de côté non plus", () => {
     expect(freeReasonOf(att(), { studentIsFree: true })).toBe("freeStudent");
   });
