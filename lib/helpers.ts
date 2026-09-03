@@ -56,16 +56,82 @@ export interface StudentDebt {
   sessions: number;
   /** frais d'inscription encore dus */
   registration: number;
-  /** ce que la caisse réclame en tout */
+  /**
+   * Ce que l'historique de présence a facturé SANS que le solde ne bouge.
+   *
+   * Ce n'est pas une créance de plus : c'est la MEME dette, restée invisible
+   * parce que le débit n'est jamais arrivé jusqu'au solde. Une fiche qui
+   * annonce « Total débité 625 DA » en face d'un « Solde : 0 DA » se
+   * reconnaît à ce champ, et à lui seul.
+   */
+  unbilled: number;
+  /** ce que la caisse réclame en tout (ce que `pay_student_debt` règle) */
   total: number;
+  /** vrai dès qu'il y a quelque chose à signaler, dette ou incohérence */
+  alert: boolean;
 }
 
 export function studentDebtOf(
   student: Pick<Student, "balance"> & { registrationDue?: number },
+  opts: { unbilled?: number } = {},
 ): StudentDebt {
   const sessions = student.balance < 0 ? -student.balance : 0;
   const registration = student.registrationDue ?? 0;
-  return { sessions, registration, total: sessions + registration };
+  const unbilled = Math.max(opts.unbilled ?? 0, 0);
+  return {
+    sessions,
+    registration,
+    unbilled,
+    total: sessions + registration,
+    alert: sessions > 0 || registration > 0 || unbilled > 0,
+  };
+}
+
+/** Le strict minimum à connaître pour confronter les présences à l'historique. */
+export interface BillingLedger {
+  attendance: Pick<AttendanceRecord, "studentId" | "amountDeducted">[];
+  absencePenalties?: { studentId: string; amount: number }[];
+  balanceTx: { studentId: string; amount: number; type: string }[];
+}
+
+/**
+ * Les séances facturées dont le solde n'a jamais entendu parler, élève par
+ * élève (les élèves à zéro n'y figurent pas).
+ *
+ * Toute facturation écrit DEUX choses dans la même transaction : la présence
+ * (`attendance.amountDeducted`, ou la pénalité d'absence hebdomadaire) et sa
+ * ligne d'historique (`balance_tx` de type `deduction`). Quand une écriture
+ * absolue a écrasé le solde, ou qu'un écran a posé la présence sans la
+ * ligne, la première somme dépasse la seconde : c'est exactement l'écart
+ * rendu ici. C'est la signature de la fiche qui annonce « Total débité
+ * 625 DA » en face d'un « Solde : 0 DA ».
+ *
+ * L'écart n'est retenu que dans le sens qui lèse l'école. Un remboursement
+ * (séance devenue offerte, présence supprimée, tarif revu à la baisse) laisse
+ * la déduction dans l'historique et remet la présence à 0 : l'écart part
+ * dans l'autre sens sans qu'aucune dette n'existe, et ne dit donc rien.
+ *
+ * Une seule passe sur chaque table : une liste de fiches ne peut pas
+ * rebalayer l'historique complet à chaque carte affichée.
+ */
+export function unbilledChargesByStudent(db: BillingLedger): Map<string, number> {
+  const drift = new Map<string, number>();
+  const add = (id: string, amount: number) =>
+    drift.set(id, (drift.get(id) ?? 0) + amount);
+
+  for (const att of db.attendance) add(att.studentId, att.amountDeducted);
+  for (const pen of db.absencePenalties ?? []) add(pen.studentId, pen.amount);
+  for (const tx of db.balanceTx) {
+    if (tx.type === "deduction" && tx.amount < 0) add(tx.studentId, tx.amount);
+  }
+
+  const gaps = new Map<string, number>();
+  for (const [id, gap] of drift) if (gap > 0) gaps.set(id, gap);
+  return gaps;
+}
+
+export function unbilledChargesOf(studentId: string, db: BillingLedger): number {
+  return unbilledChargesByStudent(db).get(studentId) ?? 0;
 }
 
 /**

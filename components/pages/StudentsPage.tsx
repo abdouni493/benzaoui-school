@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useData, uid } from "@/lib/store/data";
 import { createRoleUser, resetUserPassword } from "@/lib/supabase/createUser";
 import { Card, CardBody } from "@/components/ui/Card";
@@ -56,6 +56,7 @@ import {
   FREE_REASON_LABELS,
   allocateDebtPayment,
   studentDebtOf,
+  unbilledChargesByStudent,
   daysUntil,
   deskPaymentFor,
   enrollmentExpiry,
@@ -436,6 +437,19 @@ export function StudentsPage() {
     return student.balance >= 0 && student.balance < minCost * 2;
   };
 
+  // Le solde ne suffit pas à dire ce qu'un élève doit. Quand le débit d'une
+  // présence n'est jamais arrivé jusqu'à lui, la fiche affiche « 0 DA » en
+  // face d'un historique qui, lui, facture la séance : l'élève a étudié sans
+  // provision et rien ne le signale. On confronte donc les présences à
+  // l'historique UNE fois pour toute la liste, et chaque carte alerte sur le
+  // pire des deux.
+  const unbilledByStudent = useMemo(
+    () => unbilledChargesByStudent({ attendance, absencePenalties, balanceTx }),
+    [attendance, absencePenalties, balanceTx],
+  );
+  const debtOf = (student: Student) =>
+    studentDebtOf(student, { unbilled: unbilledByStudent.get(student.id) ?? 0 });
+
   // Filter students based on queries
   const getFilteredStudents = () => {
     return students
@@ -451,8 +465,10 @@ export function StudentsPage() {
 
         if (!matchesSearch) return false;
 
-        if (filterType === "debt") return s.balance < 0 || (s.registrationDue && s.registrationDue > 0);
-        if (filterType === "paid") return s.balance >= 0 && (!s.registrationDue || s.registrationDue === 0);
+        // « En dette » retient aussi l'élève dont le solde ment : des séances
+        // facturées dans son historique que le solde n'a jamais enregistrées.
+        if (filterType === "debt") return debtOf(s).alert;
+        if (filterType === "paid") return !debtOf(s).alert;
         if (filterType === "free") return s.isFree;
         if (filterType === "soon") return isSoonToRunOut(s);
 
@@ -1393,9 +1409,12 @@ export function StudentsPage() {
 
   const openPayDebt = (stu: Student) => {
     setSelectedStudent(stu);
-    // Debt is either negative balance, or registrationDue, or both
-    const debt = (stu.balance < 0 ? Math.abs(stu.balance) : 0) + (stu.registrationDue || 0);
-    setPayAmount(debt);
+    // Ce que la RPC sait régler : le solde négatif et l'inscription due. Les
+    // séances facturées qui n'ont jamais atteint le solde ne sont PAS ajoutées
+    // au montant proposé : tant que le solde ne les porte pas, un versement
+    // qui les couvrirait rendrait le solde faussement créditeur. La fenêtre
+    // le dit, et le script de réparation remet le solde d'aplomb.
+    setPayAmount(debtOf(stu).total);
     setIsPayDebtOpen(true);
     setOverlayStudentId(null);
   };
@@ -3001,11 +3020,76 @@ export function StudentsPage() {
         );
       })()}
 
+      {/* Qui a étudié sans provision ? La question se posait fiche par fiche :
+          il fallait ouvrir chaque carte pour la voir. Elle a maintenant sa
+          réponse en haut de l'écran, avec le guichet à côté. */}
+      {(() => {
+        const debtors = students
+          .map((stu) => ({ stu, debt: debtOf(stu) }))
+          .filter((row) => row.debt.alert)
+          .sort((a, b) => (b.debt.total + b.debt.unbilled) - (a.debt.total + a.debt.unbilled));
+        if (debtors.length === 0) return null;
+        const owed = debtors.reduce((sum, row) => sum + row.debt.total + row.debt.unbilled, 0);
+        return (
+          <Card className="mb-6 border-danger/30">
+            <CardBody>
+              <div className="flex items-start gap-3">
+                <div className="rounded-xl bg-danger/15 p-2.5 text-danger">
+                  <AlertTriangle className="h-5 w-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="text-sm font-bold text-ink">
+                    Élèves en dette — {debtors.length} élève(s), {owed} DA à recouvrer
+                  </h3>
+                  <p className="mt-0.5 text-xs text-muted">
+                    Séances suivies sans provision, frais d&apos;inscription impayés, et soldes
+                    qui n&apos;ont pas enregistré une séance pourtant facturée.
+                  </p>
+                  <div className="mt-2 space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                    {debtors.map(({ stu, debt }) => (
+                      <div
+                        key={stu.id}
+                        className="flex flex-wrap items-center justify-between gap-2 text-xs bg-danger/5 border border-danger/20 rounded-lg px-3 py-1.5"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => openDetails(stu)}
+                          className="text-start min-w-0 hover:text-primary transition-colors"
+                        >
+                          <strong className="text-ink block truncate">
+                            {stu.firstName} {stu.lastName}
+                          </strong>
+                          <span className="text-[10px] text-muted">
+                            {debt.sessions > 0 ? `Séances non payées : ${debt.sessions} DA. ` : ""}
+                            {debt.registration > 0 ? `Inscription : ${debt.registration} DA. ` : ""}
+                            {debt.unbilled > 0
+                              ? `${debt.unbilled} DA facturés dans sa fiche mais jamais retirés du solde.`
+                              : ""}
+                          </span>
+                        </button>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Badge tone="danger" className="font-mono text-[10px]">
+                            {debt.total + debt.unbilled} DA
+                          </Badge>
+                          <Button size="sm" variant="danger" onClick={() => openPayDebt(stu)}>
+                            Régler
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </CardBody>
+          </Card>
+        );
+      })()}
+
       {/* Students list */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {getFilteredStudents().map((stu) => {
           const isOverlaid = overlayStudentId === stu.id;
-          const debt = stu.balance < 0 ? Math.abs(stu.balance) : 0;
+          const debt = debtOf(stu);
 
           return (
             <Card key={stu.id} className="relative overflow-visible">
@@ -3128,12 +3212,23 @@ export function StudentsPage() {
                               suivi des séances qu'il n'a pas payées. Depuis que
                               le badge n'est plus refusé pour solde épuisé, la
                               dette est la seule trace de ce qui est dû. */}
-                          {stu.balance < 0 && (
+                          {debt.sessions > 0 && (
                             <span
-                              title={`Séances suivies non payées : ${-stu.balance} DA`}
+                              title={`Séances suivies non payées : ${debt.sessions} DA`}
                               className="flex items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white"
                             >
-                              <AlertTriangle className="h-2.5 w-2.5" /> Dette {-stu.balance} DA
+                              <AlertTriangle className="h-2.5 w-2.5" /> Dette {debt.sessions} DA
+                            </span>
+                          )}
+                          {/* Le solde ne dit rien, l'historique facture : la
+                              carte le crie quand même. Sans ce badge, un élève
+                              à 0 DA qui a suivi des séances passe pour à jour. */}
+                          {debt.unbilled > 0 && (
+                            <span
+                              title={`${debt.unbilled} DA de séances facturées dans son historique n'ont jamais été retirés du solde`}
+                              className="flex items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white"
+                            >
+                              <AlertTriangle className="h-2.5 w-2.5" /> Solde à corriger
                             </span>
                           )}
                           {/* Alarme visible sans ouvrir la fiche : l'inscription
@@ -3168,22 +3263,42 @@ export function StudentsPage() {
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted">Solde Actuel:</span>
-                      <strong className={stu.balance < 0 ? "text-danger" : "text-success"}>
+                      <strong className={debt.sessions > 0 || debt.unbilled > 0 ? "text-danger" : "text-success"}>
                         {stu.balance} DA
                       </strong>
                     </div>
 
-                    {stu.balance < 0 && (
+                    {debt.sessions > 0 && (
                       <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5">
                         <span className="flex items-center gap-1 text-[10px] font-bold text-danger">
                           <AlertTriangle className="h-3 w-3 animate-pulse" />
-                          SÉANCES NON PAYÉES : {-stu.balance} DA dus
+                          SÉANCES NON PAYÉES : {debt.sessions} DA dus
                         </span>
                         <button
                           onClick={() => openPayDebt(stu)}
                           className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
                         >
                           Régler
+                        </button>
+                      </div>
+                    )}
+
+                    {/* L'élève a étudié, la séance est facturée dans sa fiche, et
+                        le solde n'en sait rien. Tant que la base n'est pas
+                        remise d'aplomb, la carte affiche la dette réelle
+                        plutôt que le solde qui la cache. */}
+                    {debt.unbilled > 0 && (
+                      <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5">
+                        <span className="flex items-center gap-1 text-[10px] font-bold text-danger">
+                          <AlertTriangle className="h-3 w-3 animate-pulse" />
+                          SÉANCES SUIVIES NON DÉBITÉES : {debt.unbilled} DA
+                        </span>
+                        <button
+                          onClick={() => openDetails(stu)}
+                          title="Ouvrir la fiche : l'onglet Présences détaille les séances facturées"
+                          className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
+                        >
+                          Vérifier
                         </button>
                       </div>
                     )}
@@ -3426,7 +3541,7 @@ export function StudentsPage() {
                 <h3 className="font-bold text-lg text-ink">{selectedStudent.firstName} {selectedStudent.lastName}</h3>
                 <span className="text-xs text-muted">ID: {selectedStudent.id} | Carte: {selectedStudent.rfid}</span>
               </div>
-              <Badge tone={selectedStudent.balance < 0 ? "danger" : selectedStudent.isFree ? "success" : "primary"} className="text-sm px-3 py-1">
+              <Badge tone={debtOf(selectedStudent).alert ? "danger" : selectedStudent.isFree ? "success" : "primary"} className="text-sm px-3 py-1">
                 {selectedStudent.isFree ? "Études gratuites" : `${selectedStudent.balance} DA`}
               </Badge>
             </div>
@@ -3435,33 +3550,44 @@ export function StudentsPage() {
                 onglet : c'est la question qu'on se pose en ouvrant la fiche. Le
                 badge du chiffre ne suffit pas — un solde négatif se lit comme un
                 solde tant qu'on ne le nomme pas « dette ». */}
-            {(selectedStudent.balance < 0 || (selectedStudent.registrationDue ?? 0) > 0) && (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-danger/50 bg-danger/10 p-3">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 animate-pulse text-danger" />
-                  <div>
-                    <strong className="block text-xs font-bold text-danger">
-                      DETTE :{" "}
-                      {(selectedStudent.balance < 0 ? -selectedStudent.balance : 0) +
-                        (selectedStudent.registrationDue ?? 0)}{" "}
-                      DA à régler
-                    </strong>
-                    <span className="text-[10px] text-danger/90">
-                      {selectedStudent.balance < 0 && (
-                        <>Séances suivies et non payées : {-selectedStudent.balance} DA. </>
-                      )}
-                      {(selectedStudent.registrationDue ?? 0) > 0 && (
-                        <>Frais d&apos;inscription impayés : {selectedStudent.registrationDue} DA. </>
-                      )}
-                      Chaque nouvelle séance creuse la dette d&apos;autant.
-                    </span>
+            {(() => {
+              const debt = debtOf(selectedStudent);
+              if (!debt.alert) return null;
+              return (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-danger/50 bg-danger/10 p-3">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 animate-pulse text-danger" />
+                    <div>
+                      <strong className="block text-xs font-bold text-danger">
+                        DETTE : {debt.total + debt.unbilled} DA à régler
+                      </strong>
+                      <span className="text-[10px] text-danger/90">
+                        {debt.sessions > 0 && (
+                          <>Séances suivies et non payées : {debt.sessions} DA. </>
+                        )}
+                        {debt.registration > 0 && (
+                          <>Frais d&apos;inscription impayés : {debt.registration} DA. </>
+                        )}
+                        {/* L'écart entre ce que l'onglet Présences facture et ce
+                            que le solde a enregistré. Le nommer ici évite la
+                            question « pourquoi 0 DA alors qu'il a étudié ? ». */}
+                        {debt.unbilled > 0 && (
+                          <>
+                            {debt.unbilled} DA de séances facturées dans l&apos;onglet Présences
+                            n&apos;ont jamais été retirés du solde — le solde affiché est en retard
+                            sur ce que l&apos;élève a suivi.{" "}
+                          </>
+                        )}
+                        Chaque nouvelle séance creuse la dette d&apos;autant.
+                      </span>
+                    </div>
                   </div>
+                  <Button size="sm" variant="danger" onClick={() => openPayDebt(selectedStudent)}>
+                    <DollarSign className="me-1 h-3.5 w-3.5" /> Régler la dette
+                  </Button>
                 </div>
-                <Button size="sm" variant="danger" onClick={() => openPayDebt(selectedStudent)}>
-                  <DollarSign className="me-1 h-3.5 w-3.5" /> Régler la dette
-                </Button>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Navigation Tabs inside details modal */}
             <div className="flex border-b border-line gap-2">
@@ -4370,9 +4496,54 @@ export function StudentsPage() {
             <div className="bg-canvas border border-line rounded-xl p-3 text-xs">
               <span className="text-[10px] text-muted block uppercase">Élève</span>
               <strong className="text-ink block mt-0.5">{selectedStudent.firstName} {selectedStudent.lastName}</strong>
-              <span className="text-muted">Solde actuel: {selectedStudent.balance} DA</span>
+              <span className={debtOf(selectedStudent).sessions > 0 ? "font-bold text-danger" : "text-muted"}>
+                Solde actuel: {selectedStudent.balance} DA
+              </span>
             </div>
           )}
+
+          {/* Recharger REMBOURSE la dette avant de créditer quoi que ce soit :
+              le solde remonte de zéro, pas du montant versé. Sans ce rappel
+              chiffré, le guichet croit à une recharge « perdue ». */}
+          {selectedStudent && debtOf(selectedStudent).sessions > 0 && (() => {
+            const debt = debtOf(selectedStudent);
+            const paid = Math.max(Math.round(topupAmount) || 0, 0);
+            const toRegistration = settleReg ? Math.min(debt.registration, paid) : 0;
+            const toSessions = Math.min(debt.sessions, paid - toRegistration);
+            const nextBalance = selectedStudent.balance + paid - toRegistration;
+            return (
+              <div className="rounded-xl border border-danger/40 bg-danger/10 p-3 text-[10px] leading-relaxed text-danger space-y-1">
+                <strong className="block text-xs">
+                  DETTE EN COURS : {debt.sessions} DA de séances suivies non payées
+                </strong>
+                <span className="block text-danger/90">
+                  Ce versement éponge la dette d&apos;abord : le solde ne remonte qu&apos;au-delà.
+                </span>
+                {paid > 0 && (
+                  <div className="mt-1 space-y-0.5 rounded-lg border border-danger/30 bg-surface/60 p-2 text-ink">
+                    {toRegistration > 0 && (
+                      <div className="flex justify-between">
+                        <span className="text-muted">Frais d&apos;inscription réglés :</span>
+                        <strong>{toRegistration} DA</strong>
+                      </div>
+                    )}
+                    {toSessions > 0 && (
+                      <div className="flex justify-between">
+                        <span className="text-muted">Dette épongée :</span>
+                        <strong>{toSessions} DA</strong>
+                      </div>
+                    )}
+                    <div className="flex justify-between border-t border-line/50 pt-1">
+                      <span className="text-muted">Nouveau solde :</span>
+                      <strong className={nextBalance < 0 ? "text-danger" : "text-success"}>
+                        {nextBalance} DA
+                      </strong>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           <div>
             <label className="block text-xs font-semibold text-muted mb-1 font-sans">Montant à verser (DA) *</label>
@@ -4428,32 +4599,42 @@ export function StudentsPage() {
                   {selectedStudent.balance} DA
                 </strong>
               </div>
-              {selectedStudent.balance < 0 ? (
+              {debtOf(selectedStudent).sessions > 0 ? (
                 <div className="flex justify-between">
                   <span className="text-muted">Séances suivies non payées:</span>
-                  <strong className="text-danger">{-selectedStudent.balance} DA</strong>
+                  <strong className="text-danger">{debtOf(selectedStudent).sessions} DA</strong>
                 </div>
               ) : null}
-              {selectedStudent.registrationDue ? (
+              {debtOf(selectedStudent).registration > 0 ? (
                 <div className="flex justify-between">
                   <span className="text-muted">Frais inscription:</span>
-                  <strong className="text-danger">{selectedStudent.registrationDue} DA</strong>
+                  <strong className="text-danger">{debtOf(selectedStudent).registration} DA</strong>
                 </div>
               ) : null}
               <div className="flex justify-between border-t border-line/50 pt-1.5 mt-1">
                 <span className="font-bold text-ink">Total dû:</span>
-                <strong className="text-danger">
-                  {(selectedStudent.balance < 0 ? -selectedStudent.balance : 0) +
-                    (selectedStudent.registrationDue ?? 0)}{" "}
-                  DA
-                </strong>
+                <strong className="text-danger">{debtOf(selectedStudent).total} DA</strong>
               </div>
+              {/* Un versement ne peut pas régler ce que le solde ignore : il
+                  rendrait le solde créditeur d'autant. Le guichet doit le
+                  savoir AVANT d'encaisser. */}
+              {debtOf(selectedStudent).unbilled > 0 && (
+                <div className="mt-1 rounded-lg border border-danger/40 bg-danger/10 p-2 text-[10px] leading-relaxed text-danger">
+                  <strong className="block">
+                    {debtOf(selectedStudent).unbilled} DA de séances suivies ne sont pas encore
+                    portés sur le solde.
+                  </strong>
+                  Son historique de présences les facture, son solde ne les a jamais enregistrés.
+                  Encaissez d&apos;abord le « Total dû » ci-dessus : ces séances devront être
+                  remises sur le solde avant d&apos;être réclamées.
+                </div>
+              )}
               {/* L'ordre d'imputation est décidé côté serveur : l'annoncer ici,
                   chiffré sur le montant tapé, évite la question « pourquoi mon
                   solde n'a pas bougé de tout le versement ? ». */}
               {payAmount > 0 &&
                 (() => {
-                  const split = allocateDebtPayment(payAmount, studentDebtOf(selectedStudent));
+                  const split = allocateDebtPayment(payAmount, debtOf(selectedStudent));
                   return (
                     <div className="mt-1 space-y-0.5 rounded-lg border border-primary/30 bg-primary/5 p-2 text-[10px]">
                       <strong className="block text-primary">Ce versement ira :</strong>

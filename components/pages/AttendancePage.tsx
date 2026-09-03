@@ -42,8 +42,10 @@ import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 
 // Human-readable reasons when the server refuses/annotates a manual marking.
 const MARK_FAILURE_MESSAGES: Record<string, string> = {
+  // Conservé pour une base qui n'a pas encore reçu la migration : depuis, une
+  // présence est TOUJOURS facturée, dette comprise, comme au badge.
   "scan.debtBlocked":
-    "Élève en DETTE — présence refusée. Utilisez « Forcer » pour l'enregistrer malgré tout (la séance s'ajoutera à sa dette).",
+    "Élève en DETTE — présence refusée par la base. Exécutez la dernière migration : une présence doit désormais toujours être débitée, quitte à creuser la dette.",
   "attendance.notEnrolled": "L'élève n'est pas inscrit à cette séance (ou son abonnement a expiré).",
   "attendance.notScheduledThatDay": "Cette séance n'est pas programmée ce jour-là.",
   "attendance.sessionNotFound": "Séance introuvable.",
@@ -449,7 +451,7 @@ export function AttendancePage() {
           ? "Présence enregistrée (En Retard)"
           : "Présence enregistrée",
       message: res.debt
-        ? "Le solde est passé en dette : l'élève sera bloqué au prochain scan tant que la dette n'est pas réglée."
+        ? "Le solde est passé en dette : la séance est facturée et réclamable à la caisse. La fiche, la liste des élèves et le tableau de bord la signalent."
         : res.lowBalance
           ? "Attention : le solde ne couvre bientôt plus 2 séances."
           : res.messageKey === "attendance.statusUpdated"
@@ -1499,9 +1501,10 @@ export function AttendancePage() {
           const inDebt = cost > 0 && stu.balance < 0;
           const goesDebt = cost > 0 && stu.balance >= 0 && after < 0;
           const low = cost > 0 && after >= 0 && after < price * 2;
-          // The mark_attendance RPC refuses any marking the balance can't
-          // cover unless reception explicitly forces it — the only flow
-          // allowed to create a debt (the RFID scan always refuses these).
+          // Le solde ne couvre pas la séance : elle sera quand même facturée et
+          // le solde passera en dette, exactement comme au badge. La confirmation
+          // reste — le guichet doit savoir qu'il crée une créance — mais elle
+          // n'est plus un refus.
           const needsDebtForce = cost > 0 && stu.balance < cost;
           const sessionLabel = `${getModuleName(activeSession.moduleId)} (${activeSession.startTime} - ${activeSession.endTime})`;
           const dateLabel = new Date(`${sheetDate}T12:00:00`).toLocaleDateString("fr-FR");
@@ -1618,9 +1621,9 @@ export function AttendancePage() {
                 <div className="bg-danger/10 border border-danger/20 rounded-xl p-3 text-xs text-danger flex items-start gap-2">
                   <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                   <div>
-                    <strong>Élève déjà EN DETTE ({formatDA(stu.balance)}).</strong> L'entrée doit normalement être
-                    refusée tant que la dette n'est pas réglée. Vous pouvez forcer l'enregistrement : le coût de la
-                    séance s'ajoutera à sa dette.
+                    <strong>Élève déjà EN DETTE ({formatDA(stu.balance)}).</strong> La séance lui est comptée
+                    quand même — il l'a suivie — et sa dette passera à {formatDA(after)}. Elle est réclamable
+                    à la caisse, et toute recharge l'éponge en premier.
                   </div>
                 </div>
               )}
@@ -1629,8 +1632,8 @@ export function AttendancePage() {
                   <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                   <div>
                     <strong>Le solde ne couvre pas cette séance :</strong> après validation, l'élève passera EN DETTE
-                    ({formatDA(after)}). La dette ne peut être créée que par cette action manuelle — sa carte sera
-                    refusée au scan tant que le solde ne couvre pas une séance. À la prochaine recharge, la dette sera
+                    ({formatDA(after)}). La séance est suivie, donc facturée : sa fiche, la liste des élèves et le
+                    tableau de bord la signaleront jusqu'au règlement. À la prochaine recharge, la dette sera
                     déduite automatiquement.
                   </div>
                 </div>
@@ -1656,7 +1659,7 @@ export function AttendancePage() {
                 </Button>
                 {needsDebtForce ? (
                   <Button variant="danger" disabled={busy} onClick={() => applyMark(stu, confirmMark.status, true)}>
-                    Forcer — enregistrer en dette
+                    Confirmer — {formatDA(cost)} en dette
                   </Button>
                 ) : (
                   <Button disabled={busy} onClick={() => applyMark(stu, confirmMark.status, false)}>

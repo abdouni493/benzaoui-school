@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { TeacherPages } from "@/components/pages/TeacherPages";
 import { DaySchedulePanel } from "@/components/schedule/DaySchedulePanel";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
+import { studentDebtOf, unbilledChargesByStudent } from "@/lib/helpers";
 import { motion } from "framer-motion";
 import {
   Users,
@@ -65,6 +66,8 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     modules,
     groups,
     subscriptions,
+    balanceTx,
+    absencePenalties,
   } = useData();
 
   // 1. General Operational Metrics
@@ -79,11 +82,21 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
 
   // 2. Financial Metrics (Admin Only)
   const cashInHand = cash.reduce((sum, tx) => sum + tx.amount, 0);
-  const totalDebts = students.reduce((sum, s) => {
-    const balDebt = s.balance < 0 ? Math.abs(s.balance) : 0;
-    const regDebt = s.registrationDue || 0;
-    return sum + balDebt + regDebt;
-  }, 0);
+
+  // Ce que l'école a à recouvrer, élève par élève. Le solde seul ne suffit
+  // pas : une présence facturée dont le débit n'a jamais atteint le solde
+  // laisse une fiche à « 0 DA » en face d'un historique qui, lui, réclame.
+  const unbilledByStudent = unbilledChargesByStudent({ attendance, absencePenalties, balanceTx });
+  const debtors = students
+    .map((s) => ({ student: s, debt: studentDebtOf(s, { unbilled: unbilledByStudent.get(s.id) ?? 0 }) }))
+    .filter((row) => row.debt.alert)
+    .map((row) => ({ ...row, owed: row.debt.total + row.debt.unbilled }))
+    .sort((a, b) => b.owed - a.owed);
+  const totalDebts = debtors.reduce((sum, row) => sum + row.owed, 0);
+  // Les élèves qui ont étudié sans provision : c'est la dette que le badge
+  // crée tout seul, celle que personne n'a décidée au guichet.
+  const studiedWithoutFunds = debtors.filter((row) => row.debt.sessions > 0 || row.debt.unbilled > 0);
+  const driftingBalances = debtors.filter((row) => row.debt.unbilled > 0);
   const unpaidTeacherSessions = unpaidTeacher.filter((u) => !u.paid).reduce((sum, u) => sum + u.amount, 0);
 
   // 3. Subscription Count By Module (CSS Bar Chart Data)
@@ -138,7 +151,7 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   const maxCashValue = Math.max(...weeklyCashData.map((d) => Math.max(d.inflows, d.outflows)), 1000);
 
   // 5. Intelligent Alerts & Analytics
-  const severeDebtors = students.filter((s) => s.balance <= -2000);
+  const severeDebtors = debtors.filter((row) => row.owed >= 2000);
   const lowEnrollmentGroups = groups.filter((g) => {
     const enrolledCount = students.filter((s) => s.subscriptionIds.some((subId) => {
       const sub = subscriptions.find((subItem) => subItem.id === subId);
@@ -157,10 +170,25 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   });
 
   const alerts = [];
+  // La première alerte de la journée : qui a étudié sans avoir de quoi payer.
+  // Depuis que le badge n'est plus refusé pour solde épuisé, c'est la seule
+  // trace de ce qui est dû — et elle doit se voir sans ouvrir une fiche.
+  if (studiedWithoutFunds.length > 0) {
+    alerts.push({
+      type: "danger" as const,
+      text: `${studiedWithoutFunds.length} élève(s) ont suivi des séances sans provision — ${studiedWithoutFunds.reduce((sum, row) => sum + row.debt.sessions + row.debt.unbilled, 0)} DA à réclamer à la caisse.`,
+    });
+  }
+  if (driftingBalances.length > 0) {
+    alerts.push({
+      type: "danger" as const,
+      text: `${driftingBalances.length} élève(s) ont des séances facturées dans leur fiche que leur solde n'a jamais enregistrées — leur solde affiché est en retard sur ce qu'ils doivent.`,
+    });
+  }
   if (severeDebtors.length > 0) {
     alerts.push({
       type: "danger" as const,
-      text: `${severeDebtors.length} élève(s) ont un découvert critique supérieur à -2000 DA.`,
+      text: `${severeDebtors.length} élève(s) doivent 2000 DA ou plus.`,
     });
   }
   if (heavyUnpaidTeachers.length > 0) {
@@ -388,38 +416,48 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
 
       {/* Row 4: Operational Data Columns */}
       <motion.div variants={itemVariants} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Column 1: Debtor Students warning list (Admin only) */}
-        {!reception && (
-          <Card className="border border-line card-shadow">
-            <CardBody className="space-y-4 p-5">
-              <h3 className="font-bold text-danger border-b border-line pb-3 flex items-center gap-2">
-                <AlertTriangle className="h-4.5 w-4.5" /> Étudiants Débiteurs ({severeDebtors.length})
-              </h3>
+        {/* Colonne 1 : qui doit de l'argent à l'école.
+            Cette liste ne retenait que les découverts au-delà de 2000 DA, et
+            n'était montrée qu'à l'administrateur. Une séance suivie sans
+            provision — 625 DA — n'y figurait donc jamais, et la réception,
+            qui est le guichet, ne la voyait pas du tout. */}
+        <Card className="border border-line card-shadow">
+          <CardBody className="space-y-4 p-5">
+            <h3 className="font-bold text-danger border-b border-line pb-3 flex items-center gap-2">
+              <AlertTriangle className="h-4.5 w-4.5" /> Étudiants Débiteurs ({debtors.length})
+              {debtors.length > 0 && (
+                <span className="ms-auto text-[10px] font-mono font-black">{totalDebts} DA</span>
+              )}
+            </h3>
 
-              <div className="space-y-2.5 max-h-72 overflow-y-auto pt-1 pr-1">
-                {severeDebtors.length === 0 ? (
-                  <div className="text-xs text-success italic text-center py-12 font-bold flex flex-col items-center gap-2">
-                    <CheckCircle2 className="h-8 w-8" />
-                    <span>Tous les élèves sont à jour de paiement !</span>
+            <div className="space-y-2.5 max-h-72 overflow-y-auto pt-1 pr-1">
+              {debtors.length === 0 ? (
+                <div className="text-xs text-success italic text-center py-12 font-bold flex flex-col items-center gap-2">
+                  <CheckCircle2 className="h-8 w-8" />
+                  <span>Tous les élèves sont à jour de paiement !</span>
+                </div>
+              ) : (
+                debtors.map(({ student: s, debt, owed }) => (
+                  <div key={s.id} className="flex justify-between items-center gap-3 p-3 bg-danger/5 border border-danger/15 rounded-xl hover:border-danger/30 transition-colors">
+                    <div className="min-w-0">
+                      <strong className="text-ink block text-xs truncate">{s.firstName} {s.lastName}</strong>
+                      <span className="text-[9px] text-muted block mt-0.5">
+                        {[
+                          debt.sessions > 0 ? `${debt.sessions} DA de séances suivies` : "",
+                          debt.registration > 0 ? `${debt.registration} DA d'inscription` : "",
+                          debt.unbilled > 0 ? `${debt.unbilled} DA facturés hors solde` : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                    </div>
+                    <strong className="text-danger font-black text-xs whitespace-nowrap">-{owed} DA</strong>
                   </div>
-                ) : (
-                  severeDebtors.map((s) => {
-                    const debtAmount = s.balance < 0 ? Math.abs(s.balance) : 0;
-                    return (
-                      <div key={s.id} className="flex justify-between items-center p-3 bg-danger/5 border border-danger/15 rounded-xl hover:border-danger/30 transition-colors">
-                        <div>
-                          <strong className="text-ink block text-xs">{s.firstName} {s.lastName}</strong>
-                          <span className="text-[9px] text-muted block mt-0.5">{s.phone}</span>
-                        </div>
-                        <strong className="text-danger font-black text-xs">-{debtAmount} DA</strong>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </CardBody>
-          </Card>
-        )}
+                ))
+              )}
+            </div>
+          </CardBody>
+        </Card>
 
         {/* Column 3: Recent cashier transactions / operational feed */}
         <Card className="border border-line card-shadow">
