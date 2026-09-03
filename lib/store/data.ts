@@ -833,7 +833,30 @@ interface DataActions {
     description: string,
     settleRegistration?: boolean,
   ) => Promise<{ ok: boolean; error?: string }>;
-  payDebt: (studentId: string, amount: number) => Promise<void>;
+  /** Débite une séance encaissée au guichet. Le solde bouge RELATIVEMENT au
+   *  solde stocké, et la ligne d'historique part dans la même transaction :
+   *  deux caisses ouvertes en même temps ne peuvent plus s'effacer l'une
+   *  l'autre. Le solde a le droit de passer en dette — l'élève a suivi la
+   *  séance, elle lui est comptée. */
+  chargeStudent: (
+    studentId: string,
+    amount: number,
+    description: string,
+    moduleId?: string,
+  ) => Promise<{ ok: boolean; error?: string; newBalance?: number }>;
+  /** Règle les frais d'inscription sur le solde. `fee` omis = ce que la BASE
+   *  dit encore dû, jamais ce que l'écran croyait dû. */
+  settleRegistrationFee: (
+    studentId: string,
+    fee?: number,
+    label?: string,
+  ) => Promise<{ ok: boolean; error?: string; newBalance?: number }>;
+  /** Encaisse un règlement de dette : l'inscription due d'abord, les séances
+   *  suivies ensuite, le reste au solde — plus l'entrée en caisse. */
+  payDebt: (
+    studentId: string,
+    amount: number,
+  ) => Promise<{ ok: boolean; error?: string; registrationPaid?: number; debtPaid?: number; credited?: number }>;
   /** Corrects one balance_tx row (amount / description / date / type) and
    *  carries the difference over to the student's balance atomically. */
   updateBalanceTx: (
@@ -1307,13 +1330,65 @@ export const useData = create<DataStore>((set, get) => ({
     return { ok: true };
   },
 
+  // Le solde ne s'écrit JAMAIS depuis le navigateur. Un `updateItem` sur
+  // `students.balance` calcule une valeur absolue à partir de la copie locale
+  // et écrase tout ce que le serveur a débité entre-temps (un badge à
+  // l'entrée, un appel fait par l'enseignant) : la présence et sa ligne
+  // d'historique restaient, le débit sur le solde disparaissait. Ces trois RPC
+  // sont le seul chemin.
+  chargeStudent: async (studentId, amount, description, moduleId) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("charge_student", {
+      p_student_id: studentId,
+      p_amount: Math.round(amount),
+      p_description: description,
+      p_module_id: moduleId ?? null,
+    });
+    if (error) {
+      console.error("charge_student failed:", error.message);
+      return { ok: false, error: error.message };
+    }
+    await get().fetchAll();
+    const res = data as { newBalance?: number } | null;
+    return { ok: true, newBalance: res?.newBalance };
+  },
+
+  settleRegistrationFee: async (studentId, fee, label) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("settle_registration_fee", {
+      p_student_id: studentId,
+      p_fee: fee === undefined ? null : Math.round(fee),
+      p_label: label ?? null,
+    });
+    if (error) {
+      console.error("settle_registration_fee failed:", error.message);
+      return { ok: false, error: error.message };
+    }
+    await get().fetchAll();
+    const res = data as { newBalance?: number } | null;
+    return { ok: true, newBalance: res?.newBalance };
+  },
+
   payDebt: async (studentId, amount) => {
     const supabase = createClient();
-    const { error } = await supabase.rpc("pay_student_debt", {
+    const { data, error } = await supabase.rpc("pay_student_debt", {
       p_student_id: studentId,
-      p_amount: amount,
+      p_amount: Math.round(amount),
     });
-    if (!error) await get().fetchAll();
+    if (error) {
+      console.error("pay_student_debt failed:", error.message);
+      return { ok: false, error: error.message };
+    }
+    await get().fetchAll();
+    const res = data as
+      | { registrationPaid?: number; debtPaid?: number; credited?: number }
+      | null;
+    return {
+      ok: true,
+      registrationPaid: res?.registrationPaid,
+      debtPaid: res?.debtPaid,
+      credited: res?.credited,
+    };
   },
 
   // Editing/deleting a transaction has to move students.balance by exactly the

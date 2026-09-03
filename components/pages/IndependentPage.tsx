@@ -184,6 +184,7 @@ export function IndependentPage() {
     push,
     deleteFrom,
     updateItem,
+    chargeStudent,
   } = useData();
   const { language } = useSettings();
 
@@ -548,19 +549,20 @@ ${refused.reason}
     // earns no share for it (see buildUnpaidTimings on the Enseignants screen).
     if (!seanceIsOffered) {
       // Registered student: the séance is debited from his balance right away.
+      // Le débit passe par la RPC, JAMAIS par un `updateItem` sur le solde :
+      // celui-ci réécrivait une valeur absolue calculée sur la copie locale et
+      // effaçait tout ce que le serveur avait débité entre-temps (un badge à
+      // l'entrée pendant que la fenêtre était ouverte). Le solde peut descendre
+      // en dette : la séance a été suivie, elle est due.
       if (selectedStudent) {
         const student = students.find((st) => st.id === selectedStudent.id);
         if (student && !student.isFree) {
-          updateItem("students", student.id, { balance: student.balance - price });
-          push("balanceTx", {
-            id: uid("bt"),
-            studentId: student.id,
-            amount: -price,
-            date: nowIso,
-            type: "deduction",
-            description: `Séance libre: ${selectedItem.label}`,
-            moduleId: sessions.find((s) => s.id === selectedItem.sessionId)?.moduleId,
-          });
+          void chargeStudent(
+            student.id,
+            price,
+            `Séance libre: ${selectedItem.label}`,
+            sessions.find((s) => s.id === selectedItem.sessionId)?.moduleId,
+          );
         }
       }
 

@@ -47,6 +47,47 @@ export const filiereName = (db: Database, id?: string) =>
 
 export const studentName = (s: Student) => `${s.firstName} ${s.lastName}`;
 
+// ---- Où va l'argent d'un règlement de dette ? --------------------------------
+
+/** Ce qu'un élève doit : les séances suivies non payées (solde négatif) et les
+ *  frais d'inscription jamais réglés. Deux dettes distinctes, un seul guichet. */
+export interface StudentDebt {
+  /** ce que les séances suivies ont creusé (0 quand le solde est positif) */
+  sessions: number;
+  /** frais d'inscription encore dus */
+  registration: number;
+  /** ce que la caisse réclame en tout */
+  total: number;
+}
+
+export function studentDebtOf(
+  student: Pick<Student, "balance"> & { registrationDue?: number },
+): StudentDebt {
+  const sessions = student.balance < 0 ? -student.balance : 0;
+  const registration = student.registrationDue ?? 0;
+  return { sessions, registration, total: sessions + registration };
+}
+
+/**
+ * Comment un versement se répartit — miroir exact de la RPC `pay_student_debt`,
+ * pour que le guichet annonce AVANT de valider ce que la base fera.
+ *
+ * L'ordre n'est pas arbitraire : l'inscription est due à l'école quoi qu'il
+ * arrive, alors qu'un solde négatif se rattrape en étudiant moins. On solde
+ * donc l'inscription d'abord, les séances ensuite, et ce qui dépasse reste
+ * disponible pour les séances à venir — recharger le solde règle la dette de
+ * la même façon, par simple addition.
+ */
+export function allocateDebtPayment(
+  amount: number,
+  debt: StudentDebt,
+): { registration: number; sessions: number; credited: number } {
+  const paid = Math.max(Math.round(amount) || 0, 0);
+  const registration = Math.min(debt.registration, paid);
+  const sessions = Math.min(debt.sessions, paid - registration);
+  return { registration, sessions, credited: paid - registration - sessions };
+}
+
 // ---- Pourquoi une présence n'a-t-elle rien coûté ? ---------------------------
 
 /** Les cinq raisons pour lesquelles une présence est enregistrée à 0 DA.

@@ -54,6 +54,8 @@ import {
   freeReasonOf,
   FREE_REASON_HINTS,
   FREE_REASON_LABELS,
+  allocateDebtPayment,
+  studentDebtOf,
   daysUntil,
   deskPaymentFor,
   enrollmentExpiry,
@@ -136,6 +138,7 @@ export function StudentsPage() {
     updateItem,
     addBalance,
     payDebt,
+    settleRegistrationFee,
     updateBalanceTx,
     deleteBalanceTx,
     cancelAttendance,
@@ -655,21 +658,14 @@ export function StudentsPage() {
     // registration line is therefore written here, against the amount shown on
     // the screen: +versement encaissé, -frais, comme à la création.
     let registrationDue = fee;
-    const patch: Partial<Student> = {};
-    if (payNow && !moneyError) {
-      // The RPC refetched everything, so the balance to start from is the fresh
-      // one, not the snapshot this screen was opened on.
-      const fresh = useData.getState().students.find((s) => s.id === stu.id);
-      push("balanceTx", {
-        id: uid("bt"),
-        studentId: stu.id,
-        amount: -fee,
-        date: new Date().toISOString(),
-        type: "registration",
-        description: `Frais d'inscription — ${feeLabel}`,
-      });
-      patch.balance = (fresh?.balance ?? stu.balance) - fee;
-      registrationDue = 0;
+    if (payNow && !moneyError && fee > 0) {
+      // Débit RELATIF au solde stocké, historique compris, en une transaction.
+      // Repartir d'un solde lu côté client — même fraîchement rafraîchi —
+      // laissait la place à un badge arrivé entre la lecture et l'écriture,
+      // dont le débit était alors effacé.
+      const res = await settleRegistrationFee(stu.id, fee, `Frais d'inscription — ${feeLabel}`);
+      if (!res.ok) moneyError = res.error ?? "erreur inconnue";
+      else registrationDue = 0;
     }
 
     // ---- 3. Identité + inscriptions ----------------------------------------
@@ -682,7 +678,6 @@ export function StudentsPage() {
       rfid,
       isFree,
       registrationDue,
-      ...patch,
       subscriptionIds: enrollIds,
       subscriptionDates: buildEnrollmentDates(enrollIds),
       subscriptionDiscounts: buildEnrollmentDiscounts(enrollIds),
@@ -741,31 +736,48 @@ export function StudentsPage() {
     });
   };
 
-  const handlePayDebtSubmit = () => {
+  const handlePayDebtSubmit = async () => {
     if (!selectedStudent || payAmount <= 0) return;
-    payDebt(selectedStudent.id, payAmount);
+    const stu = selectedStudent;
     setIsPayDebtOpen(false);
     setOverlayStudentId(null);
+    // Le versement est réparti côté serveur : inscription due d'abord, séances
+    // suivies ensuite, surplus au solde — et il entre en caisse, ce qui n'était
+    // pas le cas avant.
+    const res = await payDebt(stu.id, payAmount);
+    const parts = [
+      (res.registrationPaid ?? 0) > 0 ? `${res.registrationPaid} DA d'inscription` : "",
+      (res.debtPaid ?? 0) > 0 ? `${res.debtPaid} DA de séances suivies` : "",
+      (res.credited ?? 0) > 0 ? `${res.credited} DA portés au solde` : "",
+    ].filter(Boolean);
+    addToast({
+      type: res.ok ? "success" : "danger",
+      title: res.ok ? "Dette réglée" : "Règlement refusé",
+      message: res.ok
+        ? `${payAmount} DA encaissés${parts.length ? ` — ${parts.join(", ")}` : ""}.`
+        : `La base a refusé le règlement : ${res.error ?? "erreur inconnue"}.`,
+      studentName: `${stu.firstName} ${stu.lastName}`,
+    });
   };
 
-  const handleSettleRegistrationCost = (student: Student) => {
+  // Le règlement passe par la RPC, qui débite RELATIVEMENT le solde stocké et
+  // écrit l'historique dans la même transaction. L'ancienne version réécrivait
+  // `balance` en valeur absolue depuis la copie locale de l'écran : tout ce que
+  // le serveur avait débité depuis le dernier rafraîchissement (un badge à
+  // l'entrée) était écrasé, et la séance restait facturée dans l'historique
+  // sans avoir touché le solde.
+  const handleSettleRegistrationCost = async (student: Student) => {
     if (!student.registrationDue) return;
-    if (confirm(`Régler les frais d'inscription de ${student.registrationDue} DA depuis le solde ?`)) {
-      // Deduct from balance
-      updateItem("students", student.id, {
-        balance: student.balance - (student.registrationDue || 0),
-        registrationDue: 0,
-      });
-      // Add balance transaction
-      push("balanceTx", {
-        id: uid("bt"),
-        studentId: student.id,
-        amount: -student.registrationDue,
-        date: new Date().toISOString(),
-        type: "registration",
-        description: "Frais d'inscription réglés",
-      });
-    }
+    if (!confirm(`Régler les frais d'inscription de ${student.registrationDue} DA depuis le solde ?`)) return;
+    const res = await settleRegistrationFee(student.id, undefined, "Frais d'inscription réglés");
+    addToast({
+      type: res.ok ? "success" : "danger",
+      title: res.ok ? "Frais d'inscription réglés" : "Règlement refusé",
+      message: res.ok
+        ? `Nouveau solde : ${res.newBalance ?? 0} DA.`
+        : `La base a refusé le règlement : ${res.error ?? "erreur inconnue"}.`,
+      studentName: `${student.firstName} ${student.lastName}`,
+    });
   };
 
   // ---- Correcting one transaction of the student's history -------------------
@@ -4416,12 +4428,59 @@ export function StudentsPage() {
                   {selectedStudent.balance} DA
                 </strong>
               </div>
+              {selectedStudent.balance < 0 ? (
+                <div className="flex justify-between">
+                  <span className="text-muted">Séances suivies non payées:</span>
+                  <strong className="text-danger">{-selectedStudent.balance} DA</strong>
+                </div>
+              ) : null}
               {selectedStudent.registrationDue ? (
                 <div className="flex justify-between">
                   <span className="text-muted">Frais inscription:</span>
                   <strong className="text-danger">{selectedStudent.registrationDue} DA</strong>
                 </div>
               ) : null}
+              <div className="flex justify-between border-t border-line/50 pt-1.5 mt-1">
+                <span className="font-bold text-ink">Total dû:</span>
+                <strong className="text-danger">
+                  {(selectedStudent.balance < 0 ? -selectedStudent.balance : 0) +
+                    (selectedStudent.registrationDue ?? 0)}{" "}
+                  DA
+                </strong>
+              </div>
+              {/* L'ordre d'imputation est décidé côté serveur : l'annoncer ici,
+                  chiffré sur le montant tapé, évite la question « pourquoi mon
+                  solde n'a pas bougé de tout le versement ? ». */}
+              {payAmount > 0 &&
+                (() => {
+                  const split = allocateDebtPayment(payAmount, studentDebtOf(selectedStudent));
+                  return (
+                    <div className="mt-1 space-y-0.5 rounded-lg border border-primary/30 bg-primary/5 p-2 text-[10px]">
+                      <strong className="block text-primary">Ce versement ira :</strong>
+                      {split.registration > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted">Frais d&apos;inscription :</span>
+                          <strong className="text-ink">{split.registration} DA</strong>
+                        </div>
+                      )}
+                      {split.sessions > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted">Séances suivies non payées :</span>
+                          <strong className="text-ink">{split.sessions} DA</strong>
+                        </div>
+                      )}
+                      {split.credited > 0 && (
+                        <div className="flex justify-between">
+                          <span className="text-muted">Porté au solde :</span>
+                          <strong className="text-success">{split.credited} DA</strong>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+              <p className="pt-1 text-[10px] leading-relaxed text-muted">
+                Recharger le solde règle la dette de la même façon, par simple addition.
+              </p>
             </div>
           )}
 
