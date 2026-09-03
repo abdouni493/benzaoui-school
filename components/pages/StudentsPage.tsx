@@ -168,6 +168,7 @@ export function StudentsPage() {
   const [isPayDebtOpen, setIsPayDebtOpen] = useState(false);
   const [isScanOpen, setIsScanOpen] = useState(false);
   const [isAlertLowBalanceOpen, setIsAlertLowBalanceOpen] = useState(false);
+  const [isDebtorsOpen, setIsDebtorsOpen] = useState(false);
   const [selectedAlertStudentIds, setSelectedAlertStudentIds] = useState<string[]>([]);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
 
@@ -449,6 +450,15 @@ export function StudentsPage() {
   );
   const debtOf = (student: Student) =>
     studentDebtOf(student, { unbilled: unbilledByStudent.get(student.id) ?? 0 });
+
+  // Tous ceux à qui l'école réclame quelque chose, du plus lourd au plus
+  // léger. Le compteur du bouton et la fenêtre lisent la même liste.
+  const debtors = students
+    .map((stu) => ({ stu, debt: debtOf(stu) }))
+    .filter((row) => row.debt.alert)
+    .map((row) => ({ ...row, owed: row.debt.total + row.debt.unbilled }))
+    .sort((a, b) => b.owed - a.owed);
+  const totalOwed = debtors.reduce((sum, row) => sum + row.owed, 0);
 
   // Filter students based on queries
   const getFilteredStudents = () => {
@@ -2908,6 +2918,26 @@ export function StudentsPage() {
         <PageHeader emoji="🎓" title="Étudiants" subtitle="Gérer les inscriptions et abonnements des élèves" />
 
         <div className="flex items-center gap-2">
+          {/* Qui a étudié sans provision ? La question se posait fiche par fiche.
+              Elle a maintenant son bouton, avec le nombre d'élèves concernés
+              lisible sans ouvrir quoi que ce soit. */}
+          <Button
+            onClick={() => setIsDebtorsOpen(true)}
+            variant="outline"
+            title={
+              debtors.length > 0
+                ? `${debtors.length} élève(s) en dette — ${totalOwed} DA à recouvrer`
+                : "Aucun élève en dette"
+            }
+            className="flex items-center gap-2 border-danger/30 hover:border-danger hover:bg-danger/10 text-danger relative"
+          >
+            <AlertTriangle className="h-4 w-4 text-danger" /> Élèves en dette
+            {debtors.length > 0 && (
+              <span className="absolute -top-1 -right-1 bg-danger text-white text-[9px] font-bold h-4.5 w-4.5 rounded-full flex items-center justify-center pulse-glow">
+                {debtors.length}
+              </span>
+            )}
+          </Button>
           <Button
             onClick={() => {
               const lowStus = students.filter(isSoonToRunOut);
@@ -3010,71 +3040,6 @@ export function StudentsPage() {
                               ? "Expire aujourd'hui"
                               : `Expire dans ${a.daysLeft} j (${formatDateFr(a.expiryDate)})`}
                         </Badge>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </CardBody>
-          </Card>
-        );
-      })()}
-
-      {/* Qui a étudié sans provision ? La question se posait fiche par fiche :
-          il fallait ouvrir chaque carte pour la voir. Elle a maintenant sa
-          réponse en haut de l'écran, avec le guichet à côté. */}
-      {(() => {
-        const debtors = students
-          .map((stu) => ({ stu, debt: debtOf(stu) }))
-          .filter((row) => row.debt.alert)
-          .sort((a, b) => (b.debt.total + b.debt.unbilled) - (a.debt.total + a.debt.unbilled));
-        if (debtors.length === 0) return null;
-        const owed = debtors.reduce((sum, row) => sum + row.debt.total + row.debt.unbilled, 0);
-        return (
-          <Card className="mb-6 border-danger/30">
-            <CardBody>
-              <div className="flex items-start gap-3">
-                <div className="rounded-xl bg-danger/15 p-2.5 text-danger">
-                  <AlertTriangle className="h-5 w-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-bold text-ink">
-                    Élèves en dette — {debtors.length} élève(s), {owed} DA à recouvrer
-                  </h3>
-                  <p className="mt-0.5 text-xs text-muted">
-                    Séances suivies sans provision, frais d&apos;inscription impayés, et soldes
-                    qui n&apos;ont pas enregistré une séance pourtant facturée.
-                  </p>
-                  <div className="mt-2 space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                    {debtors.map(({ stu, debt }) => (
-                      <div
-                        key={stu.id}
-                        className="flex flex-wrap items-center justify-between gap-2 text-xs bg-danger/5 border border-danger/20 rounded-lg px-3 py-1.5"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => openDetails(stu)}
-                          className="text-start min-w-0 hover:text-primary transition-colors"
-                        >
-                          <strong className="text-ink block truncate">
-                            {stu.firstName} {stu.lastName}
-                          </strong>
-                          <span className="text-[10px] text-muted">
-                            {debt.sessions > 0 ? `Séances non payées : ${debt.sessions} DA. ` : ""}
-                            {debt.registration > 0 ? `Inscription : ${debt.registration} DA. ` : ""}
-                            {debt.unbilled > 0
-                              ? `${debt.unbilled} DA facturés dans sa fiche mais jamais retirés du solde.`
-                              : ""}
-                          </span>
-                        </button>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <Badge tone="danger" className="font-mono text-[10px]">
-                            {debt.total + debt.unbilled} DA
-                          </Badge>
-                          <Button size="sm" variant="danger" onClick={() => openPayDebt(stu)}>
-                            Régler
-                          </Button>
-                        </div>
                       </div>
                     ))}
                   </div>
@@ -4743,6 +4708,98 @@ export function StudentsPage() {
               )}
             </div>
           )}
+        </div>
+      </Modal>
+
+      {/* Les élèves à qui l'école réclame quelque chose, et le guichet à côté
+          de chaque nom : c'est la liste qu'on ouvre pour relancer, pas une
+          bannière qu'on referme. */}
+      <Modal
+        open={isDebtorsOpen}
+        onClose={() => setIsDebtorsOpen(false)}
+        title={
+          debtors.length > 0
+            ? `Élèves en dette — ${debtors.length} élève(s), ${totalOwed} DA à recouvrer`
+            : "Élèves en dette"
+        }
+      >
+        <div className="space-y-4">
+          <p className="text-xs text-muted">
+            Séances suivies sans provision, frais d&apos;inscription impayés, et soldes qui
+            n&apos;ont pas enregistré une séance pourtant facturée. Cliquez un nom pour ouvrir
+            sa fiche, ou réglez directement au guichet.
+          </p>
+
+          {debtors.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-12 text-center text-xs font-bold text-success">
+              <CheckCircle className="h-8 w-8" />
+              <span>Aucun élève en dette — tout le monde est à jour.</span>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+              {debtors.map(({ stu, debt, owed }) => (
+                <div
+                  key={stu.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-danger/20 bg-danger/5 px-3 py-2 text-xs"
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsDebtorsOpen(false);
+                      openDetails(stu);
+                    }}
+                    className="min-w-0 flex-1 text-start transition-colors hover:text-primary"
+                  >
+                    <strong className="block truncate text-ink">
+                      {stu.firstName} {stu.lastName}
+                    </strong>
+                    <span className="block text-[10px] text-muted">
+                      {[
+                        debt.sessions > 0 ? `Séances non payées : ${debt.sessions} DA` : "",
+                        debt.registration > 0 ? `Inscription : ${debt.registration} DA` : "",
+                        debt.unbilled > 0
+                          ? `${debt.unbilled} DA facturés dans sa fiche mais jamais retirés du solde`
+                          : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
+                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge tone="danger" className="font-mono text-[10px]">
+                      {owed} DA
+                    </Badge>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      onClick={() => {
+                        setIsDebtorsOpen(false);
+                        openPayDebt(stu);
+                      }}
+                    >
+                      Régler
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 border-t border-line pt-4">
+            <Button variant="outline" onClick={() => setIsDebtorsOpen(false)}>
+              Fermer
+            </Button>
+            {debtors.length > 0 && (
+              <Button
+                onClick={() => {
+                  setIsDebtorsOpen(false);
+                  setFilterType("debt");
+                }}
+              >
+                Voir leurs fiches dans la liste
+              </Button>
+            )}
+          </div>
         </div>
       </Modal>
 
