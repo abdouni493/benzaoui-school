@@ -7,14 +7,23 @@
  * filière. Le public d'un créneau se lit donc sur la CLASSE, jamais sur le
  * groupe :
  *
- *   · "enrolled" — les classes cochées, ÉLARGIES à leurs jumelles : toute
- *     classe de même niveau, même année et même filière. C'est le réglage
- *     courant, et il suffit à laisser badger toute la promotion ;
+ *   · "enrolled" — les classes cochées, ÉLARGIES à leurs jumelles. C'est le
+ *     réglage courant, et il suffit à laisser badger toute la promotion ;
  *   · "filiere"  — en plus, toutes les années de la filière.
  *
+ * CE QUE « JUMELLE » VEUT DIRE DÉPEND DU CRÉNEAU :
+ *
+ *   · SÉANCE LIBRE (`isOpen`) — même niveau et MÊME ANNÉE, la filière ne
+ *     compte pas. Une séance libre est ouverte à toute la promotion : deux
+ *     élèves de 3AS, l'un en sciences l'autre en lettres, y badgent tous les
+ *     deux.
+ *   · COURS ORDINAIRE — même niveau, MÊME ANNÉE ET MÊME FILIÈRE. Un emploi du
+ *     temps programmé pour les 3AS sciences n'accepte que des 3AS sciences.
+ *
  * "enrolled" est inclus dans "filiere" : élargir le public n'enlève jamais
- * personne. Un créneau sans réglage (créé avant, ou base pas encore migrée)
- * n'impose rien — le guichet continue de tout accepter, comme avant.
+ * personne. Un créneau de séance libre sans réglage explicite est traité comme
+ * "enrolled" — le guichet et le badge doivent dire la même chose, et le badge
+ * (`student_session_rank`) a toujours contrôlé la classe.
  *
  * Le GROUPE ne restreint plus rien. Il décrit le créneau ; il ne décidait de
  * personne d'utile, et fermait la porte à des élèves de la classe visée qui
@@ -94,8 +103,13 @@ export function studentClassIds(
 /** Une année comparable : « 3 », « 3 » et «  3  » désignent la même promotion. */
 const yearKey = (c?: SchoolClass) => (c?.year ?? "").trim();
 
-/** Ces deux classes désignent-elles la même population d'élèves ? */
-function isPeerClass(a: SchoolClass, b: SchoolClass): boolean {
+/** Ces deux classes désignent-elles la même population d'élèves ?
+ *
+ *  `ignoreFiliere` est le réglage des SÉANCES LIBRES : elles réunissent toute
+ *  une promotion (même niveau, même année), sciences et lettres confondues. Un
+ *  cours ordinaire, lui, garde la filière — sinon un 3AS lettres badgerait sur
+ *  le cours de physique des 3AS sciences. */
+function isPeerClass(a: SchoolClass, b: SchoolClass, ignoreFiliere = false): boolean {
   if (a.id === b.id) return true;
   if (a.type !== b.type) return false;
   // Une formation n'a ni année ni filière : elle se rapproche par son niveau,
@@ -104,14 +118,20 @@ function isPeerClass(a: SchoolClass, b: SchoolClass): boolean {
   return (
     a.coursLevel === b.coursLevel &&
     yearKey(a) === yearKey(b) &&
-    (a.filiereId ?? null) === (b.filiereId ?? null)
+    (ignoreFiliere || (a.filiereId ?? null) === (b.filiereId ?? null))
   );
 }
 
 /** Les classes qui désignent la même population que celles citées. */
-export function classPeerIds(classIds: string[], classes: SchoolClass[]): string[] {
+export function classPeerIds(
+  classIds: string[],
+  classes: SchoolClass[],
+  ignoreFiliere = false,
+): string[] {
   const picked = classes.filter((c) => classIds.includes(c.id));
-  return classes.filter((c) => picked.some((p) => isPeerClass(c, p))).map((c) => c.id);
+  return classes
+    .filter((c) => picked.some((p) => isPeerClass(c, p, ignoreFiliere)))
+    .map((c) => c.id);
 }
 
 /** Les classes admises sur un créneau, réglage de public compris. */
@@ -120,7 +140,9 @@ export function sessionAudienceClassIds(
   classes: SchoolClass[],
 ): string[] {
   const pickedIds = openSeanceClassIds(session);
-  const peers = classPeerIds(pickedIds, classes);
+  // Séance libre : la promotion entière (niveau + année). Cours ordinaire : le
+  // triplet complet, filière comprise.
+  const peers = classPeerIds(pickedIds, classes, !!session.isOpen);
   if (session.openAudience !== "filiere") return peers;
 
   // Toute la filière : l'année ne compte plus. Les jumelles restent du lot —
@@ -135,9 +157,14 @@ export function sessionAudienceClassIds(
   ];
 }
 
-/** Le public d'un créneau, ou undefined quand il n'en porte aucun. */
+/** Le public d'un créneau, ou undefined pour un cours ordinaire (le guichet
+ *  n'encaisse pas de séance libre dessus, il n'a donc rien à contrôler).
+ *
+ *  Une séance libre sans réglage vaut "enrolled" : le badge a toujours
+ *  contrôlé la classe (`student_session_rank`), et laisser le guichet tout
+ *  accepter faisait rendre à la même carte deux verdicts opposés. */
 export function audienceOf(session: ScheduleSession): SeanceAudience | undefined {
-  return session.isOpen ? session.openAudience : undefined;
+  return session.isOpen ? (session.openAudience ?? "enrolled") : undefined;
 }
 
 /**
@@ -174,7 +201,7 @@ export function checkOpenSeanceAudience(input: AudienceCheckInput): AudienceVerd
     allowed: false,
     reason:
       audience === "filiere"
-        ? "Ce créneau est ouvert aux élèves de sa filière : cet élève suit une autre filière."
-        : "Ce créneau est réservé aux classes cochées à sa création — et à celles de même année et même filière : la classe de cet élève n'en fait pas partie.",
+        ? "Ce créneau est ouvert à sa filière et à sa promotion : cet élève n'est ni de l'une ni de l'autre."
+        : "Cette séance libre est réservée aux classes cochées à sa création — et à toute la promotion de même niveau et de même année : la classe de cet élève n'en fait pas partie.",
   };
 }

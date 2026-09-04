@@ -116,6 +116,15 @@ describe("classPeerIds", () => {
     expect(peers).not.toContain("c-form");
   });
 
+  it("réunit toute la promotion quand la filière ne compte pas", () => {
+    // Le réglage des SÉANCES LIBRES : même niveau, même année, filière
+    // indifférente. L'année, elle, sépare toujours.
+    const promo = classPeerIds(["c-sci-1"], classes, true);
+    expect(promo.sort()).toEqual(["c-let", "c-sci-1", "c-sci-2"]);
+    expect(promo).not.toContain("c-sci-2e");
+    expect(promo).not.toContain("c-form");
+  });
+
   it("ne réunit pas deux formations de niveaux différents", () => {
     const b2: SchoolClass = { ...classes[4], id: "c-form-b2", formationLevel: "B2" };
     expect(classPeerIds(["c-form"], [...classes, b2])).toEqual(["c-form"]);
@@ -123,18 +132,30 @@ describe("classPeerIds", () => {
 });
 
 describe("sessionAudienceClassIds", () => {
-  it("« classes cochées » couvre les jumelles, pas les autres années", () => {
+  it("séance libre « classes cochées » : toute la promotion, pas les autres années", () => {
     const restreint = { ...openSeance, openAudience: "enrolled" as const };
-    expect(sessionAudienceClassIds(restreint, classes).sort()).toEqual(["c-sci-1", "c-sci-2"]);
+    expect(sessionAudienceClassIds(restreint, classes).sort()).toEqual([
+      "c-let",
+      "c-sci-1",
+      "c-sci-2",
+    ]);
   });
 
-  it("« toute la filière » ajoute les autres années", () => {
+  it("séance libre « toute la filière » ajoute les autres années", () => {
     const ouvert = { ...openSeance, openAudience: "filiere" as const };
     expect(sessionAudienceClassIds(ouvert, classes).sort()).toEqual([
+      "c-let",
       "c-sci-1",
       "c-sci-2",
       "c-sci-2e",
     ]);
+  });
+
+  it("cours ordinaire : la filière compte, une autre filière reste dehors", () => {
+    // C'est la règle demandée pour les emplois du temps ordinaires : même
+    // niveau, même année ET même filière, sinon la carte est refusée.
+    const cours = timing("reg-sci1-g1", "c-sci-1", "g1");
+    expect(sessionAudienceClassIds(cours, classes).sort()).toEqual(["c-sci-1", "c-sci-2"]);
   });
 });
 
@@ -155,10 +176,13 @@ describe("enrolledSessionsOf", () => {
 });
 
 describe("checkOpenSeanceAudience", () => {
-  it("n'impose rien à un créneau créé avant le réglage", () => {
-    // Compatibilité : le guichet accepte n'importe quel élève, comme avant.
+  it("traite un créneau sans réglage comme « classes cochées »", () => {
+    // Le badge a toujours contrôlé la classe : le guichet dit maintenant la
+    // même chose. La promotion passe (lettres est en 3AS comme la classe
+    // cochée), l'élève sans aucun emploi du temps ne passe pas.
     expect(check(openSeance, lettres).allowed).toBe(true);
-    expect(check(openSeance, nouveau).allowed).toBe(true);
+    expect(check(openSeance, sci2e).allowed).toBe(false);
+    expect(check(openSeance, nouveau).allowed).toBe(false);
   });
 
   it("ne contrôle jamais un cours ordinaire", () => {
@@ -183,8 +207,13 @@ describe("checkOpenSeanceAudience", () => {
       expect(check(restreint, sci2e).allowed).toBe(false);
     });
 
-    it("refuse une autre filière", () => {
-      const verdict = check(restreint, lettres);
+    it("accepte une autre filière de la même promotion", () => {
+      // Une séance libre réunit l'année entière : la filière ne ferme rien.
+      expect(check(restreint, lettres).allowed).toBe(true);
+    });
+
+    it("dit ce qui manque quand la promotion ne correspond pas", () => {
+      const verdict = check(restreint, sci2e);
       expect(verdict.allowed).toBe(false);
       expect(verdict.reason).toMatch(/classes cochées/);
     });
@@ -213,10 +242,8 @@ describe("checkOpenSeanceAudience", () => {
       expect(check(ouvert, sciG2).allowed).toBe(true);
     });
 
-    it("refuse une autre filière", () => {
-      const verdict = check(ouvert, lettres);
-      expect(verdict.allowed).toBe(false);
-      expect(verdict.reason).toMatch(/filière/);
+    it("garde la promotion entière, filière comprise", () => {
+      expect(check(ouvert, lettres).allowed).toBe(true);
     });
 
     it("refuse une formation, qui n'a pas de filière à partager", () => {

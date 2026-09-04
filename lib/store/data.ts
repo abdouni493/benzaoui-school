@@ -851,6 +851,15 @@ interface DataActions {
     fee?: number,
     label?: string,
   ) => Promise<{ ok: boolean; error?: string; newBalance?: number }>;
+  /** Encaisse les frais d'inscription À PART : l'argent entre en caisse, le
+   *  solde de l'élève ne bouge pas d'un dinar. C'est le règlement « au
+   *  guichet », celui qui ne mange pas la recharge de l'élève. `fee` omis =
+   *  ce que la BASE dit encore dû. */
+  payRegistrationFeeCash: (
+    studentId: string,
+    fee?: number,
+    label?: string,
+  ) => Promise<{ ok: boolean; error?: string; fee?: number; newBalance?: number }>;
   /** Encaisse un règlement de dette : l'inscription due d'abord, les séances
    *  suivies ensuite, le reste au solde — plus l'entrée en caisse. */
   payDebt: (
@@ -1367,6 +1376,25 @@ export const useData = create<DataStore>((set, get) => ({
     await get().fetchAll();
     const res = data as { newBalance?: number } | null;
     return { ok: true, newBalance: res?.newBalance };
+  },
+
+  // Même règlement, autre porte : l'école encaisse les frais d'inscription en
+  // espèces. Le solde n'est pas touché (les deux lignes d'historique
+  // s'annulent), la caisse du jour, elle, voit passer l'argent.
+  payRegistrationFeeCash: async (studentId, fee, label) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("pay_registration_fee_cash", {
+      p_student_id: studentId,
+      p_fee: fee === undefined ? null : Math.round(fee),
+      p_label: label ?? null,
+    });
+    if (error) {
+      console.error("pay_registration_fee_cash failed:", error.message);
+      return { ok: false, error: error.message };
+    }
+    await get().fetchAll();
+    const res = data as { fee?: number; newBalance?: number } | null;
+    return { ok: true, fee: res?.fee, newBalance: res?.newBalance };
   },
 
   payDebt: async (studentId, amount) => {

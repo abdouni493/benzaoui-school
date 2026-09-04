@@ -30,6 +30,7 @@ import {
   AlertTriangle,
   MessageCircle,
   Repeat,
+  Wallet,
 } from "lucide-react";
 import type {
   AbsencePenalty,
@@ -140,6 +141,7 @@ export function StudentsPage() {
     addBalance,
     payDebt,
     settleRegistrationFee,
+    payRegistrationFeeCash,
     updateBalanceTx,
     deleteBalanceTx,
     cancelAttendance,
@@ -237,6 +239,20 @@ export function StudentsPage() {
 
   // Form: Pay Debt
   const [payAmount, setPayAmount] = useState<number>(0);
+
+  // Frais d'inscription : DEUX portes, jamais confondues. « Sur le solde »
+  // débite l'élève (et le fait plonger en dette si le solde ne suit pas),
+  // « à part » encaisse l'argent en caisse et ne touche pas au solde.
+  const [isRegFeeOpen, setIsRegFeeOpen] = useState(false);
+  const [regFeeStudent, setRegFeeStudent] = useState<Student | null>(null);
+  const [regFeeBusy, setRegFeeBusy] = useState(false);
+  /** La fiche relue dans le store : après un règlement `fetchAll` rafraîchit la
+   *  liste, et la fenêtre affiche le montant que la BASE dit encore dû — jamais
+   *  celui que la carte cliquée portait il y a une minute. */
+  const regFeeLive = regFeeStudent
+    ? (students.find((st) => st.id === regFeeStudent.id) ?? regFeeStudent)
+    : null;
+  const regFeeDue = regFeeLive?.registrationDue ?? 0;
 
   // Print Confirm Modal Data
   const [printConfirmData, setPrintConfirmData] = useState<{
@@ -786,21 +802,53 @@ export function StudentsPage() {
     });
   };
 
-  // Le règlement passe par la RPC, qui débite RELATIVEMENT le solde stocké et
-  // écrit l'historique dans la même transaction. L'ancienne version réécrivait
-  // `balance` en valeur absolue depuis la copie locale de l'écran : tout ce que
-  // le serveur avait débité depuis le dernier rafraîchissement (un badge à
-  // l'entrée) était écrasé, et la séance restait facturée dans l'historique
-  // sans avoir touché le solde.
-  const handleSettleRegistrationCost = async (student: Student) => {
+  /** L'alerte « inscription impayée » d'une carte élève ouvre la fenêtre de
+   *  règlement : c'est là que se choisit la porte — sur le solde, ou à part. */
+  const openRegFee = (student: Student) => {
     if (!student.registrationDue) return;
-    if (!confirm(`Régler les frais d'inscription de ${student.registrationDue} DA depuis le solde ?`)) return;
-    const res = await settleRegistrationFee(student.id, undefined, "Frais d'inscription réglés");
+    setRegFeeStudent(student);
+    setIsRegFeeOpen(true);
+    setOverlayStudentId(null);
+  };
+
+  /**
+   * Régler les frais d'inscription, par l'une des DEUX portes.
+   *
+   *   · "balance" — l'élève paie avec ce qu'il a déjà versé. Son solde descend
+   *     du montant des frais, et rien n'entre en caisse : l'argent y était
+   *     déjà entré le jour de la recharge. Si le solde ne couvre pas, il passe
+   *     en dette — l'école a fourni la place, elle la compte.
+   *   · "cash" — l'élève paie les frais SÉPARÉMENT, au guichet. L'argent entre
+   *     en caisse aujourd'hui et le solde ne bouge pas d'un dinar : sa
+   *     recharge reste intacte pour ses séances.
+   *
+   * Les deux passent par une RPC : le solde et `registration_due` bougent
+   * relativement à ce que la BASE porte, jamais à ce que l'écran croyait
+   * savoir il y a dix minutes.
+   */
+  const handleRegFeePayment = async (source: "balance" | "cash") => {
+    // La fiche RELUE dans le store, et le montant que la base dit encore dû :
+    // la carte cliquée peut dater d'un badge ou d'un règlement plus récent.
+    const student = regFeeLive;
+    const due = regFeeDue;
+    if (!student || due <= 0 || regFeeBusy) return;
+    setRegFeeBusy(true);
+    const res =
+      source === "balance"
+        ? await settleRegistrationFee(student.id, undefined, "Frais d'inscription réglés sur le solde")
+        : await payRegistrationFeeCash(student.id, undefined, "Frais d'inscription encaissés au guichet");
+    setRegFeeBusy(false);
+    if (res.ok) {
+      setIsRegFeeOpen(false);
+      setRegFeeStudent(null);
+    }
     addToast({
       type: res.ok ? "success" : "danger",
       title: res.ok ? "Frais d'inscription réglés" : "Règlement refusé",
       message: res.ok
-        ? `Nouveau solde : ${res.newBalance ?? 0} DA.`
+        ? source === "balance"
+          ? `${due} DA retirés du solde — nouveau solde : ${res.newBalance ?? 0} DA.`
+          : `${due} DA encaissés en caisse — le solde reste à ${res.newBalance ?? student.balance} DA.`
         : `La base a refusé le règlement : ${res.error ?? "erreur inconnue"}.`,
       studentName: `${student.firstName} ${student.lastName}`,
     });
@@ -3200,8 +3248,21 @@ export function StudentsPage() {
                               n'a jamais été réglée. */}
                           {(stu.registrationDue ?? 0) > 0 && (
                             <span
-                              title={`Frais d'inscription impayés : ${stu.registrationDue} DA`}
-                              className="flex items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white"
+                              role="button"
+                              tabIndex={0}
+                              title={`Frais d'inscription impayés : ${stu.registrationDue} DA — cliquez pour les régler`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openRegFee(stu);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  openRegFee(stu);
+                                }
+                              }}
+                              className="flex cursor-pointer items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
                             >
                               <AlertTriangle className="h-2.5 w-2.5" /> Inscription impayée
                             </span>
@@ -3268,19 +3329,25 @@ export function StudentsPage() {
                       </div>
                     )}
 
+                    {/* L'alerte ENTIÈRE est le bouton : la réception clique là
+                        où elle lit le problème, et la fenêtre lui demande
+                        ensuite PAR QUELLE PORTE l'élève règle — sur son solde,
+                        ou séparément au guichet. */}
                     {stu.registrationDue && stu.registrationDue > 0 ? (
-                      <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5">
+                      <button
+                        type="button"
+                        onClick={() => openRegFee(stu)}
+                        title="Régler les frais d'inscription — sur le solde, ou encaissés à part"
+                        className="flex w-full items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5 text-start transition-colors hover:bg-danger/20"
+                      >
                         <span className="flex items-center gap-1 text-[10px] font-bold text-danger">
                           <AlertTriangle className="h-3 w-3 animate-pulse" />
                           Frais d&apos;inscription NON PAYÉS : {stu.registrationDue} DA
                         </span>
-                        <button
-                          onClick={() => handleSettleRegistrationCost(stu)}
-                          className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
-                        >
+                        <span className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white">
                           Régler
-                        </button>
-                      </div>
+                        </span>
+                      </button>
                     ) : (
                       <div className="flex justify-between text-[10px] text-success bg-success/15 px-2 py-0.5 rounded">
                         <span>Frais d'inscription</span>
@@ -4525,18 +4592,62 @@ export function StudentsPage() {
             <Input value={topupDesc} onChange={(e) => setTopupDesc(e.target.value)} placeholder="Recharge de solde" />
           </div>
 
-          {selectedStudent && selectedStudent.registrationDue && selectedStudent.registrationDue > 0 ? (
-            <div className="bg-warning/10 border border-warning/20 p-3 rounded-xl flex items-center justify-between text-xs">
-              <div>
-                <strong className="text-warning block">Régler frais d'inscription ?</strong>
-                <span className="text-[10px] text-muted">L'étudiant doit payer {selectedStudent.registrationDue} DA de frais.</span>
-              </div>
-              <input
-                type="checkbox"
-                checked={settleReg}
-                onChange={(e) => setSettleReg(e.target.checked)}
-                className="h-5 w-5 text-warning focus:ring-warning"
-              />
+          {/* UNE RECHARGE NE PAIE PLUS L'INSCRIPTION SANS QU'ON LE DEMANDE.
+              Le versement va au solde, un point c'est tout : les frais restent
+              dus tant que la deuxième option n'est pas choisie ici — ou réglés
+              à part depuis l'alerte de sa carte. */}
+          {selectedStudent && (selectedStudent.registrationDue ?? 0) > 0 ? (
+            <div className="space-y-2 rounded-xl border border-warning/30 bg-warning/10 p-3">
+              <strong className="block text-xs text-warning">
+                Frais d&apos;inscription encore dus : {selectedStudent.registrationDue} DA
+              </strong>
+              <label
+                className={`flex cursor-pointer items-start gap-2 rounded-lg border p-2 text-xs transition-colors ${
+                  settleReg ? "border-line bg-surface/40" : "border-primary bg-surface"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="topup-registration"
+                  checked={!settleReg}
+                  onChange={() => setSettleReg(false)}
+                  className="mt-0.5 h-4 w-4"
+                />
+                <span>
+                  <strong className="block text-ink">Recharger le solde seulement</strong>
+                  <span className="text-[10px] text-muted">
+                    La totalité du versement va au solde. Les frais d&apos;inscription restent
+                    dus et peuvent être réglés à part, depuis l&apos;alerte de sa carte.
+                  </span>
+                </span>
+              </label>
+              <label
+                className={`flex cursor-pointer items-start gap-2 rounded-lg border p-2 text-xs transition-colors ${
+                  settleReg ? "border-primary bg-surface" : "border-line bg-surface/40"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="topup-registration"
+                  checked={settleReg}
+                  onChange={() => setSettleReg(true)}
+                  className="mt-0.5 h-4 w-4"
+                />
+                <span>
+                  <strong className="block text-ink">
+                    Recharger ET régler les frais d&apos;inscription
+                  </strong>
+                  <span className="text-[10px] text-muted">
+                    {selectedStudent.registrationDue} DA sont prélevés sur ce versement :
+                    seuls{" "}
+                    {Math.max(
+                      Math.round(topupAmount || 0) - (selectedStudent.registrationDue ?? 0),
+                      0,
+                    )}{" "}
+                    DA iront au solde.
+                  </span>
+                </span>
+              </label>
             </div>
           ) : null}
 
@@ -4547,6 +4658,93 @@ export function StudentsPage() {
             <Button onClick={handleTopup}>Valider le dépôt</Button>
           </div>
         </div>
+      </Modal>
+
+      {/* Frais d'inscription : DEUX PORTES, jamais confondues */}
+      <Modal
+        open={isRegFeeOpen}
+        onClose={() => setIsRegFeeOpen(false)}
+        title="Régler les frais d'inscription"
+      >
+        {regFeeLive && (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-line bg-canvas p-3 text-xs">
+              <span className="block text-[10px] uppercase text-muted">Élève</span>
+              <strong className="mt-0.5 block text-ink">
+                {regFeeLive.firstName} {regFeeLive.lastName}
+              </strong>
+              <div className="mt-2 flex justify-between border-t border-line/50 pt-1.5">
+                <span className="text-muted">Frais d&apos;inscription dus :</span>
+                <strong className="text-danger">{regFeeDue} DA</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted">Solde actuel :</span>
+                <strong className={regFeeLive.balance < 0 ? "text-danger" : "text-success"}>
+                  {regFeeLive.balance} DA
+                </strong>
+              </div>
+            </div>
+
+            <p className="text-[11px] leading-relaxed text-muted">
+              Deux façons de régler, et elles ne font pas la même chose à l&apos;argent de
+              l&apos;élève. Choisissez celle qui décrit ce qui vient de se passer au guichet.
+            </p>
+
+            {/* 1. Sur le solde — l'argent était déjà entré en caisse le jour de
+                la recharge : rien n'y rentre aujourd'hui. */}
+            <button
+              type="button"
+              disabled={regFeeBusy}
+              onClick={() => handleRegFeePayment("balance")}
+              className="w-full rounded-xl border border-line bg-surface p-3 text-start transition-colors hover:border-primary hover:bg-primary-50/50 disabled:opacity-60"
+            >
+              <span className="flex items-center gap-2 text-xs font-bold text-ink">
+                <Wallet className="h-4 w-4 text-primary" /> Régler sur le solde de l&apos;élève
+              </span>
+              <span className="mt-1 block text-[10px] leading-relaxed text-muted">
+                {regFeeDue} DA sont retirés de son solde ({regFeeLive.balance} DA →{" "}
+                <strong
+                  className={regFeeLive.balance - regFeeDue < 0 ? "text-danger" : "text-success"}
+                >
+                  {regFeeLive.balance - regFeeDue} DA
+                </strong>
+                ). Rien n&apos;entre en caisse aujourd&apos;hui : l&apos;argent y est entré le
+                jour de sa recharge.
+              </span>
+              {regFeeLive.balance - regFeeDue < 0 && (
+                <span className="mt-1.5 flex items-start gap-1 rounded-lg border border-danger/40 bg-danger/10 p-1.5 text-[10px] font-semibold text-danger">
+                  <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+                  Son solde ne couvre pas les frais : il passera en dette de{" "}
+                  {regFeeDue - regFeeLive.balance} DA.
+                </span>
+              )}
+            </button>
+
+            {/* 2. À part — l'élève sort l'argent des frais, sa recharge reste
+                intacte pour ses séances. */}
+            <button
+              type="button"
+              disabled={regFeeBusy}
+              onClick={() => handleRegFeePayment("cash")}
+              className="w-full rounded-xl border border-line bg-surface p-3 text-start transition-colors hover:border-success hover:bg-success/10 disabled:opacity-60"
+            >
+              <span className="flex items-center gap-2 text-xs font-bold text-ink">
+                <DollarSign className="h-4 w-4 text-success" /> Encaisser les frais à part
+              </span>
+              <span className="mt-1 block text-[10px] leading-relaxed text-muted">
+                L&apos;élève paie les {regFeeDue} DA séparément : la somme entre en caisse
+                aujourd&apos;hui et son solde ne bouge pas — il reste à{" "}
+                <strong>{regFeeLive.balance} DA</strong> pour ses séances.
+              </span>
+            </button>
+
+            <div className="flex justify-end pt-1">
+              <Button variant="outline" onClick={() => setIsRegFeeOpen(false)} disabled={regFeeBusy}>
+                Annuler
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* Pay Debt (Régler dette) Modal */}
