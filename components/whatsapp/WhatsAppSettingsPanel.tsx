@@ -15,6 +15,7 @@ import {
   RotateCw,
   ShieldCheck,
 } from "lucide-react";
+import { offlineSentence } from "@/lib/whatsapp/offline";
 import type {
   FlushOutcome,
   OutboxResponse,
@@ -120,9 +121,10 @@ export function WhatsAppSettingsPanel() {
       if (res.ok) {
         const outcome = (await res.json()) as FlushOutcome;
         if (mounted.current && outcome.offline) {
-          setError(
-            "La passerelle est toujours injoignable : les messages restent en attente.",
-          );
+          // Dire LAQUELLE des trois causes bloque : « toujours injoignable »
+          // était faux dès que la passerelle répondait et que c'était la
+          // session WhatsApp qui s'était refermée.
+          setError(`Les messages restent en attente. ${offlineSentence(outcome.reason)}`);
         }
       }
     } catch {
@@ -289,8 +291,8 @@ export function WhatsAppSettingsPanel() {
                         <strong>
                           {outbox.pending} message{outbox.pending > 1 ? "s" : ""} en attente
                         </strong>{" "}
-                        — mis de côté pendant que la passerelle était injoignable. Ils repartent
-                        automatiquement dès son retour ; aucun n&apos;est perdu.
+                        — mis de côté faute d&apos;avoir pu partir. Aucun n&apos;est perdu ;
+                        ils repartent dès que l&apos;envoi redevient possible.
                       </span>
                     </p>
 

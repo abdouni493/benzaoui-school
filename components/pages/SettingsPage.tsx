@@ -32,6 +32,12 @@ import {
 } from "lucide-react";
 import { WhatsAppSettingsPanel } from "@/components/whatsapp/WhatsAppSettingsPanel";
 
+/** Les onglets de l'écran, et la liste qui sert à valider `?tab=` — une valeur
+ *  inconnue dans l'adresse laisse l'onglet par défaut plutôt que de rendre
+ *  l'écran vide. */
+type SettingsTab = "school" | "security" | "whatsapp" | "backup";
+const SETTINGS_TABS: readonly SettingsTab[] = ["school", "security", "whatsapp", "backup"];
+
 export function SettingsPage() {
   const dataStore = useData();
   const { school, modules, moduleAbsenceRules, setModuleAbsenceRule, updateSchool, restoreState } = dataStore;
@@ -40,7 +46,25 @@ export function SettingsPage() {
   const [logoUploading, setLogoUploading] = useState(false);
 
   // Tabs navigation state
-  const [activeTab, setActiveTab] = useState<"school" | "security" | "whatsapp" | "backup">("school");
+  const [activeTab, setActiveTab] = useState<SettingsTab>("school");
+
+  // Onglet demandé par l'adresse (`/settings?tab=whatsapp`). C'est ce qui permet
+  // au bandeau de la file d'attente WhatsApp de mener DIRECTEMENT à l'écran qui
+  // répare, au lieu de laisser chercher l'onglet.
+  //
+  // Lu depuis `window` et non par `useSearchParams` : cette route est
+  // prérendue (`generateStaticParams`), et un `useSearchParams` sans
+  // <Suspense> y fait échouer la compilation de production. Une seule lecture,
+  // au montage : un clic sur un autre onglet ne doit pas être repris.
+  // L'écriture d'état dans un effet est ici le seul choix correct : la lecture
+  // ne peut PAS se faire à l'initialisation (`window` n'existe pas au
+  // prérendu, et un onglet différent du HTML servi provoquerait une erreur
+  // d'hydratation). Elle ne s'exécute qu'une fois, au montage.
+  useEffect(() => {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (tab && SETTINGS_TABS.includes(tab as SettingsTab)) setActiveTab(tab as SettingsTab);
+  }, []);
 
   // School Form State
   const [schoolName, setSchoolName] = useState(school?.name || "");

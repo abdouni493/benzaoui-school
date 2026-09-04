@@ -18,7 +18,13 @@ import {
   type WhatsAppAudience,
   type WhatsAppTemplateId,
 } from "@/lib/whatsapp/templates";
-import type { OutgoingMessage, SendResponse, SendResult } from "@/lib/whatsapp/types";
+import { offlineSentence } from "@/lib/whatsapp/offline";
+import type {
+  OfflineReason,
+  OutgoingMessage,
+  SendResponse,
+  SendResult,
+} from "@/lib/whatsapp/types";
 import { AlertTriangle, Check, Clock, MessageCircle, Send, X } from "lucide-react";
 
 export interface WhatsAppRecipient {
@@ -180,6 +186,9 @@ export function WhatsAppMessageModal({
     const message: OutgoingMessage = { kind: "text", text: text.trim() };
     const collected: SendResult[] = [];
     const queue = [...chosen];
+    // Ce que le serveur a répondu en dernier sur la cause du blocage : il faut
+    // la retenir hors de la boucle pour la dire dans le bilan final.
+    let offlineReason: OfflineReason | undefined;
 
     try {
       while (queue.length > 0) {
@@ -209,7 +218,8 @@ export function WhatsAppMessageModal({
           return;
         }
 
-        const { results: batchResults, remaining } = payload as SendResponse;
+        const { results: batchResults, remaining, offline, reason } = payload as SendResponse;
+        if (offline) offlineReason = reason;
 
         if (batchResults.length === 0) {
           setError("La passerelle n'a traité aucun destinataire. Réessayer dans un instant.");
@@ -248,7 +258,7 @@ export function WhatsAppMessageModal({
           title: "Message WhatsApp",
           message:
             pending > 0
-              ? `${parts.join(", ")}. La passerelle est injoignable : les messages en attente partiront automatiquement dès son retour.`
+              ? `${parts.join(", ")}. ${offlineSentence(offlineReason)}`
               : `${parts.join(", ")}.`,
         });
         // Les échecs restent affichés pour être corrigés ; les messages en

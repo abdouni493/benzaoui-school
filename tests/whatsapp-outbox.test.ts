@@ -28,6 +28,8 @@ const shared = vi.hoisted(() => {
     updates: [] as { filters: Record<string, unknown>; patch: Record<string, unknown> }[],
     state: "open" as string,
     stateThrows: false,
+    /** variables serveur absentes : `getConfig()` rend alors null */
+    noConfig: false,
     send: null as null | (() => Promise<{ messageId: string }>),
   };
 });
@@ -109,7 +111,8 @@ vi.mock("@/lib/whatsapp/log", () => ({ logOutgoingMessage: vi.fn(async () => {})
 
 vi.mock("@/lib/whatsapp/client", () => ({
   WhatsAppError: shared.MockWhatsAppError,
-  getConfig: () => ({ instance: "test", baseUrl: "https://x", apiKey: "k" }),
+  getConfig: () =>
+    shared.noConfig ? null : { instance: "test", baseUrl: "https://x", apiKey: "k" },
   getConnectionState: async () => {
     if (shared.stateThrows) throw new Error("passerelle injoignable");
     return { state: shared.state };
@@ -138,6 +141,7 @@ beforeEach(() => {
   shared.updates = [];
   shared.state = "open";
   shared.stateThrows = false;
+  shared.noConfig = false;
   shared.send = null;
 });
 
@@ -173,6 +177,11 @@ describe("flushOutbox — passerelle injoignable", () => {
     expect(outcome.offline).toBe(true);
     expect(outcome.sent).toBe(0);
     expect(outcome.remaining).toBe(1);
+    // LA DISTINCTION QUI MANQUAIT : la passerelle a RÉPONDU « close ». Elle va
+    // très bien, c'est le téléphone qui s'est délié. Annoncer « injoignable,
+    // ça repartira à son retour » laissait la file grossir pendant des jours
+    // en attendant un retour qui avait déjà eu lieu.
+    expect(outcome.reason).toBe("disconnected");
     // Le message est INTACT : ni tentative consommée, ni abandon.
     expect(shared.rows[0].status).toBe("pending");
     expect(shared.rows[0].attempts).toBe(0);
@@ -184,6 +193,21 @@ describe("flushOutbox — passerelle injoignable", () => {
 
     const outcome = await flushOutbox();
 
+    expect(outcome.offline).toBe(true);
+    // Là, et là seulement, « ça repartira à son retour » est vrai.
+    expect(outcome.reason).toBe("unreachable");
+    expect(shared.rows[0].status).toBe("pending");
+  });
+
+  it("distingue une passerelle absente des variables serveur", async () => {
+    await queueMessages([{ recipientPhone: "213555111222", body: "Bonjour" }]);
+    shared.noConfig = true;
+
+    const outcome = await flushOutbox();
+
+    // Rien ne partira JAMAIS tout seul : il faut renseigner les variables.
+    // Conseiller d'attendre serait un conseil sans fin.
+    expect(outcome.reason).toBe("unconfigured");
     expect(outcome.offline).toBe(true);
     expect(shared.rows[0].status).toBe("pending");
   });
@@ -197,6 +221,8 @@ describe("flushOutbox — envoi", () => {
 
     expect(outcome.sent).toBe(1);
     expect(outcome.offline).toBe(false);
+    // Un vidage qui aboutit n'a rien à expliquer.
+    expect(outcome.reason).toBeUndefined();
     expect(shared.rows[0].status).toBe("sent");
   });
 
@@ -209,6 +235,7 @@ describe("flushOutbox — envoi", () => {
     const outcome = await flushOutbox();
 
     expect(outcome.offline).toBe(true);
+    expect(outcome.reason).toBe("unreachable");
     expect(outcome.sent).toBe(0);
     // LE POINT CRITIQUE : le message reste intact et repartira. Compter une
     // tentative ici ferait abandonner des messages valides après trois

@@ -86,7 +86,8 @@ import {
 } from "@/components/whatsapp/WhatsAppMessageModal";
 import { isSendablePhone } from "@/lib/whatsapp/phone";
 import { buildBalanceAlert } from "@/lib/whatsapp/alert";
-import type { SendResponse } from "@/lib/whatsapp/types";
+import { offlineSentence } from "@/lib/whatsapp/offline";
+import type { OfflineReason, SendResponse } from "@/lib/whatsapp/types";
 import {
   EnrollmentCards,
   selectedGroupIn,
@@ -1325,6 +1326,10 @@ export function StudentsPage() {
     let sent = 0;
     let failed = 0;
     let queued = 0;
+    // Pourquoi rien ne peut partir, selon le serveur. Sans cette cause, le
+    // bilan conseillait d'attendre le retour de la passerelle même quand elle
+    // répondait déjà et que c'était la session WhatsApp qui s'était refermée.
+    let offlineReason: OfflineReason | undefined;
     const queue = [...waRecipients];
 
     try {
@@ -1349,6 +1354,7 @@ export function StudentsPage() {
 
         const batchResult = payload as SendResponse;
         if (batchResult.results.length === 0) break; // garde-fou anti-boucle
+        if (batchResult.offline) offlineReason = batchResult.reason;
 
         sent += batchResult.sent;
         failed += batchResult.failed;
@@ -1370,7 +1376,7 @@ export function StudentsPage() {
         title: queued > 0 ? "Alertes mises en attente" : "Alertes envoyées",
         message:
           queued > 0
-            ? `${sent} message(s) envoyé(s), ${queued} en attente : la passerelle est injoignable, ils partiront automatiquement dès son retour. ${notif}`
+            ? `${sent} message(s) envoyé(s), ${queued} en attente. ${offlineSentence(offlineReason)} ${notif}`
             : failed > 0
               ? `${sent} message(s) WhatsApp envoyé(s), ${failed} en échec. ${notif}`
               : `${sent} message(s) WhatsApp envoyé(s) et ${notif}`,

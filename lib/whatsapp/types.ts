@@ -40,6 +40,26 @@ export interface SendResult {
   error?: string;
 }
 
+/** POURQUOI rien n'a pu partir.
+ *
+ *  `offline: true` disait qu'il fallait attendre — sans jamais dire QUOI. Les
+ *  trois causes n'appellent pourtant pas du tout le même geste, et deux d'entre
+ *  elles n'ont rien à voir avec un poste éteint :
+ *
+ *   · "unconfigured" — les variables serveur de la passerelle manquent. Rien ne
+ *     partira JAMAIS tout seul : il faut les renseigner et redéployer.
+ *   · "unreachable"  — la passerelle n'a pas répondu. C'est le seul cas où
+ *     « ça repartira à son retour » est vrai : le poste qui l'héberge est
+ *     éteint, en veille, ou sans Internet.
+ *   · "disconnected" — la passerelle répond très bien, mais la session WhatsApp
+ *     est fermée : le téléphone s'est délié. Attendre ne sert à rien, il faut
+ *     rouvrir la session au QR depuis Paramètres → WhatsApp.
+ *
+ *  Le dernier cas est celui qui coûtait le plus cher : la file grossissait
+ *  pendant que l'écran conseillait d'attendre le retour d'une passerelle qui
+ *  n'était jamais partie. */
+export type OfflineReason = "unconfigured" | "unreachable" | "disconnected";
+
 /** Réponse de `POST /api/whatsapp/send`. */
 export interface SendResponse {
   sent: number;
@@ -54,9 +74,11 @@ export interface SendResponse {
    *  seuls : ce n'est pas un échec, et l'interface ne doit pas l'annoncer
    *  comme tel. */
   queued?: number;
-  /** `true` quand la passerelle n'a pas répondu du tout et que TOUT le lot est
-   *  parti en file d'attente. */
+  /** `true` quand rien n'a pu partir et que TOUT le lot est allé en file
+   *  d'attente. Dit qu'il faut attendre ; `reason` dit quoi. */
   offline?: boolean;
+  /** ce qui bloque, quand `offline` est vrai */
+  reason?: OfflineReason;
 }
 
 /** Un message en attente, tel qu'affiché dans l'écran Paramètres → WhatsApp. */
@@ -83,6 +105,8 @@ export interface FlushOutcome {
   /** écartés car trop anciens : l'information a pu changer entre-temps */
   expired: number;
   offline: boolean;
+  /** ce qui bloque, quand `offline` est vrai. Absent sur un vidage réussi. */
+  reason?: OfflineReason;
 }
 
 /** Réponse de `GET /api/whatsapp/outbox`. */

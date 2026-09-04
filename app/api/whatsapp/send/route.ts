@@ -12,7 +12,7 @@ import { type QueueEntry, queueMessages } from "@/lib/whatsapp/outbox";
 import { TYPING_DELAY_MS, randomGap, sleep } from "@/lib/whatsapp/pacing";
 import { normalizePhone } from "@/lib/whatsapp/phone";
 import { MAX_MESSAGE_LENGTH } from "@/lib/whatsapp/templates";
-import type { OutgoingMessage, SendResult } from "@/lib/whatsapp/types";
+import type { OfflineReason, OutgoingMessage, SendResult } from "@/lib/whatsapp/types";
 
 /** Envoi WhatsApp par la passerelle Evolution.
  *
@@ -179,12 +179,20 @@ export async function POST(request: Request) {
     // C'est le comportement qui compte le plus pour une alerte automatique
     // déclenchée par un scan de carte : personne ne serait jamais revenu la
     // renvoyer à la main.
+    //
+    // Les deux causes se distinguent, parce qu'elles n'appellent PAS le même
+    // geste : une passerelle muette revient toute seule quand le poste
+    // rallume ; une session fermée demande de relier le téléphone au QR, et
+    // attendre ne la rouvrira jamais.
     let gatewayReady = false;
+    let reason: OfflineReason = "unreachable";
     try {
       const { state } = await getConnectionState();
       gatewayReady = state === "open";
+      if (!gatewayReady) reason = "disconnected";
     } catch {
       gatewayReady = false;
+      reason = "unreachable";
     }
 
     if (!gatewayReady) {
@@ -194,6 +202,7 @@ export async function POST(request: Request) {
         failed: invalid,
         queued,
         offline: true,
+        reason,
         results,
       });
     }
@@ -304,7 +313,9 @@ export async function POST(request: Request) {
       results,
       ...(remaining.length > 0 ? { remaining } : {}),
       ...(queuedOffline > 0 ? { queued: queuedOffline } : {}),
-      ...(wentOffline ? { offline: true } : {}),
+      // Tombée EN COURS de lot : la passerelle répondait il y a une seconde,
+      // elle ne répond plus — c'est bien une panne de passerelle.
+      ...(wentOffline ? { offline: true, reason: "unreachable" as const } : {}),
     });
   } catch (err) {
     if (err instanceof WhatsAppError) {

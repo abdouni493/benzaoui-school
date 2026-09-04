@@ -25,7 +25,7 @@ import {
 } from "./client";
 import { logOutgoingMessage } from "./log";
 import { TYPING_DELAY_MS, randomGap, sleep } from "./pacing";
-import type { OutboxEntry, FlushOutcome } from "./types";
+import type { OutboxEntry, FlushOutcome, OfflineReason } from "./types";
 
 /** Au-delà, le message n'est plus tenté : la passerelle le refuse pour une
  *  raison qui ne s'arrangera pas d'elle-même (numéro sans compte WhatsApp…). */
@@ -162,24 +162,34 @@ async function expireStale(): Promise<number> {
 
 /** Tente d'envoyer les messages en attente.
  *
- *  Sans effet et sans erreur si la passerelle est injoignable : c'est le cas
- *  NORMAL (le poste est éteint), pas une anomalie. On ressort simplement
- *  `offline: true` et la file reste intacte. */
+ *  Sans effet et sans erreur si rien ne peut partir : la file reste intacte et
+ *  on ressort `offline: true`. `reason` dit LAQUELLE des trois causes bloque —
+ *  une passerelle éteinte se rattrape toute seule, une session WhatsApp fermée
+ *  jamais (voir `OfflineReason`). */
 export async function flushOutbox(): Promise<FlushOutcome> {
   const expired = await expireStale();
 
+  const blocked = async (reason: OfflineReason): Promise<FlushOutcome> => ({
+    sent: 0,
+    failed: 0,
+    remaining: await pendingCount(),
+    expired,
+    offline: true,
+    reason,
+  });
+
   const config = getConfig();
-  if (!config) return { sent: 0, failed: 0, remaining: await pendingCount(), expired, offline: true };
+  if (!config) return blocked("unconfigured");
 
   // La passerelle répond-elle, et la session est-elle ouverte ? Inutile
-  // d'enchaîner des échecs identiques pour l'apprendre huit fois.
+  // d'enchaîner des échecs identiques pour l'apprendre huit fois. Les deux
+  // questions se répondent séparément : une passerelle qui répond « close » est
+  // bien vivante, c'est le téléphone qui s'est délié.
   try {
     const { state } = await getConnectionState();
-    if (state !== "open") {
-      return { sent: 0, failed: 0, remaining: await pendingCount(), expired, offline: true };
-    }
+    if (state !== "open") return blocked("disconnected");
   } catch {
-    return { sent: 0, failed: 0, remaining: await pendingCount(), expired, offline: true };
+    return blocked("unreachable");
   }
 
   const batch = await listPending(FLUSH_BATCH);
@@ -226,7 +236,14 @@ export async function flushOutbox(): Promise<FlushOutcome> {
       // Panne globale (passerelle retombée en cours de vidage) : on s'arrête,
       // SANS consommer de tentative — ce n'est pas la faute du message.
       if (err instanceof WhatsAppError && (err.status === 503 || err.status === 502)) {
-        return { sent, failed, remaining: await pendingCount(), expired, offline: true };
+        return {
+          sent,
+          failed,
+          remaining: await pendingCount(),
+          expired,
+          offline: true,
+          reason: "unreachable",
+        };
       }
 
       const attempts = row.attempts + 1;
