@@ -81,7 +81,21 @@ export interface SendResponse {
   reason?: OfflineReason;
 }
 
-/** Un message en attente, tel qu'affiché dans l'écran Paramètres → WhatsApp. */
+/** Où en est un message dans la file locale.
+ *
+ *  · "draft"     — PROPOSÉ, pas encore approuvé. Une alerte de solde née d'un
+ *                  badge atterrit ici : personne ne l'a relue, et rien ne part
+ *                  d'un scan de carte sans qu'un humain l'ait décidé. Le
+ *                  vidage automatique NE LES REGARDE PAS.
+ *  · "pending"   — APPROUVÉ, en attente de la passerelle. C'est le seul état
+ *                  que le vidage fait partir : dès que la session WhatsApp est
+ *                  ouverte, il s'écoule tout seul.
+ *  · "sent"      — confié à la passerelle (suivi dans whatsapp_messages).
+ *  · "abandoned" — ne repartira plus (écarté à la main, trop de tentatives, ou
+ *                  trop ancien pour être encore vrai). */
+export type OutboxStatus = "draft" | "pending" | "sent" | "abandoned";
+
+/** Un message de la file, tel qu'affiché sur le tableau de bord. */
 export interface OutboxEntry {
   id: string;
   /** numéro lisible, ou à défaut le MSISDN */
@@ -91,6 +105,8 @@ export interface OutboxEntry {
   attempts: number;
   lastError: string | null;
   createdAt: string;
+  /** nom de l'élève concerné, quand le message vient d'une alerte de solde */
+  studentId: string | null;
 }
 
 /** Résultat d'une tentative de vidage de la file d'attente.
@@ -109,10 +125,36 @@ export interface FlushOutcome {
   reason?: OfflineReason;
 }
 
-/** Réponse de `GET /api/whatsapp/outbox`. */
+/** Réponse de `GET /api/whatsapp/outbox`.
+ *
+ *  Les deux files sont rendues SÉPARÉMENT, parce qu'elles n'appellent pas le
+ *  même geste : les brouillons attendent une relecture (le tableau de bord les
+ *  montre et propose de les envoyer), les approuvés attendent seulement que la
+ *  passerelle revienne, et partiront sans que personne n'y touche. */
 export interface OutboxResponse {
+  /** approuvés, en attente de la passerelle — ils partiront tout seuls */
   pending: number;
+  /** proposés, en attente d'une relecture — ils ne partiront JAMAIS seuls */
+  drafts: number;
   entries: OutboxEntry[];
+  draftEntries: OutboxEntry[];
+}
+
+/** Réponse de `POST /api/whatsapp/outbox/drafts` — ce que l'approbation ou le
+ *  rejet d'un lot de brouillons a réellement fait. */
+export interface DraftActionResult {
+  /** brouillons passés en file d'envoi */
+  approved: number;
+  /** brouillons écartés définitivement */
+  discarded: number;
+  /** partis immédiatement, la passerelle étant joignable */
+  sent: number;
+  /** approuvés mais encore en file : ils partiront au retour de la passerelle */
+  waiting: number;
+  /** vrai quand rien n'a pu partir tout de suite */
+  offline: boolean;
+  /** ce qui bloque, quand `offline` est vrai */
+  reason?: OfflineReason;
 }
 
 /** Diagnostic de la passerelle, rendu à l'écran Paramètres quand elle ne

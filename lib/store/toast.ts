@@ -10,6 +10,8 @@ export interface Toast {
   studentName?: string;
   cost?: number;
   newBalance?: number;
+  /** une alerte de solde a été PRÉPARÉE (déposée en brouillon), pas envoyée :
+   *  elle attend une relecture sur le tableau de bord */
   autoSentAlert?: boolean;
   /** séance offered by a "période gratuite": the price that was NOT charged */
   waived?: number;

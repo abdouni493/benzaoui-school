@@ -193,10 +193,13 @@ function ToastCard({ toast, onClose }: { toast: Toast; onClose: () => void }) {
           </div>
         )}
 
+        {/* Le message n'est PAS parti : il attend sur le tableau de bord qu'on
+            le relise. Annoncer « envoyée » ici était faux deux fois — le texte
+            n'avait été lu par personne, et il pouvait ne jamais partir. */}
         {toast.autoSentAlert && (
           <div className="flex items-center gap-1.5 text-[10px] text-warning bg-warning/10 border border-warning/20 rounded-lg px-2 py-1 mt-1 font-semibold">
             <Bell className="h-3 w-3" />
-            Alerte WhatsApp & Email envoyée automatiquement
+            Alerte préparée — à relire et envoyer depuis le tableau de bord
           </div>
         )}
       </div>

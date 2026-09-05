@@ -31,9 +31,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-dvh overflow-hidden bg-canvas">
       <GlobalRFIDListener />
-      {/* Fait repartir les messages WhatsApp mis en attente pendant que la
-          passerelle etait injoignable. Monte ici pour survivre aux changements
-          de page : un vidage prend plusieurs dizaines de secondes. */}
+      {/* Fait repartir les messages WhatsApp APPROUVÉS, mis en attente pendant
+          que la passerelle était injoignable. Monté ici pour survivre aux
+          changements de page : un vidage prend plusieurs dizaines de secondes.
+          N'AFFICHE RIEN — il posait un bandeau fixe au bas de chaque écran ;
+          l'affichage vit maintenant sur le tableau de bord, où l'on peut lire
+          les messages et décider de les envoyer. */}
       <WhatsAppOutboxWatcher />
       {/* Desktop sidebar */}
       <div className="hidden lg:block">

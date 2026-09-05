@@ -283,6 +283,26 @@ export function WhatsAppSettingsPanel() {
                     N'apparait que s'il y a quelque chose dedans : une file vide
                     n'est pas une information, et un encart permanent finirait
                     par ne plus etre lu. */}
+                {/* Les alertes PROPOSÉES par les badges ne sont pas dans la file
+                    d'envoi : elles attendent qu'on les relise. Ne pas le dire
+                    ici laisserait croire que « 0 message en attente » veut dire
+                    « rien à faire », alors que le tableau de bord en retient
+                    peut-être vingt. */}
+                {outbox && (outbox.drafts ?? 0) > 0 && (
+                  <p className="flex items-start gap-2 rounded-xl border border-primary/20 bg-primary-50 p-3 text-xs text-primary">
+                    <Clock className="mt-0.5 h-4 w-4 shrink-0" />
+                    <span>
+                      <strong>
+                        {outbox.drafts} alerte{outbox.drafts > 1 ? "s" : ""} de solde préparée
+                        {outbox.drafts > 1 ? "s" : ""}
+                      </strong>{" "}
+                      par les badges, en attente de relecture. Elles ne partiront pas d&apos;
+                      elles-mêmes : c&apos;est sur le <strong>tableau de bord</strong> qu&apos;on
+                      les lit et qu&apos;on décide de les envoyer.
+                    </span>
+                  </p>
+                )}
+
                 {outbox && outbox.pending > 0 && (
                   <div className="space-y-3 rounded-xl border border-warning/30 bg-warning/5 p-4">
                     <p className="flex items-start gap-2 text-xs text-warning">

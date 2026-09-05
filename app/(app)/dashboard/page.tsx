@@ -7,7 +7,8 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { TeacherPages } from "@/components/pages/TeacherPages";
 import { DaySchedulePanel } from "@/components/schedule/DaySchedulePanel";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
-import { studentDebtOf, unbilledChargesByStudent } from "@/lib/helpers";
+import { WhatsAppAlertsCard } from "@/components/whatsapp/WhatsAppAlertsCard";
+import { balanceDriftByStudent, studentDebtOf } from "@/lib/helpers";
 import { motion } from "framer-motion";
 import {
   Users,
@@ -67,7 +68,7 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     groups,
     subscriptions,
     balanceTx,
-    absencePenalties,
+    complete,
   } = useData();
 
   // 1. General Operational Metrics
@@ -83,20 +84,30 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   // 2. Financial Metrics (Admin Only)
   const cashInHand = cash.reduce((sum, tx) => sum + tx.amount, 0);
 
-  // Ce que l'école a à recouvrer, élève par élève. Le solde seul ne suffit
-  // pas : une présence facturée dont le débit n'a jamais atteint le solde
-  // laisse une fiche à « 0 DA » en face d'un historique qui, lui, réclame.
-  const unbilledByStudent = unbilledChargesByStudent({ attendance, absencePenalties, balanceTx });
+  // Ce que l'école a à recouvrer, élève par élève : son solde négatif et ses
+  // frais d'inscription dus, rien d'autre. Le solde porte DÉJÀ chaque séance
+  // suivie — badge comme pointage manuel le font descendre du prix de la
+  // séance, dans la même transaction que sa ligne d'historique. Ajouter le
+  // total des présences par-dessus comptait deux fois les mêmes séances.
+  const driftByStudent = balanceDriftByStudent({
+    students,
+    balanceTx,
+    complete: complete.balanceTx !== false,
+  });
   const debtors = students
-    .map((s) => ({ student: s, debt: studentDebtOf(s, { unbilled: unbilledByStudent.get(s.id) ?? 0 }) }))
+    .map((s) => ({ student: s, debt: studentDebtOf(s, { drift: driftByStudent.get(s.id) ?? 0 }) }))
     .filter((row) => row.debt.alert)
-    .map((row) => ({ ...row, owed: row.debt.total + row.debt.unbilled }))
+    .map((row) => ({ ...row, owed: row.debt.total }))
     .sort((a, b) => b.owed - a.owed);
   const totalDebts = debtors.reduce((sum, row) => sum + row.owed, 0);
   // Les élèves qui ont étudié sans provision : c'est la dette que le badge
   // crée tout seul, celle que personne n'a décidée au guichet.
-  const studiedWithoutFunds = debtors.filter((row) => row.debt.sessions > 0 || row.debt.unbilled > 0);
-  const driftingBalances = debtors.filter((row) => row.debt.unbilled > 0);
+  const studiedWithoutFunds = debtors.filter((row) => row.debt.sessions > 0);
+  // Les soldes qui ne valent pas la somme de leur propre historique. Ce n'est
+  // PAS de l'argent dû : c'est une écriture qui a manqué sa cible, à réparer
+  // en base. On les compte sur TOUS les élèves, pas seulement les débiteurs —
+  // un solde faux est le plus souvent faux dans le sens positif.
+  const driftingBalances = students.filter((s) => (driftByStudent.get(s.id) ?? 0) !== 0);
   const unpaidTeacherSessions = unpaidTeacher.filter((u) => !u.paid).reduce((sum, u) => sum + u.amount, 0);
 
   // 3. Subscription Count By Module (CSS Bar Chart Data)
@@ -176,13 +187,13 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   if (studiedWithoutFunds.length > 0) {
     alerts.push({
       type: "danger" as const,
-      text: `${studiedWithoutFunds.length} élève(s) ont suivi des séances sans provision — ${studiedWithoutFunds.reduce((sum, row) => sum + row.debt.sessions + row.debt.unbilled, 0)} DA à réclamer à la caisse.`,
+      text: `${studiedWithoutFunds.length} élève(s) ont suivi des séances sans provision — ${studiedWithoutFunds.reduce((sum, row) => sum + row.debt.sessions, 0)} DA à réclamer à la caisse.`,
     });
   }
   if (driftingBalances.length > 0) {
     alerts.push({
-      type: "danger" as const,
-      text: `${driftingBalances.length} élève(s) ont des séances facturées dans leur fiche que leur solde n'a jamais enregistrées — leur solde affiché est en retard sur ce qu'ils doivent.`,
+      type: "warning" as const,
+      text: `${driftingBalances.length} élève(s) ont un solde qui ne correspond pas à la somme de leur historique. Ce n'est pas de l'argent dû : à corriger en base avec reconcile_student_balances(true).`,
     });
   }
   if (severeDebtors.length > 0) {
@@ -290,6 +301,14 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
           ))}
         </motion.div>
       )}
+
+      {/* Les alertes de solde préparées par les badges. C'est ICI, et nulle part
+          ailleurs, qu'on en parle : elles s'affichaient avant en bandeau fixe au
+          bas de chaque écran de l'application, pour une file que personne ne
+          pouvait ni lire ni vider depuis la page où le bandeau apparaissait. */}
+      <motion.div variants={itemVariants}>
+        <WhatsAppAlertsCard />
+      </motion.div>
 
       {/* Une gratuité active met TOUS les scans à 0 DA : ça doit se voir ici,
           pas seulement dans le toast d'un scan déjà passé. */}
@@ -445,7 +464,9 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
                         {[
                           debt.sessions > 0 ? `${debt.sessions} DA de séances suivies` : "",
                           debt.registration > 0 ? `${debt.registration} DA d'inscription` : "",
-                          debt.unbilled > 0 ? `${debt.unbilled} DA facturés hors solde` : "",
+                          debt.drift !== 0
+                            ? `solde à vérifier : ${Math.abs(debt.drift)} DA d'écart`
+                            : "",
                         ]
                           .filter(Boolean)
                           .join(" · ")}

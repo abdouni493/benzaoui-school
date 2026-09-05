@@ -57,7 +57,7 @@ import {
   FREE_REASON_LABELS,
   allocateDebtPayment,
   studentDebtOf,
-  unbilledChargesByStudent,
+  balanceDriftByStudent,
   daysUntil,
   deskPaymentFor,
   enrollmentExpiry,
@@ -86,8 +86,7 @@ import {
 } from "@/components/whatsapp/WhatsAppMessageModal";
 import { isSendablePhone } from "@/lib/whatsapp/phone";
 import { buildBalanceAlert } from "@/lib/whatsapp/alert";
-import { offlineSentence } from "@/lib/whatsapp/offline";
-import type { OfflineReason, SendResponse } from "@/lib/whatsapp/types";
+import type { SendResponse } from "@/lib/whatsapp/types";
 import {
   EnrollmentCards,
   selectedGroupIn,
@@ -136,6 +135,7 @@ export function StudentsPage() {
     parents,
     filieres,
     studentCredentials,
+    complete,
     push,
     deleteFrom,
     updateItem,
@@ -455,25 +455,34 @@ export function StudentsPage() {
     return student.balance >= 0 && student.balance < minCost * 2;
   };
 
-  // Le solde ne suffit pas à dire ce qu'un élève doit. Quand le débit d'une
-  // présence n'est jamais arrivé jusqu'à lui, la fiche affiche « 0 DA » en
-  // face d'un historique qui, lui, facture la séance : l'élève a étudié sans
-  // provision et rien ne le signale. On confronte donc les présences à
-  // l'historique UNE fois pour toute la liste, et chaque carte alerte sur le
-  // pire des deux.
-  const unbilledByStudent = useMemo(
-    () => unbilledChargesByStudent({ attendance, absencePenalties, balanceTx }),
-    [attendance, absencePenalties, balanceTx],
+  // Ce qu'un élève doit se lit ENTIÈREMENT sur sa fiche : son solde (négatif
+  // = séances suivies non payées) et ses frais d'inscription. Le solde porte
+  // déjà chaque présence facturée — badge comme pointage manuel la font
+  // descendre du prix de la séance, dans la même transaction que sa ligne
+  // d'historique. Ré-additionner les présences par-dessus compterait deux fois
+  // les mêmes séances : c'est ce qui affichait « DETTE : 600 DA » sur une
+  // fiche à +1250 DA.
+  //
+  // L'écart solde ↔ historique reste surveillé, mais à part : c'est une
+  // incohérence à réparer en base, jamais un montant à encaisser.
+  const driftByStudent = useMemo(
+    () =>
+      balanceDriftByStudent({
+        students,
+        balanceTx,
+        complete: complete.balanceTx !== false,
+      }),
+    [students, balanceTx, complete.balanceTx],
   );
   const debtOf = (student: Student) =>
-    studentDebtOf(student, { unbilled: unbilledByStudent.get(student.id) ?? 0 });
+    studentDebtOf(student, { drift: driftByStudent.get(student.id) ?? 0 });
 
   // Tous ceux à qui l'école réclame quelque chose, du plus lourd au plus
   // léger. Le compteur du bouton et la fenêtre lisent la même liste.
   const debtors = students
     .map((stu) => ({ stu, debt: debtOf(stu) }))
     .filter((row) => row.debt.alert)
-    .map((row) => ({ ...row, owed: row.debt.total + row.debt.unbilled }))
+    .map((row) => ({ ...row, owed: row.debt.total }))
     .sort((a, b) => b.owed - a.owed);
   const totalOwed = debtors.reduce((sum, row) => sum + row.owed, 0);
 
@@ -1326,10 +1335,6 @@ export function StudentsPage() {
     let sent = 0;
     let failed = 0;
     let queued = 0;
-    // Pourquoi rien ne peut partir, selon le serveur. Sans cette cause, le
-    // bilan conseillait d'attendre le retour de la passerelle même quand elle
-    // répondait déjà et que c'était la session WhatsApp qui s'était refermée.
-    let offlineReason: OfflineReason | undefined;
     const queue = [...waRecipients];
 
     try {
@@ -1354,7 +1359,6 @@ export function StudentsPage() {
 
         const batchResult = payload as SendResponse;
         if (batchResult.results.length === 0) break; // garde-fou anti-boucle
-        if (batchResult.offline) offlineReason = batchResult.reason;
 
         sent += batchResult.sent;
         failed += batchResult.failed;
@@ -1371,12 +1375,16 @@ export function StudentsPage() {
       }
 
       const notif = `${selected.length} notification(s) créée(s) dans l'application.`;
+      // Une mise en file n'est PAS un problème à régler ici : ces messages
+      // partiront tout seuls au retour de la passerelle. On le dit en une
+      // phrase, sans diagnostic — le diagnostic, et le geste qui va avec,
+      // vivent sur le tableau de bord et dans Paramètres → WhatsApp.
       addToast({
         type: failed > 0 ? "warning" : queued > 0 ? "info" : "success",
         title: queued > 0 ? "Alertes mises en attente" : "Alertes envoyées",
         message:
           queued > 0
-            ? `${sent} message(s) envoyé(s), ${queued} en attente. ${offlineSentence(offlineReason)} ${notif}`
+            ? `${sent} message(s) envoyé(s), ${queued} en attente — ils partiront automatiquement. ${notif}`
             : failed > 0
               ? `${sent} message(s) WhatsApp envoyé(s), ${failed} en échec. ${notif}`
               : `${sent} message(s) WhatsApp envoyé(s) et ${notif}`,
@@ -3239,15 +3247,17 @@ export function StudentsPage() {
                               <AlertTriangle className="h-2.5 w-2.5" /> Dette {debt.sessions} DA
                             </span>
                           )}
-                          {/* Le solde ne dit rien, l'historique facture : la
-                              carte le crie quand même. Sans ce badge, un élève
-                              à 0 DA qui a suivi des séances passe pour à jour. */}
-                          {debt.unbilled > 0 && (
+                          {/* Le solde stocké et son propre historique ne disent
+                              pas la même chose. Ce n'est PAS une dette de plus
+                              — c'est une incohérence à réparer en base
+                              (reconcile_student_balances) ; aucun versement n'y
+                              changerait quoi que ce soit. */}
+                          {debt.drift !== 0 && (
                             <span
-                              title={`${debt.unbilled} DA de séances facturées dans son historique n'ont jamais été retirés du solde`}
-                              className="flex items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white"
+                              title={`Le solde stocké s'écarte de ${Math.abs(debt.drift)} DA de la somme de son historique. À corriger en base — ce n'est pas un montant à encaisser.`}
+                              className="flex items-center gap-0.5 rounded-md bg-warning px-1.5 py-0.5 text-[9px] font-bold text-white"
                             >
-                              <AlertTriangle className="h-2.5 w-2.5" /> Solde à corriger
+                              <AlertTriangle className="h-2.5 w-2.5" /> Solde à vérifier
                             </span>
                           )}
                           {/* Alarme visible sans ouvrir la fiche : l'inscription
@@ -3295,7 +3305,7 @@ export function StudentsPage() {
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted">Solde Actuel:</span>
-                      <strong className={debt.sessions > 0 || debt.unbilled > 0 ? "text-danger" : "text-success"}>
+                      <strong className={debt.sessions > 0 ? "text-danger" : "text-success"}>
                         {stu.balance} DA
                       </strong>
                     </div>
@@ -3315,20 +3325,21 @@ export function StudentsPage() {
                       </div>
                     )}
 
-                    {/* L'élève a étudié, la séance est facturée dans sa fiche, et
-                        le solde n'en sait rien. Tant que la base n'est pas
-                        remise d'aplomb, la carte affiche la dette réelle
-                        plutôt que le solde qui la cache. */}
-                    {debt.unbilled > 0 && (
-                      <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5">
-                        <span className="flex items-center gap-1 text-[10px] font-bold text-danger">
-                          <AlertTriangle className="h-3 w-3 animate-pulse" />
-                          SÉANCES SUIVIES NON DÉBITÉES : {debt.unbilled} DA
+                    {/* Le solde stocké ne vaut pas la somme de son historique.
+                        Une seule des deux valeurs est juste, et un versement ne
+                        les réconcilierait pas : c'est reconcile_student_balances
+                        qu'il faut jouer. On le signale sans jamais le compter
+                        comme une créance. */}
+                    {debt.drift !== 0 && (
+                      <div className="flex items-center justify-between gap-2 rounded-lg border border-warning/50 bg-warning/10 p-1.5">
+                        <span className="flex items-center gap-1 text-[10px] font-bold text-warning">
+                          <AlertTriangle className="h-3 w-3" />
+                          SOLDE À VÉRIFIER : {Math.abs(debt.drift)} DA d&apos;écart avec l&apos;historique
                         </span>
                         <button
                           onClick={() => openDetails(stu)}
-                          title="Ouvrir la fiche : l'onglet Présences détaille les séances facturées"
-                          className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
+                          title="Ouvrir la fiche : l'onglet Transactions détaille l'historique du solde"
+                          className="shrink-0 rounded bg-warning px-2 py-0.5 text-[9px] font-bold text-white hover:bg-warning/80"
                         >
                           Vérifier
                         </button>
@@ -3590,6 +3601,10 @@ export function StudentsPage() {
                 solde tant qu'on ne le nomme pas « dette ». */}
             {(() => {
               const debt = debtOf(selectedStudent);
+              // Le solde est POSITIF et l'inscription réglée : il n'y a rien à
+              // réclamer, quoi qu'ait pu coûter l'historique des séances. Le
+              // total débité d'une vie d'élève n'est pas une dette — il est
+              // déjà payé, c'est ce qui a fait descendre le solde.
               if (!debt.alert) return null;
               return (
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-danger/50 bg-danger/10 p-3">
@@ -3597,24 +3612,17 @@ export function StudentsPage() {
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 animate-pulse text-danger" />
                     <div>
                       <strong className="block text-xs font-bold text-danger">
-                        DETTE : {debt.total + debt.unbilled} DA à régler
+                        DETTE : {debt.total} DA à régler
                       </strong>
                       <span className="text-[10px] text-danger/90">
                         {debt.sessions > 0 && (
-                          <>Séances suivies et non payées : {debt.sessions} DA. </>
+                          <>
+                            Séances suivies et non payées : {debt.sessions} DA — c&apos;est
+                            exactement ce que son solde affiche en négatif.{" "}
+                          </>
                         )}
                         {debt.registration > 0 && (
                           <>Frais d&apos;inscription impayés : {debt.registration} DA. </>
-                        )}
-                        {/* L'écart entre ce que l'onglet Présences facture et ce
-                            que le solde a enregistré. Le nommer ici évite la
-                            question « pourquoi 0 DA alors qu'il a étudié ? ». */}
-                        {debt.unbilled > 0 && (
-                          <>
-                            {debt.unbilled} DA de séances facturées dans l&apos;onglet Présences
-                            n&apos;ont jamais été retirés du solde — le solde affiché est en retard
-                            sur ce que l&apos;élève a suivi.{" "}
-                          </>
                         )}
                         Chaque nouvelle séance creuse la dette d&apos;autant.
                       </span>
@@ -3623,6 +3631,33 @@ export function StudentsPage() {
                   <Button size="sm" variant="danger" onClick={() => openPayDebt(selectedStudent)}>
                     <DollarSign className="me-1 h-3.5 w-3.5" /> Régler la dette
                   </Button>
+                </div>
+              );
+            })()}
+
+            {/* L'INCOHÉRENCE, séparée de la DETTE — parce qu'on n'en fait pas la
+                même chose. Une dette s'encaisse au guichet ; un solde qui
+                s'écarte de son propre historique se répare en base. Les
+                mélanger, c'était réclamer à la famille de l'argent qu'elle ne
+                devait pas. */}
+            {(() => {
+              const drift = debtOf(selectedStudent).drift;
+              if (drift === 0) return null;
+              return (
+                <div className="flex items-start gap-2 rounded-xl border border-warning/50 bg-warning/10 p-3">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                  <div>
+                    <strong className="block text-xs font-bold text-warning">
+                      SOLDE À VÉRIFIER : {Math.abs(drift)} DA d&apos;écart avec l&apos;historique
+                    </strong>
+                    <span className="text-[10px] text-warning/90">
+                      Le solde affiché ({selectedStudent.balance} DA) ne vaut pas la somme des
+                      lignes de l&apos;onglet Transactions ({selectedStudent.balance - drift} DA).
+                      Ce n&apos;est pas un montant à encaisser : c&apos;est une écriture qui a
+                      manqué sa cible. À corriger en base avec{" "}
+                      <code className="font-mono">reconcile_student_balances(true)</code>.
+                    </span>
+                  </div>
                 </div>
               );
             })()}
@@ -4784,18 +4819,19 @@ export function StudentsPage() {
                 <span className="font-bold text-ink">Total dû:</span>
                 <strong className="text-danger">{debtOf(selectedStudent).total} DA</strong>
               </div>
-              {/* Un versement ne peut pas régler ce que le solde ignore : il
-                  rendrait le solde créditeur d'autant. Le guichet doit le
-                  savoir AVANT d'encaisser. */}
-              {debtOf(selectedStudent).unbilled > 0 && (
-                <div className="mt-1 rounded-lg border border-danger/40 bg-danger/10 p-2 text-[10px] leading-relaxed text-danger">
+              {/* Le solde ne vaut pas la somme de son historique : le montant
+                  réclamé ci-dessus est donc calculé sur une valeur douteuse.
+                  Le guichet doit le savoir AVANT d'encaisser. */}
+              {debtOf(selectedStudent).drift !== 0 && (
+                <div className="mt-1 rounded-lg border border-warning/40 bg-warning/10 p-2 text-[10px] leading-relaxed text-warning">
                   <strong className="block">
-                    {debtOf(selectedStudent).unbilled} DA de séances suivies ne sont pas encore
-                    portés sur le solde.
+                    Solde à vérifier : {Math.abs(debtOf(selectedStudent).drift)} DA d&apos;écart
+                    avec l&apos;historique.
                   </strong>
-                  Son historique de présences les facture, son solde ne les a jamais enregistrés.
-                  Encaissez d&apos;abord le « Total dû » ci-dessus : ces séances devront être
-                  remises sur le solde avant d&apos;être réclamées.
+                  Le « Total dû » ci-dessus est calculé sur le solde stocké, qui ne correspond pas
+                  à la somme de ses transactions. Faites corriger la base
+                  (<code className="font-mono">reconcile_student_balances</code>) avant
+                  d&apos;encaisser.
                 </div>
               )}
               {/* L'ordre d'imputation est décidé côté serveur : l'annoncer ici,
@@ -4961,8 +4997,8 @@ export function StudentsPage() {
                       {[
                         debt.sessions > 0 ? `Séances non payées : ${debt.sessions} DA` : "",
                         debt.registration > 0 ? `Inscription : ${debt.registration} DA` : "",
-                        debt.unbilled > 0
-                          ? `${debt.unbilled} DA facturés dans sa fiche mais jamais retirés du solde`
+                        debt.drift !== 0
+                          ? `Solde à vérifier : ${Math.abs(debt.drift)} DA d'écart avec l'historique`
                           : "",
                       ]
                         .filter(Boolean)

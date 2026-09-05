@@ -37,7 +37,15 @@ const shared = vi.hoisted(() => {
 const MockWhatsAppError = shared.MockWhatsAppError;
 
 function resolveOp(st: Record<string, any>) {
-  const pending = () => shared.rows.filter((r) => r.status === "pending");
+  /** Les lignes que les filtres posés (`eq`, `in`) désignent réellement. */
+  const matching = () =>
+    shared.rows.filter((r) => {
+      for (const [k, v] of Object.entries(st.filters)) if (r[k] !== v) return false;
+      for (const [k, vs] of Object.entries(st.ins ?? {})) {
+        if (!(vs as unknown[]).includes(r[k])) return false;
+      }
+      return true;
+    });
 
   if (st.op === "insert") {
     shared.inserts.push(st.rows);
@@ -46,21 +54,24 @@ function resolveOp(st: Record<string, any>) {
   }
 
   if (st.op === "update") {
-    shared.updates.push({ filters: { ...st.filters, ...(st.lt ? { __lt: st.lt } : {}) }, patch: st.patch });
+    shared.updates.push({
+      filters: { ...st.filters, ...(st.ins ?? {}), ...(st.lt ? { __lt: st.lt } : {}) },
+      patch: st.patch,
+    });
     // expireStale : update ... .lt(created_at) — rien de périmé dans ces tests
     if (st.lt) return { data: [], error: null };
-    const target = shared.rows.find((r) => r.id === st.filters.id);
-    if (target) Object.assign(target, st.patch);
-    return { data: [], error: null };
+    const targets = matching();
+    for (const t of targets) Object.assign(t, st.patch);
+    return { data: targets.map((t) => ({ id: t.id })), error: null };
   }
 
-  if (st.head) return { count: pending().length, error: null };
+  if (st.head) return { count: matching().length, error: null };
 
   if (st.filters.id) {
     return { data: shared.rows.find((r) => r.id === st.filters.id) ?? null, error: null };
   }
 
-  return { data: pending().slice(0, st.limit ?? 50), error: null };
+  return { data: matching().slice(0, st.limit ?? 50), error: null };
 }
 
 function makeBuilder() {
@@ -83,6 +94,10 @@ function makeBuilder() {
     },
     eq(k: string, v: unknown) {
       st.filters[k] = v;
+      return b;
+    },
+    in(k: string, vs: unknown[]) {
+      st.ins = { ...(st.ins ?? {}), [k]: vs };
       return b;
     },
     lt(k: string, v: unknown) {
@@ -133,7 +148,16 @@ vi.mock("@/lib/whatsapp/pacing", () => ({
   randomGap: () => 0,
 }));
 
-import { flushOutbox, pendingCount, queueMessages } from "@/lib/whatsapp/outbox";
+import {
+  approveDrafts,
+  discardDrafts,
+  draftCount,
+  flushOutbox,
+  listDrafts,
+  pendingCount,
+  queueMessages,
+  withoutQueuedDuplicates,
+} from "@/lib/whatsapp/outbox";
 
 beforeEach(() => {
   shared.rows = [];
@@ -164,6 +188,116 @@ describe("queueMessages", () => {
   it("ne fait rien, sans erreur, sur une liste vide", async () => {
     expect(await queueMessages([])).toBe(0);
     expect(shared.inserts).toHaveLength(0);
+  });
+
+  it("dépose un BROUILLON quand on le lui demande", async () => {
+    await queueMessages([{ recipientPhone: "213555111222", body: "Bonjour" }], {
+      status: "draft",
+    });
+    expect(shared.inserts[0][0]).toMatchObject({ status: "draft" });
+  });
+});
+
+/** LE COMPORTEMENT LE PLUS IMPORTANT DE TOUT CE MODULE.
+ *
+ *  Les alertes de solde partaient toutes seules au moment du badge : un
+ *  message arrivait chez une famille sans que personne à l'école n'ait lu le
+ *  texte exact qui lui était écrit. Un badge PROPOSE désormais (un brouillon),
+ *  et seul un geste humain approuve.
+ *
+ *  Si le vidage automatique venait un jour à emporter les brouillons, la
+ *  garantie tomberait EN SILENCE — rien à l'écran ne le montrerait, les
+ *  messages seraient simplement partis. D'où ces tests. */
+describe("brouillons — rien ne part sans approbation", () => {
+  it("le vidage automatique IGNORE les brouillons, passerelle ouverte comprise", async () => {
+    await queueMessages([{ recipientPhone: "213555111222", body: "Alerte auto" }], {
+      status: "draft",
+    });
+    shared.state = "open";
+
+    const outcome = await flushOutbox();
+
+    expect(outcome.sent).toBe(0);
+    // Le brouillon est toujours là, intact, et n'a rien tenté.
+    expect(shared.rows[0].status).toBe("draft");
+    expect(shared.rows[0].attempts).toBe(0);
+  });
+
+  it("compte les deux files séparément", async () => {
+    await queueMessages([{ recipientPhone: "213555111222", body: "a" }], { status: "draft" });
+    await queueMessages([{ recipientPhone: "213555333444", body: "b" }], { status: "pending" });
+
+    expect(await draftCount()).toBe(1);
+    expect(await pendingCount()).toBe(1);
+  });
+
+  it("approuver fait basculer le brouillon dans la file d'envoi", async () => {
+    await queueMessages([{ recipientPhone: "213555111222", body: "Alerte" }], {
+      status: "draft",
+    });
+    const [draft] = await listDrafts();
+
+    expect(await approveDrafts([draft.id])).toBe(1);
+    expect(shared.rows[0].status).toBe("pending");
+
+    // …et c'est SEULEMENT là que le vidage l'emporte.
+    const outcome = await flushOutbox();
+    expect(outcome.sent).toBe(1);
+    expect(shared.rows[0].status).toBe("sent");
+  });
+
+  it("approuver deux fois n'envoie pas deux fois", async () => {
+    await queueMessages([{ recipientPhone: "213555111222", body: "Alerte" }], {
+      status: "draft",
+    });
+    const [draft] = await listDrafts();
+
+    expect(await approveDrafts([draft.id])).toBe(1);
+    // Le filtre « status = draft » rend l'appel idempotent : un double clic ne
+    // ressuscite pas un message déjà parti.
+    expect(await approveDrafts([draft.id])).toBe(0);
+  });
+
+  it("écarter marque le message abandonné, sans jamais l'effacer", async () => {
+    await queueMessages([{ recipientPhone: "213555111222", body: "Alerte" }], {
+      status: "draft",
+    });
+    const [draft] = await listDrafts();
+
+    expect(await discardDrafts([draft.id])).toBe(1);
+    expect(shared.rows[0].status).toBe("abandoned");
+    // La ligne reste : on doit toujours pouvoir dire ce qui n'est pas parti.
+    expect(shared.rows).toHaveLength(1);
+    expect(shared.rows[0].abandoned_reason).toBeTruthy();
+
+    // Un message écarté ne se rattrape pas par une approbation tardive.
+    expect(await approveDrafts([draft.id])).toBe(0);
+    expect((await flushOutbox()).sent).toBe(0);
+  });
+
+  it("ne redépose pas le même texte pour le même numéro", async () => {
+    // Un élève qui badge trois cours dans la journée ne doit pas remplir le
+    // tableau de bord de trois fois la même phrase.
+    await queueMessages([{ recipientPhone: "213555111222", body: "Solde faible" }], {
+      status: "draft",
+    });
+
+    const fresh = await withoutQueuedDuplicates([
+      { recipientPhone: "213555111222", body: "Solde faible" },
+      { recipientPhone: "213555111222", body: "Autre message" },
+      { recipientPhone: "213555999888", body: "Solde faible" },
+    ]);
+
+    expect(fresh).toHaveLength(2);
+    expect(fresh.map((e) => e.body)).toEqual(["Autre message", "Solde faible"]);
+  });
+
+  it("écarte aussi les doublons À L'INTÉRIEUR du même lot", async () => {
+    const fresh = await withoutQueuedDuplicates([
+      { recipientPhone: "213555111222", body: "Solde faible" },
+      { recipientPhone: "213555111222", body: "Solde faible" },
+    ]);
+    expect(fresh).toHaveLength(1);
   });
 });
 

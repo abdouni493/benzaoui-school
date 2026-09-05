@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { allocateDebtPayment, studentDebtOf, unbilledChargesByStudent } from "@/lib/helpers";
+import { allocateDebtPayment, balanceDriftByStudent, studentDebtOf } from "@/lib/helpers";
 import type { Student } from "@/lib/types";
 
 /** Un élève réduit à ce que la caisse regarde. */
@@ -12,8 +12,8 @@ describe("studentDebtOf", () => {
     expect(studentDebtOf(stu(1500))).toEqual({
       sessions: 0,
       registration: 0,
-      unbilled: 0,
       total: 0,
+      drift: 0,
       alert: false,
     });
   });
@@ -23,8 +23,8 @@ describe("studentDebtOf", () => {
     expect(studentDebtOf(stu(-625))).toEqual({
       sessions: 625,
       registration: 0,
-      unbilled: 0,
       total: 625,
+      drift: 0,
       alert: true,
     });
   });
@@ -33,8 +33,8 @@ describe("studentDebtOf", () => {
     expect(studentDebtOf(stu(-625, 1000))).toEqual({
       sessions: 625,
       registration: 1000,
-      unbilled: 0,
       total: 1625,
+      drift: 0,
       alert: true,
     });
   });
@@ -45,67 +45,75 @@ describe("studentDebtOf", () => {
     expect(studentDebtOf(stu(2000, 1000)).total).toBe(1000);
   });
 
-  it("alerte sur un solde à 0 que des séances facturées n'ont jamais entamé", () => {
-    // Le cas signalé : fiche à « 0 DA », historique de présences à 625 DA.
-    const debt = studentDebtOf(stu(0), { unbilled: 625 });
-    expect(debt.sessions).toBe(0);
-    expect(debt.unbilled).toBe(625);
-    expect(debt.alert).toBe(true);
+  it("ne réclame RIEN à un élève au solde créditeur, quoi qu'aient coûté ses séances", () => {
+    // La panne signalée : une fiche à +1250 DA annonçait « DETTE : 600 DA ».
+    // Le solde porte déjà toutes les séances suivies — il n'y a rien à
+    // ré-additionner par-dessus.
+    const debt = studentDebtOf(stu(1250));
+    expect(debt.total).toBe(0);
+    expect(debt.alert).toBe(false);
   });
 
-  it("laisse `total` à ce que la RPC sait régler", () => {
-    // `unbilled` n'est pas une créance de plus : c'est la même dette, restée
-    // hors du solde. L'ajouter au total ferait encaisser deux fois.
-    expect(studentDebtOf(stu(-625), { unbilled: 625 }).total).toBe(625);
+  it("n'ajoute JAMAIS l'écart d'historique au montant à régler", () => {
+    // L'écart solde ↔ historique est une incohérence à réparer en base, pas
+    // une créance. L'encaisser reviendrait à facturer un bug à la famille.
+    const debt = studentDebtOf(stu(-625), { drift: -900 });
+    expect(debt.total).toBe(625);
+    expect(debt.drift).toBe(-900);
   });
 });
 
-describe("unbilledChargesByStudent", () => {
-  const att = (studentId: string, amountDeducted: number) => ({ studentId, amountDeducted });
-  const tx = (studentId: string, amount: number, type = "deduction") => ({ studentId, amount, type });
+describe("balanceDriftByStudent", () => {
+  const st = (id: string, balance: number) => ({ id, balance });
+  const tx = (studentId: string, amount: number) => ({ studentId, amount });
 
-  it("ne signale rien quand chaque présence a sa ligne d'historique", () => {
-    const gaps = unbilledChargesByStudent({
-      attendance: [att("a", 625), att("a", 625)],
-      balanceTx: [tx("a", 2000, "topup"), tx("a", -625), tx("a", -625)],
+  it("ne signale rien quand le solde vaut la somme de son historique", () => {
+    const drift = balanceDriftByStudent({
+      students: [st("a", 1250)],
+      balanceTx: [tx("a", 2500), tx("a", -625), tx("a", -625)],
     });
-    expect(gaps.get("a")).toBeUndefined();
+    expect(drift.get("a")).toBeUndefined();
   });
 
-  it("mesure la séance facturée que l'historique ne porte pas", () => {
-    const gaps = unbilledChargesByStudent({
-      attendance: [att("a", 625)],
-      balanceTx: [tx("a", 625, "topup"), tx("a", -625, "registration")],
+  it("mesure l'écart, avec son signe", () => {
+    // Solde en retard sur l'historique : des débits n'y sont jamais arrivés.
+    const drift = balanceDriftByStudent({
+      students: [st("a", 0)],
+      balanceTx: [tx("a", 625)],
     });
-    expect(gaps.get("a")).toBe(625);
+    expect(drift.get("a")).toBe(-625);
   });
 
-  it("compte aussi les absences hebdomadaires facturées", () => {
-    const gaps = unbilledChargesByStudent({
-      attendance: [],
-      absencePenalties: [{ studentId: "a", amount: 400 }],
-      balanceTx: [],
+  it("ne se laisse pas tromper par une correction de tarif créditée en topup", () => {
+    // Le cas qui faisait inventer une dette : un changement de prix rétroactif
+    // rend 25 DA par un 'topup'. L'ancien recoupement présences ↔ déductions y
+    // voyait un écart ; le solde, lui, est parfaitement juste.
+    const drift = balanceDriftByStudent({
+      students: [st("a", 1250)],
+      balanceTx: [tx("a", 1000), tx("a", -1000), tx("a", 2500), tx("a", -650), tx("a", 25), tx("a", -625)],
     });
-    expect(gaps.get("a")).toBe(400);
+    expect(drift.get("a")).toBeUndefined();
   });
 
-  it("ne signale rien après un remboursement, qui pousse l'écart dans l'autre sens", () => {
-    // Séance devenue offerte : la déduction reste dans l'historique, un
-    // 'topup' la rend, et la présence repasse à 0 DA.
-    const gaps = unbilledChargesByStudent({
-      attendance: [att("a", 0)],
-      balanceTx: [tx("a", -625), tx("a", 625, "topup")],
+  it("se TAIT sur un historique incomplet plutôt que d'inventer une dette", () => {
+    // La panne d'origine : PostgREST plafonne à 1000 lignes sans le dire, et
+    // l'application voyait les débits sans leurs recettes. Sur une table
+    // amputée, on ne signale plus rien du tout.
+    const drift = balanceDriftByStudent({
+      students: [st("a", 1250)],
+      balanceTx: [tx("a", -625)],
+      complete: false,
     });
-    expect(gaps.get("a")).toBeUndefined();
+    expect(drift.size).toBe(0);
   });
 
   it("sépare les élèves", () => {
-    const gaps = unbilledChargesByStudent({
-      attendance: [att("a", 625), att("b", 300)],
-      balanceTx: [tx("b", -300)],
+    const drift = balanceDriftByStudent({
+      students: [st("a", 0), st("b", 300)],
+      balanceTx: [tx("a", 625), tx("b", 300)],
     });
-    expect(gaps.get("a")).toBe(625);
-    expect(gaps.get("b")).toBeUndefined();
+    expect(drift.get("a")).toBe(-625);
+    expect(drift.get("b")).toBeUndefined();
   });
 });
 

@@ -525,6 +525,94 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
   independent: { table: "independent_sessions", select: "*", ...independentMapper },
 };
 
+// ---- Lire une table EN ENTIER ----------------------------------------------
+//
+// POURQUOI CE CODE EXISTE — la panne qu'il répare
+// ------------------------------------------------
+// PostgREST plafonne toute réponse à `db-max-rows` (1000 chez Supabase) et ne
+// le SIGNALE PAS : la requête réussit, `error` est nul, et il manque
+// simplement des lignes. `balance_tx` a dépassé ce seuil, et l'application a
+// commencé à travailler sur un historique amputé de ses lignes les plus
+// récentes. Les conséquences n'avaient aucun rapport apparent entre elles :
+//
+//   · une recharge enregistrée « disparaissait » du récapitulatif ;
+//   · une fiche élève affichait 1 transaction sur 5 ;
+//   · surtout, tout écran qui CONFRONTE le solde à son historique voyait des
+//     débits sans leurs recettes et annonçait une dette de plusieurs centaines
+//     de dinars à des élèves parfaitement à jour.
+//
+// Sans ORDER BY, l'ordre des lignes rendues n'est même pas défini : deux
+// chargements successifs pouvaient retenir deux sous-ensembles différents.
+//
+// On pagine donc explicitement, en triant sur la clé primaire — le seul tri
+// que toutes les tables partagent, et le seul qui rende la pagination stable.
+
+/** Taille de page. Sous le plafond de PostgREST, pour que « moins d'une page
+ *  reçue » signifie toujours « fin de table » et jamais « plafond atteint ». */
+const PAGE_SIZE = 500;
+
+/** Garde-fou : une table qui dépasserait ce total signale une anomalie plutôt
+ *  que de boucler indéfiniment (et de saturer la mémoire du navigateur). */
+const MAX_ROWS = 200_000;
+
+export type FetchOutcome =
+  | { ok: true; rows: Record<string, unknown>[] }
+  | { ok: false; error: string };
+
+/** Le strict minimum que `fetchWholeTable` demande à un client Supabase — de
+ *  quoi le tester sans base. */
+export interface PagedSource {
+  from(table: string): {
+    select(columns: string): {
+      order(
+        column: string,
+        opts: { ascending: boolean },
+      ): {
+        range(
+          from: number,
+          to: number,
+        ): PromiseLike<{ data: unknown[] | null; error: { message: string } | null }>;
+      };
+    };
+  };
+}
+
+/**
+ * Toutes les lignes d'une table, page par page.
+ *
+ * Un échec de page ne rend PAS un résultat partiel : il rend `ok: false`, et
+ * l'appelant conserve alors ce qu'il avait déjà. Une demi-table est pire que
+ * pas de table du tout — c'est précisément elle qui faisait inventer des
+ * dettes.
+ */
+export async function fetchWholeTable(
+  supabase: PagedSource,
+  cfg: Pick<TableConfig, "table" | "select">,
+): Promise<FetchOutcome> {
+  const rows: Record<string, unknown>[] = [];
+
+  for (let from = 0; from < MAX_ROWS; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from(cfg.table)
+      .select(cfg.select)
+      // Tri sur la clé primaire : sans lui, deux pages peuvent se recouvrir ou
+      // s'ignorer, et la table lue n'est plus la table stockée.
+      .order("id", { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error || !data) return { ok: false, error: error?.message ?? "no data" };
+
+    rows.push(...(data as unknown as Record<string, unknown>[]));
+    if (data.length < PAGE_SIZE) return { ok: true, rows };
+  }
+
+  console.error(
+    `[db] ${cfg.table} dépasse ${MAX_ROWS} lignes : lecture interrompue. ` +
+      "Les écrans qui recoupent cette table seront désactivés plutôt que faux.",
+  );
+  return { ok: false, error: `plus de ${MAX_ROWS} lignes` };
+}
+
 const schoolMapper = makeMapper<School>([
   ["id", "id"],
   ["name", "name"],
@@ -689,6 +777,17 @@ export interface WorkerScanResult {
 
 interface DataActions {
   loaded: boolean;
+  /**
+   * Les tables dont TOUTES les lignes sont bien arrivées, au dernier
+   * chargement.
+   *
+   * Ce n'est pas un détail de plomberie : un écran qui CONFRONTE deux tables
+   * (le solde d'un élève contre son historique, par exemple) tire une
+   * conclusion fausse dès qu'il en manque un morceau — il voit un débit sans
+   * sa recette et invente une dette. Tant qu'une table n'est pas ici, aucun
+   * recoupement ne doit être affiché à partir d'elle.
+   */
+  complete: Partial<Record<keyof typeof TABLES, boolean>>;
   fetchSchool: () => Promise<void>;
   fetchAll: () => Promise<void>;
   clear: () => void;
@@ -918,6 +1017,7 @@ export type DataStore = Database & DataActions;
 export const useData = create<DataStore>((set, get) => ({
   ...emptyDatabase(),
   loaded: false,
+  complete: {},
 
   fetchSchool: async () => {
     const supabase = createClient();
@@ -937,22 +1037,27 @@ export const useData = create<DataStore>((set, get) => ({
     const results = await Promise.all(
       keys.map(async (key) => {
         const cfg = TABLES[key];
-        const { data, error } = await supabase.from(cfg.table).select(cfg.select);
-        if (error || !data) {
+        const page = await fetchWholeTable(supabase, cfg);
+        if (!page.ok) {
           console.error(
-            `Failed to load ${cfg.table}: ${error?.message ?? "no data"} — les lignes déjà chargées sont conservées.`,
+            `Failed to load ${cfg.table}: ${page.error} — les lignes déjà chargées sont conservées.`,
           );
-          return [key, (before[key] as unknown[]) ?? []] as const;
+          return [key, (before[key] as unknown[]) ?? [], false] as const;
         }
-        return [key, data.map(cfg.fromRow)] as const;
+        return [key, page.rows.map(cfg.fromRow), true] as const;
       }),
     );
     const patch: Record<string, unknown> = { loaded: true };
-    for (const [key, rows] of results) patch[key] = rows;
+    const complete: Record<string, boolean> = {};
+    for (const [key, rows, ok] of results) {
+      patch[key] = rows;
+      complete[key] = ok;
+    }
+    patch.complete = complete;
     set(patch as Partial<DataStore>);
   },
 
-  clear: () => set({ ...emptyDatabase(), school: get().school, loaded: false }),
+  clear: () => set({ ...emptyDatabase(), school: get().school, loaded: false, complete: {} }),
 
   // The whole scan (window matching, debt gate, deduction, attendance,
   // balance_tx, teacher due) runs atomically in the scan_card RPC — the

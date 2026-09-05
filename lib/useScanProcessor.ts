@@ -10,19 +10,35 @@ import { speakMessage, speechCaseForScan } from "@/lib/speech";
 import { buildBalanceAlert } from "@/lib/whatsapp/alert";
 import type { Parent, School, Student } from "@/lib/types";
 
-/** Alertes automatiques déjà parties dans cette session applicative, pour ne pas
- *  renvoyer un WhatsApp si le même scan accepté est traité deux fois (double
+/** Alertes déjà DÉPOSÉES dans cette session applicative, pour ne pas proposer
+ *  deux fois la même si le même scan accepté est traité deux fois (double
  *  déclenchement de l'événement clavier, remontage React). Clé stable = élève +
  *  séance + jour ; côté serveur, le cooldown de 30 min du RPC empêche déjà un
- *  second scan accepté sur le même créneau. */
-const sentAlertKeys = new Set<string>();
+ *  second scan accepté sur le même créneau, et la route de dépôt écarte les
+ *  doublons de texte encore en file. */
+const queuedAlertKeys = new Set<string>();
 
-/** Envoie l'alerte de solde par WhatsApp via /api/whatsapp/send — le seul chemin
- *  qui détient la clé de la passerelle. L'alerte part en TEXTE, construit par
- *  buildBalanceAlert. Volontairement « fire-and-forget » et sans jamais lever
- *  d'exception : une passerelle éteinte ou une session tombée ne doit casser ni
- *  le scan ni la transaction déjà écrite. */
-async function sendAutoBalanceAlert(opts: {
+/** DÉPOSE l'alerte de solde sur le tableau de bord — elle ne PART PAS d'ici.
+ *
+ *  POURQUOI CE N'EST PLUS UN ENVOI
+ *  -------------------------------
+ *  Cette fonction envoyait le message pour de bon, au moment du badge. Deux
+ *  défauts, et le second était le plus coûteux :
+ *
+ *   · un message partait chez une famille sans que personne à l'école n'ait lu
+ *     le texte exact qu'elle allait recevoir ;
+ *   · quand la passerelle était éteinte, l'échec s'installait en bandeau sur
+ *     TOUS les écrans de l'application, pour annoncer un problème que personne
+ *     ne pouvait résoudre depuis la page où il s'affichait.
+ *
+ *  L'alerte est donc simplement déposée en brouillon. Le tableau de bord la
+ *  montre, texte compris ; l'école la relit et décide de l'envoyer. Si la
+ *  passerelle est alors injoignable, le message reste en file et part TOUT
+ *  SEUL à son retour — c'est le vidage de fond qui s'en charge.
+ *
+ *  Reste « fire-and-forget » et sans jamais lever d'exception : la file
+ *  indisponible ne doit casser ni le scan ni la transaction déjà écrite. */
+async function queueBalanceAlert(opts: {
   student: Student;
   parent?: Parent | null;
   school?: School | null;
@@ -30,7 +46,7 @@ async function sendAutoBalanceAlert(opts: {
   low: boolean;
   dedupKey: string;
 }): Promise<void> {
-  if (sentAlertKeys.has(opts.dedupKey)) return;
+  if (queuedAlertKeys.has(opts.dedupKey)) return;
 
   const payload = buildBalanceAlert({
     student: opts.student,
@@ -43,28 +59,28 @@ async function sendAutoBalanceAlert(opts: {
   if (!payload) return;
 
   // Marqué avant l'attente : deux traitements quasi simultanés du même scan ne
-  // partent qu'une fois. La clé est relâchée en cas d'échec réseau/passerelle,
-  // pour qu'un prochain scan accepté puisse retenter.
-  sentAlertKeys.add(opts.dedupKey);
+  // déposent qu'une fois. La clé est relâchée en cas d'échec réseau, pour
+  // qu'un prochain scan accepté puisse retenter.
+  queuedAlertKeys.add(opts.dedupKey);
 
   try {
-    const response = await fetch("/api/whatsapp/send", {
+    const response = await fetch("/api/whatsapp/outbox/queue", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ recipients: [payload] }),
     });
     if (!response.ok) {
-      sentAlertKeys.delete(opts.dedupKey);
+      queuedAlertKeys.delete(opts.dedupKey);
       const info = (await response.json().catch(() => null)) as { error?: string } | null;
       // Jamais la clé ni le corps complet en clair : juste de quoi diagnostiquer.
       console.warn(
-        `[whatsapp] alerte automatique non envoyée (${response.status}) : ${info?.error ?? "erreur passerelle"}`,
+        `[whatsapp] alerte non déposée (${response.status}) : ${info?.error ?? "file indisponible"}`,
       );
     }
   } catch (err) {
-    sentAlertKeys.delete(opts.dedupKey);
+    queuedAlertKeys.delete(opts.dedupKey);
     console.warn(
-      `[whatsapp] alerte automatique en échec : ${err instanceof Error ? err.message : "réseau injoignable"}`,
+      `[whatsapp] dépôt de l'alerte en échec : ${err instanceof Error ? err.message : "réseau injoignable"}`,
     );
   }
 }
@@ -172,7 +188,7 @@ export function useScanProcessor() {
 
         let autoSentAlert = false;
 
-        // Alerte automatique de solde (faible ou en dette).
+        // Alerte de solde (faible ou en dette) : PROPOSÉE, pas envoyée.
         if ((isLow || isDebt) && (autoSendWhatsapp || autoSendEmail)) {
           autoSentAlert = true;
 
@@ -194,16 +210,17 @@ export function useScanProcessor() {
             push("notifications", newNtf);
           }
 
-          // Transport WhatsApp réel — conditionné au seul interrupteur WhatsApp,
-          // et non bloquant : le verdict du scan et son toast s'affichent sans
-          // attendre la passerelle, et un échec d'envoi reste sans effet sur la
-          // présence et le débit déjà écrits. Le parent rattaché est visé en
-          // priorité ; à défaut, l'élève lui-même (résolu dans buildBalanceAlert).
+          // Dépôt du message WhatsApp — conditionné au seul interrupteur
+          // WhatsApp, et non bloquant : le verdict du scan et son toast
+          // s'affichent sans attendre quoi que ce soit, et la passerelle n'est
+          // même pas contactée ici. Le parent rattaché est visé en priorité ; à
+          // défaut, l'élève lui-même (résolu dans buildBalanceAlert). C'est le
+          // tableau de bord qui décidera de l'envoi.
           if (autoSendWhatsapp) {
             const parent = student.parentId
               ? parents.find((p) => p.id === student.parentId)
               : undefined;
-            void sendAutoBalanceAlert({
+            void queueBalanceAlert({
               student,
               parent,
               school,

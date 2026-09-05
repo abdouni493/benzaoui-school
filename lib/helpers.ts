@@ -56,82 +56,96 @@ export interface StudentDebt {
   sessions: number;
   /** frais d'inscription encore dus */
   registration: number;
-  /**
-   * Ce que l'historique de présence a facturé SANS que le solde ne bouge.
-   *
-   * Ce n'est pas une créance de plus : c'est la MEME dette, restée invisible
-   * parce que le débit n'est jamais arrivé jusqu'au solde. Une fiche qui
-   * annonce « Total débité 625 DA » en face d'un « Solde : 0 DA » se
-   * reconnaît à ce champ, et à lui seul.
-   */
-  unbilled: number;
-  /** ce que la caisse réclame en tout (ce que `pay_student_debt` règle) */
+  /** ce que la caisse réclame, en tout (ce que `pay_student_debt` règle) */
   total: number;
-  /** vrai dès qu'il y a quelque chose à signaler, dette ou incohérence */
+  /**
+   * Écart entre le solde STOCKÉ et la somme de son propre historique.
+   *
+   * Ce n'est PAS de l'argent dû, et il ne s'ajoute jamais au montant à
+   * régler : c'est un signal d'incohérence. Toute écriture d'argent déplace
+   * le solde ET écrit sa ligne d'historique dans la même transaction ; les
+   * deux doivent donc toujours coïncider. Quand ils divergent, un versement
+   * ne réparerait rien — c'est `reconcile_student_balances` qu'il faut jouer.
+   *
+   * Signe : négatif = le solde affiché est EN RETARD sur l'historique (des
+   * débits n'y sont jamais arrivés) ; positif = l'inverse.
+   */
+  drift: number;
+  /** vrai dès qu'il y a réellement quelque chose à encaisser */
   alert: boolean;
 }
 
+/**
+ * La dette d'un élève, telle que le guichet la réclame.
+ *
+ * Elle se lit ENTIÈREMENT sur la fiche : le solde (négatif = séances suivies
+ * non payées) et les frais d'inscription dus. Le solde porte déjà toutes les
+ * séances badgées ou pointées — chaque présence facturée l'a fait descendre du
+ * prix de la séance, dans la même transaction que sa ligne d'historique. Il
+ * n'y a donc rien à ré-additionner par-dessus : le faire compterait deux fois
+ * les mêmes séances.
+ */
 export function studentDebtOf(
   student: Pick<Student, "balance"> & { registrationDue?: number },
-  opts: { unbilled?: number } = {},
+  opts: { drift?: number } = {},
 ): StudentDebt {
   const sessions = student.balance < 0 ? -student.balance : 0;
   const registration = student.registrationDue ?? 0;
-  const unbilled = Math.max(opts.unbilled ?? 0, 0);
   return {
     sessions,
     registration,
-    unbilled,
     total: sessions + registration,
-    alert: sessions > 0 || registration > 0 || unbilled > 0,
+    drift: opts.drift ?? 0,
+    alert: sessions > 0 || registration > 0,
   };
 }
 
-/** Le strict minimum à connaître pour confronter les présences à l'historique. */
-export interface BillingLedger {
-  attendance: Pick<AttendanceRecord, "studentId" | "amountDeducted">[];
-  absencePenalties?: { studentId: string; amount: number }[];
-  balanceTx: { studentId: string; amount: number; type: string }[];
+/** Le strict minimum à connaître pour confronter un solde à son historique. */
+export interface BalanceLedger {
+  students: Pick<Student, "id" | "balance">[];
+  balanceTx: { studentId: string; amount: number }[];
+  /**
+   * L'historique est-il COMPLET ?
+   *
+   * Une demi-table rend le recoupement non pas imprécis mais faux : il manque
+   * des recettes, jamais leurs débits, et l'écart accuse toujours l'élève.
+   * C'est exactement ce qui a fait annoncer des dettes de plusieurs centaines
+   * de dinars à des élèves à jour, le jour où `balance_tx` a dépassé le
+   * plafond de 1000 lignes de PostgREST. Sur un historique incomplet, on ne
+   * signale RIEN.
+   */
+  complete?: boolean;
 }
 
 /**
- * Les séances facturées dont le solde n'a jamais entendu parler, élève par
- * élève (les élèves à zéro n'y figurent pas).
+ * Les élèves dont le solde stocké ne dit pas la même chose que leur propre
+ * historique (les élèves sains n'y figurent pas).
  *
- * Toute facturation écrit DEUX choses dans la même transaction : la présence
- * (`attendance.amountDeducted`, ou la pénalité d'absence hebdomadaire) et sa
- * ligne d'historique (`balance_tx` de type `deduction`). Quand une écriture
- * absolue a écrasé le solde, ou qu'un écran a posé la présence sans la
- * ligne, la première somme dépasse la seconde : c'est exactement l'écart
- * rendu ici. C'est la signature de la fiche qui annonce « Total débité
- * 625 DA » en face d'un « Solde : 0 DA ».
- *
- * L'écart n'est retenu que dans le sens qui lèse l'école. Un remboursement
- * (séance devenue offerte, présence supprimée, tarif revu à la baisse) laisse
- * la déduction dans l'historique et remet la présence à 0 : l'écart part
- * dans l'autre sens sans qu'aucune dette n'existe, et ne dit donc rien.
+ * C'est l'invariant que toutes les RPC maintiennent, et que
+ * `reconcile_student_balances` répare : `students.balance` = somme de
+ * `balance_tx`. Il remplace l'ancien recoupement présences ↔ déductions, qui
+ * se trompait dès qu'une correction de tarif passait par une autre écriture
+ * que `deduction` — un changement de prix rétroactif crédité en `topup`
+ * suffisait à faire apparaître une dette qui n'existait pas.
  *
  * Une seule passe sur chaque table : une liste de fiches ne peut pas
  * rebalayer l'historique complet à chaque carte affichée.
  */
-export function unbilledChargesByStudent(db: BillingLedger): Map<string, number> {
-  const drift = new Map<string, number>();
-  const add = (id: string, amount: number) =>
-    drift.set(id, (drift.get(id) ?? 0) + amount);
+export function balanceDriftByStudent(db: BalanceLedger): Map<string, number> {
+  // Historique amputé : aucun écart n'est calculable, donc aucun n'est annoncé.
+  if (db.complete === false) return new Map();
 
-  for (const att of db.attendance) add(att.studentId, att.amountDeducted);
-  for (const pen of db.absencePenalties ?? []) add(pen.studentId, pen.amount);
+  const history = new Map<string, number>();
   for (const tx of db.balanceTx) {
-    if (tx.type === "deduction" && tx.amount < 0) add(tx.studentId, tx.amount);
+    history.set(tx.studentId, (history.get(tx.studentId) ?? 0) + tx.amount);
   }
 
-  const gaps = new Map<string, number>();
-  for (const [id, gap] of drift) if (gap > 0) gaps.set(id, gap);
-  return gaps;
-}
-
-export function unbilledChargesOf(studentId: string, db: BillingLedger): number {
-  return unbilledChargesByStudent(db).get(studentId) ?? 0;
+  const drift = new Map<string, number>();
+  for (const s of db.students) {
+    const gap = s.balance - (history.get(s.id) ?? 0);
+    if (gap !== 0) drift.set(s.id, gap);
+  }
+  return drift;
 }
 
 /**

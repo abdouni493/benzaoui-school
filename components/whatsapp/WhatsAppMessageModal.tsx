@@ -18,13 +18,7 @@ import {
   type WhatsAppAudience,
   type WhatsAppTemplateId,
 } from "@/lib/whatsapp/templates";
-import { offlineSentence } from "@/lib/whatsapp/offline";
-import type {
-  OfflineReason,
-  OutgoingMessage,
-  SendResponse,
-  SendResult,
-} from "@/lib/whatsapp/types";
+import type { OutgoingMessage, SendResponse, SendResult } from "@/lib/whatsapp/types";
 import { AlertTriangle, Check, Clock, MessageCircle, Send, X } from "lucide-react";
 
 export interface WhatsAppRecipient {
@@ -186,9 +180,6 @@ export function WhatsAppMessageModal({
     const message: OutgoingMessage = { kind: "text", text: text.trim() };
     const collected: SendResult[] = [];
     const queue = [...chosen];
-    // Ce que le serveur a répondu en dernier sur la cause du blocage : il faut
-    // la retenir hors de la boucle pour la dire dans le bilan final.
-    let offlineReason: OfflineReason | undefined;
 
     try {
       while (queue.length > 0) {
@@ -218,8 +209,7 @@ export function WhatsAppMessageModal({
           return;
         }
 
-        const { results: batchResults, remaining, offline, reason } = payload as SendResponse;
-        if (offline) offlineReason = reason;
+        const { results: batchResults, remaining } = payload as SendResponse;
 
         if (batchResults.length === 0) {
           setError("La passerelle n'a traité aucun destinataire. Réessayer dans un instant.");
@@ -253,12 +243,16 @@ export function WhatsAppMessageModal({
         if (pending > 0) parts.push(`${pending} en attente`);
         if (failed > 0) parts.push(`${failed} en échec`);
 
+        // Un message en attente n'appelle AUCUN geste : il partira tout seul
+        // au retour de la passerelle. On le dit, sans diagnostic — le
+        // diagnostic vit sur le tableau de bord et dans Paramètres → WhatsApp,
+        // pas dans un toast qui s'efface au bout de quelques secondes.
         addToast({
           type: failed > 0 ? "warning" : pending > 0 ? "info" : "success",
           title: "Message WhatsApp",
           message:
             pending > 0
-              ? `${parts.join(", ")}. ${offlineSentence(offlineReason)}`
+              ? `${parts.join(", ")}. Les messages en attente partiront automatiquement.`
               : `${parts.join(", ")}.`,
         });
         // Les échecs restent affichés pour être corrigés ; les messages en
