@@ -6,22 +6,19 @@ import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { ChevronLeft, ChevronRight, Clock } from "lucide-react";
-import type { Day, ScheduleSession } from "@/lib/types";
-import { DAY_LABELS_FR, classCascadeLabel, sessionSalleIds } from "@/lib/helpers";
+import type { ScheduleSession } from "@/lib/types";
+import {
+  DAY_LABELS_FR,
+  classCascadeLabel,
+  dayOfIsoDate,
+  studentName,
+  isoDateOf,
+  sessionSalleIds,
+  sessionsOnDate,
+} from "@/lib/helpers";
+import { birthdaysBySession, type BirthdayEntry } from "@/lib/birthdays";
+import { useTodayBirthdays } from "@/lib/useTodayBirthdays";
 
-const DAY_KEYS: Day[] = [
-  "sunday",
-  "monday",
-  "tuesday",
-  "wednesday",
-  "thursday",
-  "friday",
-  "saturday",
-];
-
-/** YYYY-MM-DD d'une Date, en heure LOCALE (jamais décalé en UTC). */
-const isoOf = (d: Date) => d.toLocaleDateString("fr-CA");
-const dayOfIso = (iso: string): Day => DAY_KEYS[new Date(`${iso}T12:00:00`).getDay()];
 const longDateFr = (iso: string) =>
   new Date(`${iso}T12:00:00`).toLocaleDateString("fr-FR", {
     day: "numeric",
@@ -41,9 +38,18 @@ export function DaySchedulePanel() {
   const { sessions, modules, groups, teachers, salles, classes, filieres, subscriptions, students, attendance } =
     useData();
 
-  const todayIso = isoOf(new Date());
+  const todayIso = isoDateOf(new Date());
   const [date, setDate] = useState<string>(todayIso);
-  const day = dayOfIso(date);
+  const day = dayOfIsoDate(date);
+
+  // Les anniversaires ne se posent QUE sur la journée en cours : un 🎂 sur
+  // l'emploi du temps d'avant-hier ne dit rien à personne, et la demande
+  // portait explicitement sur l'emploi du temps du jour.
+  const { expected: birthdaysToday } = useTodayBirthdays();
+  const birthdaysHere = useMemo<Map<string, BirthdayEntry[]>>(
+    () => (date === todayIso ? birthdaysBySession(birthdaysToday) : new Map()),
+    [date, todayIso, birthdaysToday],
+  );
 
   const moduleName = (id?: string) => modules.find((m) => m.id === id)?.name ?? "Matière";
   const groupName = (id?: string) => groups.find((g) => g.id === id)?.name ?? "—";
@@ -62,17 +68,7 @@ export function DaySchedulePanel() {
     return classCascadeLabel(c, fil) || c.name;
   };
 
-  // Un créneau n'existe ce jour-là que s'il tombe sur ce jour de semaine et,
-  // pour une séance libre, à l'intérieur de sa période de dates.
-  const daySessions = useMemo(
-    () =>
-      sessions
-        .filter((s) => s.days.includes(day))
-        .filter((s) => !s.periodStart || s.periodStart <= date)
-        .filter((s) => !s.periodEnd || s.periodEnd >= date)
-        .sort((a, b) => a.startTime.localeCompare(b.startTime)),
-    [sessions, day, date],
-  );
+  const daySessions = useMemo(() => sessionsOnDate(sessions, date), [sessions, date]);
 
   /** Pointages enregistrés ce jour-là, séance par séance. */
   const markedBySession = useMemo(() => {
@@ -93,7 +89,7 @@ export function DaySchedulePanel() {
   const shiftDate = (days: number) => {
     const d = new Date(`${date}T12:00:00`);
     d.setDate(d.getDate() + days);
-    setDate(isoOf(d));
+    setDate(isoDateOf(d));
   };
 
   const totalMarked = daySessions.reduce((n, s) => n + (markedBySession[s.id] ?? 0), 0);
@@ -151,6 +147,7 @@ export function DaySchedulePanel() {
                   {daySessions.map((s) => {
                     const marked = markedBySession[s.id] ?? 0;
                     const roster = rosterOf(s.id);
+                    const birthdays = birthdaysHere.get(s.id) ?? [];
                     return (
                       <tr key={s.id} className="hover:bg-primary-50/40">
                         <td className="border-b border-line p-2 font-mono font-bold text-primary whitespace-nowrap">
@@ -161,6 +158,22 @@ export function DaySchedulePanel() {
                             {s.isOpen && <span className="me-1">🎯</span>}
                             {s.isOpen ? s.title || `Séance libre — ${moduleName(s.moduleId)}` : moduleName(s.moduleId)}
                           </strong>
+                          {/* Un élève de CETTE séance fête son anniversaire
+                              aujourd'hui : c'est le seul jour où l'info sert. */}
+                          {birthdays.length > 0 && (
+                            <span
+                              className="ms-1.5 inline-flex items-center gap-1 rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-bold text-primary"
+                              title={birthdays
+                                .map((b) =>
+                                  b.age !== null
+                                    ? `${studentName(b.student)} — ${b.age} ans`
+                                    : studentName(b.student),
+                                )
+                                .join(" · ")}
+                            >
+                              🎂 {birthdays.map((b) => b.student.firstName).join(", ")}
+                            </span>
+                          )}
                         </td>
                         <td className="border-b border-line p-2 text-muted">{className(s.classId)}</td>
                         <td className="border-b border-line p-2 text-muted">{groupName(s.groupId)}</td>

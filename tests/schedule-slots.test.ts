@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { scheduleSlots, slotSpan, salleStartClashes, sessionSalleIds, layoutRow } from "@/lib/helpers";
-import type { ScheduleSession } from "@/lib/types";
+import {
+  scheduleSlots,
+  slotSpan,
+  salleStartClashes,
+  sessionSalleIds,
+  sessionsOnDate,
+  rangesOverlap,
+  layoutRow,
+} from "@/lib/helpers";
+import type { Day, ScheduleSession } from "@/lib/types";
 
 // Les colonnes d'un tableau d'emploi du temps sont déduites des séances du jour :
 // toutes les bornes horaires triées, découpées en intervalles consécutifs.
@@ -203,5 +211,55 @@ describe("layoutRow", () => {
       { kind: "free" },
       { kind: "free" },
     ]);
+  });
+});
+
+// Le chevauchement, tel que l'alerte « en conflit d'horaire » le raconte : deux
+// séances qui s'enchaînent ne se chevauchent PAS, deux qui se recouvrent oui.
+
+describe("rangesOverlap", () => {
+  it("two consecutive slots do not overlap", () => {
+    expect(
+      rangesOverlap({ startTime: "08:00", endTime: "09:00" }, { startTime: "09:00", endTime: "10:00" }),
+    ).toBe(false);
+  });
+
+  it("a partial overlap counts, in both directions", () => {
+    const a = { startTime: "08:00", endTime: "10:00" };
+    const b = { startTime: "09:00", endTime: "11:00" };
+    expect(rangesOverlap(a, b)).toBe(true);
+    expect(rangesOverlap(b, a)).toBe(true);
+  });
+
+  it("a slot fully inside another counts", () => {
+    expect(
+      rangesOverlap({ startTime: "08:00", endTime: "12:00" }, { startTime: "09:00", endTime: "10:00" }),
+    ).toBe(true);
+  });
+});
+
+describe("sessionsOnDate", () => {
+  const base = { startTime: "08:00", endTime: "09:00" };
+  const monday = { ...base, id: "lundi", days: ["monday"] as Day[] };
+  const tuesday = { ...base, id: "mardi", days: ["tuesday"] as Day[] };
+
+  it("keeps only the sessions of that weekday, earliest first", () => {
+    const late = { ...monday, id: "tard", startTime: "14:00", endTime: "15:00" };
+    // 2026-09-07 est un lundi.
+    expect(sessionsOnDate([late, monday, tuesday], "2026-09-07").map((s) => s.id)).toEqual([
+      "lundi",
+      "tard",
+    ]);
+  });
+
+  it("drops a séance libre whose date period is over", () => {
+    const expired = { ...monday, id: "libre", periodStart: "2026-01-01", periodEnd: "2026-06-30" };
+    expect(sessionsOnDate([expired], "2026-09-07")).toEqual([]);
+    expect(sessionsOnDate([expired], "2026-06-29").map((s) => s.id)).toEqual(["libre"]);
+  });
+
+  it("counts the last day of the period as still active", () => {
+    const ending = { ...monday, id: "libre", periodEnd: "2026-09-07" };
+    expect(sessionsOnDate([ending], "2026-09-07").map((s) => s.id)).toEqual(["libre"]);
   });
 });

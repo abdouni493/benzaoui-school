@@ -8,13 +8,24 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { ChevronLeft, ChevronRight, Printer, CalendarDays, DoorOpen } from "lucide-react";
-import type { Day, ScheduleSession } from "@/lib/types";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Printer,
+  CalendarDays,
+  DoorOpen,
+  AlertTriangle,
+} from "lucide-react";
+import type { ScheduleSession, Salle } from "@/lib/types";
 import {
   DAY_LABELS_FR,
   classCascadeLabel,
+  dayOfIsoDate,
+  isoDateOf,
   layoutRow,
+  rangesOverlap,
   scheduleSlots,
+  sessionsOnDate,
   slotSpan,
   sessionSalleIds,
   type TimeSlot,
@@ -26,22 +37,6 @@ import {
   bannerHtml,
   metaFooterHtml,
 } from "@/lib/printTemplates";
-
-const DAY_KEYS: Day[] = [
-  "sunday",
-  "monday",
-  "tuesday",
-  "wednesday",
-  "thursday",
-  "friday",
-  "saturday",
-];
-
-/** YYYY-MM-DD d'une Date, en heure LOCALE (jamais décalé en UTC). */
-const isoOf = (d: Date) => d.toLocaleDateString("fr-CA");
-
-/** Le jour de la semaine d'une date ISO, sans piège de fuseau. */
-const dayOfIso = (iso: string): Day => DAY_KEYS[new Date(`${iso}T12:00:00`).getDay()];
 
 const longDateFr = (iso: string) =>
   new Date(`${iso}T12:00:00`).toLocaleDateString("fr-FR", {
@@ -82,10 +77,13 @@ export function RoomsPage() {
     useData();
   const { language } = useSettings();
 
-  const [date, setDate] = useState<string>(() => isoOf(new Date()));
+  const [date, setDate] = useState<string>(() => isoDateOf(new Date()));
   const [selected, setSelected] = useState<ScheduleSession | null>(null);
+  // La salle dont on veut lire l'emploi du temps complet — celle d'une alerte
+  // de conflit sur laquelle on vient de cliquer.
+  const [conflictSalleId, setConflictSalleId] = useState<string | null>(null);
 
-  const day = dayOfIso(date);
+  const day = dayOfIsoDate(date);
 
   // ---- Noms ----------------------------------------------------------------
   const moduleName = (id?: string) => modules.find((m) => m.id === id)?.name ?? "Matière";
@@ -116,15 +114,7 @@ export function RoomsPage() {
   // ---- Les séances réellement posées ce jour-là ----------------------------
   // Un créneau n'existe ce jour que s'il est programmé sur ce jour de semaine
   // ET, pour une séance libre, à l'intérieur de sa période de dates.
-  const daySessions = useMemo(
-    () =>
-      sessions
-        .filter((s) => s.days.includes(day))
-        .filter((s) => !s.periodStart || s.periodStart <= date)
-        .filter((s) => !s.periodEnd || s.periodEnd >= date)
-        .sort((a, b) => a.startTime.localeCompare(b.startTime)),
-    [sessions, day, date],
-  );
+  const daySessions = useMemo(() => sessionsOnDate(sessions, date), [sessions, date]);
 
   const slots: TimeSlot[] = useMemo(() => scheduleSlots(daySessions), [daySessions]);
 
@@ -160,13 +150,93 @@ export function RoomsPage() {
     ];
   }, [salles, daySessions, slots, usedSalleIds]);
 
+  /**
+   * L'EMPLOI DU TEMPS COMPLET D'UNE SALLE, derrière l'alerte de conflit.
+   *
+   * La grille ne peut afficher qu'une séance à la fois sur une colonne : la
+   * seconde était donc comptée (« ⚠ 1 en conflit d'horaire ») sans jamais être
+   * montrée. On sait qu'il y a un problème, pas lequel, ni avec quoi.
+   *
+   * Cette vue rend la journée entière de la salle, en clair : chaque séance,
+   * celles que la grille affiche comme celles qu'elle a dû écarter, et pour
+   * chacune les créneaux qu'elle chevauche vraiment.
+   */
+  const conflictView = useMemo(() => {
+    if (!conflictSalleId) return null;
+    const row = rows.find((r) => r.salle.id === conflictSalleId);
+    if (!row) return null;
+
+    const shownIds = new Set(
+      row.cells
+        .filter((c) => c.kind === "item")
+        .map((c) => (c as { item: ScheduleSession }).item.id),
+    );
+    const all = row.placed.map((pl) => pl.item);
+    const list = [...all]
+      .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.endTime.localeCompare(b.endTime))
+      .map((item) => ({
+        item,
+        /** écartée de la grille : c'est elle que l'alerte comptait */
+        hidden: !shownIds.has(item.id),
+        /** les autres séances de la salle qui occupent le même temps */
+        clashes: all.filter((o) => o.id !== item.id && rangesOverlap(o, item)),
+      }));
+
+    return { salle: row.salle, list, clashing: list.filter((r) => r.clashes.length > 0).length };
+  }, [conflictSalleId, rows]);
+
+  /** L'emploi du temps de la salle en conflit, sur papier — de quoi arbitrer à
+   *  plusieurs, loin de l'écran. */
+  const printConflict = (salle: Salle, list: { item: ScheduleSession; hidden: boolean; clashes: ScheduleSession[] }[]) => {
+    const body = list
+      .map(
+        (row) => `<tr>
+             <td>${row.item.startTime} - ${row.item.endTime}</td>
+             <td>${sessionTitle(row.item)}</td>
+             <td>${className(row.item.classId)} · ${groupName(row.item.groupId)}</td>
+             <td>${teacherName(row.item.teacherId)}</td>
+             <td>${
+               row.clashes.length === 0
+                 ? "-"
+                 : row.clashes
+                     .map((c) => `${sessionTitle(c)} (${c.startTime}-${c.endTime})`)
+                     .join("<br/>")
+             }</td>
+           </tr>`,
+      )
+      .join("");
+
+    const bodyHtml = `
+      ${letterheadHtml(school)}
+      ${bannerHtml(`Conflits d'horaire — ${salle.name}`, longDateFr(date))}
+      <div class="frame">
+        <table>
+          <thead>
+            <tr><th>Horaire</th><th>Séance</th><th>Classe · Groupe</th><th>Enseignant</th><th>Chevauche</th></tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+      ${metaFooterHtml(school.name, language)}
+    `;
+
+    printHtmlDocument(
+      printDocument({
+        title: `Conflits - ${salle.name} - ${date}`,
+        lang: language,
+        bodyHtml,
+        extraCss: "table { font-size: .8em; }",
+      }),
+    );
+  };
+
   const shiftDate = (days: number) => {
     const d = new Date(`${date}T12:00:00`);
     d.setDate(d.getDate() + days);
-    setDate(isoOf(d));
+    setDate(isoDateOf(d));
   };
 
-  const todayIso = isoOf(new Date());
+  const todayIso = isoDateOf(new Date());
 
   // ---- Impression ----------------------------------------------------------
   // Le même tableau, avec les mêmes fusions de colonnes, en document A4 paysage.
@@ -361,14 +431,19 @@ export function RoomsPage() {
                               grille n'en montre qu'un, l'autre est signalé ici
                               plutôt que de disparaître en silence. */}
                           {overlapping.length > 0 && (
-                            <span
-                              className="mt-1 block text-[10px] font-bold text-danger"
+                            <button
+                              type="button"
+                              onClick={() => setConflictSalleId(salle.id)}
+                              className="mt-1 block w-full rounded-lg border border-danger/25 bg-danger/10 px-1.5 py-1 text-start text-[10px] font-bold text-danger transition-colors hover:bg-danger/20"
                               title={overlapping
                                 .map((s) => `${sessionTitle(s)} (${s.startTime}-${s.endTime})`)
                                 .join(" · ")}
                             >
                               ⚠ {overlapping.length} en conflit d&apos;horaire
-                            </span>
+                              <span className="mt-0.5 block font-semibold underline">
+                                Voir l&apos;emploi du temps
+                              </span>
+                            </button>
                           )}
                         </th>
                         {cells}
@@ -381,6 +456,116 @@ export function RoomsPage() {
           </CardBody>
         </Card>
       )}
+
+      {/* L'EMPLOI DU TEMPS DE LA SALLE EN CONFLIT.
+          L'alerte ⚠ ne faisait que COMPTER les séances que la grille avait dû
+          écarter ; ici on les lit, avec ce qu'elles chevauchent. */}
+      <Modal
+        open={!!conflictView}
+        onClose={() => setConflictSalleId(null)}
+        size="lg"
+        title={conflictView ? `Conflit d'horaire — ${conflictView.salle.name}` : ""}
+        subtitle={
+          conflictView
+            ? `${DAY_LABELS_FR[day]} ${longDateFr(date)} · ${conflictView.list.length} séance(s) dans cette salle, ${conflictView.clashing} en chevauchement`
+            : undefined
+        }
+        footer={
+          conflictView && (
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => printConflict(conflictView.salle, conflictView.list)}
+              >
+                <Printer className="h-3.5 w-3.5" /> Imprimer
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setConflictSalleId(null)}>
+                Fermer
+              </Button>
+            </div>
+          )
+        }
+      >
+        {conflictView && (
+          <div className="space-y-3 text-xs">
+            <div className="flex items-start gap-2 rounded-xl border border-danger/25 bg-danger/10 p-2.5 text-[11px] text-ink">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
+              <span>
+                Une salle ne peut porter qu&apos;une séance à la fois sur la grille : celles
+                marquées <strong className="text-danger">masquée</strong> existent bel et bien à
+                l&apos;emploi du temps, mais le tableau n&apos;avait aucune colonne libre pour les
+                poser. Rien n&apos;est supprimé — c&apos;est l&apos;emploi du temps qu&apos;il faut
+                arbitrer, depuis le Planner.
+              </span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[620px] border-collapse text-xs">
+                <thead>
+                  <tr className="bg-canvas/50 text-[10px] uppercase tracking-wider text-muted">
+                    <th className="border-b border-line p-2 text-start font-bold">Horaire</th>
+                    <th className="border-b border-line p-2 text-start font-bold">Séance</th>
+                    <th className="border-b border-line p-2 text-start font-bold">Classe · Groupe</th>
+                    <th className="border-b border-line p-2 text-start font-bold">Enseignant</th>
+                    <th className="border-b border-line p-2 text-start font-bold">Chevauche</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {conflictView.list.map(({ item, hidden, clashes }) => (
+                    <tr
+                      key={item.id}
+                      className={clashes.length > 0 ? "bg-danger/5" : "hover:bg-primary-50/40"}
+                    >
+                      <td className="border-b border-line p-2 font-mono font-bold text-primary whitespace-nowrap">
+                        {item.startTime} - {item.endTime}
+                      </td>
+                      <td className="border-b border-line p-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelected(item);
+                            setConflictSalleId(null);
+                          }}
+                          className="text-start font-bold text-ink underline-offset-2 hover:underline"
+                        >
+                          {item.isOpen && <span className="me-1">🎯</span>}
+                          {sessionTitle(item)}
+                        </button>
+                        {hidden && (
+                          <Badge tone="danger" className="ms-1.5 text-[9px]">
+                            masquée sur la grille
+                          </Badge>
+                        )}
+                      </td>
+                      <td className="border-b border-line p-2 text-muted">
+                        {className(item.classId)} · {groupName(item.groupId)}
+                      </td>
+                      <td className="border-b border-line p-2 text-muted">
+                        {teacherName(item.teacherId)}
+                      </td>
+                      <td className="border-b border-line p-2 text-muted">
+                        {clashes.length === 0 ? (
+                          <span className="text-success">—</span>
+                        ) : (
+                          clashes.map((c) => (
+                            <span key={c.id} className="block">
+                              {sessionTitle(c)}{" "}
+                              <span className="font-mono text-[10px]">
+                                ({c.startTime}-{c.endTime})
+                              </span>
+                            </span>
+                          ))
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {/* Détail d'une séance — le même contenu que la carte, en entier. */}
       <Modal

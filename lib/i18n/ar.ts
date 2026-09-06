@@ -35,6 +35,8 @@ export const ar: Dictionary = {
     planner: "المخطط",
     subscriptions: "الاشتراكات",
     students: "الطلاب",
+
+    birthdays: "أعياد الميلاد",
     attendance: "الحضور",
     teachers: "الأساتذة",
     subjects: "المواضيع والتمارين",

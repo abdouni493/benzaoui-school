@@ -8,6 +8,7 @@ import { TeacherPages } from "@/components/pages/TeacherPages";
 import { DaySchedulePanel } from "@/components/schedule/DaySchedulePanel";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import { WhatsAppAlertsCard } from "@/components/whatsapp/WhatsAppAlertsCard";
+import { BirthdayAlertsCard } from "@/components/birthdays/BirthdayAlertsCard";
 import { balanceDriftByStudent, studentDebtOf } from "@/lib/helpers";
 import { motion } from "framer-motion";
 import {
@@ -301,6 +302,14 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
           ))}
         </motion.div>
       )}
+
+      {/* Les anniversaires du jour. L'alerte ne parle QUE de l'emploi du temps
+          d'AUJOURD'HUI : un élève fêté qui n'a pas cours ne se croise nulle
+          part, il attend sur la page Anniversaires. Rien ne s'affiche les jours
+          sans anniversaire. */}
+      <motion.div variants={itemVariants}>
+        <BirthdayAlertsCard />
+      </motion.div>
 
       {/* Les alertes de solde préparées par les badges. C'est ICI, et nulle part
           ailleurs, qu'on en parle : elles s'affichaient avant en bandeau fixe au

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { NAV_BY_ROLE, type NavItem } from "@/lib/nav";
 import { useSession } from "@/lib/store/session";
 import { useData } from "@/lib/store/data";
+import { useTodayBirthdays } from "@/lib/useTodayBirthdays";
 import { useTranslation } from "@/lib/i18n/useTranslation";
 import { cn } from "@/lib/utils";
 
@@ -19,9 +20,17 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
   const user = useSession((s) => s.user);
   const logout = useSession((s) => s.logout);
   const school = useData((s) => s.school);
+  // La pastille 🎂 du menu : les élèves fêtés QUI ONT COURS aujourd'hui. Le
+  // même compte que l'alerte du tableau de bord — un chiffre qui diffère d'un
+  // écran à l'autre ne serait plus cru sur aucun des deux.
+  const { expected: birthdaysToday } = useTodayBirthdays();
 
   const role = user?.role ?? "admin";
   const items = NAV_BY_ROLE[role];
+
+  /** Ce qu'une entrée de menu annonce sans qu'on l'ouvre. */
+  const badgeOf = (item: NavItem): number =>
+    item.key === "birthdays" ? birthdaysToday.length : 0;
 
   const handleClick = (item: NavItem) => {
     if (item.action === "logout") {
@@ -57,10 +66,22 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
       <nav className="flex-1 space-y-1 overflow-y-auto px-3 py-4">
         {items.map((item) => {
           const active = item.action !== "logout" && isActive(pathname, item.href);
+          const badge = badgeOf(item);
           const content = (
             <>
               <span className="text-lg leading-none">{item.emoji}</span>
               <span className="truncate">{t(`nav.${item.key}`)}</span>
+              {badge > 0 && (
+                <span
+                  title={`${badge} élève(s) fêtent leur anniversaire aujourd'hui et ont cours`}
+                  className={cn(
+                    "ms-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-black",
+                    active ? "bg-white/25 text-white" : "bg-primary text-white",
+                  )}
+                >
+                  {badge}
+                </span>
+              )}
             </>
           );
 

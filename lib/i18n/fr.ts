@@ -33,6 +33,8 @@ export const fr = {
     planner: "Planner",
     subscriptions: "Abonnements",
     students: "Étudiants",
+
+    birthdays: "Anniversaires",
     attendance: "Présence",
     teachers: "Enseignants",
     subjects: "Sujets & Exercices",

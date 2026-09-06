@@ -738,6 +738,59 @@ export function sessionSalleIds(session: Pick<ScheduleSession, "isOpen" | "salle
   return ids.filter(Boolean) as string[];
 }
 
+/** Deux créneaux se recouvrent-ils dans le temps ? Les bornes ne comptent pas :
+ *  08:00-09:00 et 09:00-10:00 s'enchaînent, ils ne se chevauchent pas. */
+export function rangesOverlap(a: TimeRange, b: TimeRange): boolean {
+  return (
+    timeToMinutes(a.startTime) < timeToMinutes(b.endTime) &&
+    timeToMinutes(b.startTime) < timeToMinutes(a.endTime)
+  );
+}
+
+// ---- Le calendrier d'une journée ---------------------------------------------
+// Trois écrans posent la même question — « quelles séances ce jour-là ? » — et
+// la posaient chacun avec leur propre copie de la règle. Elle vit ici, une
+// seule fois : une alerte d'anniversaire doit désigner EXACTEMENT les séances
+// que l'emploi du temps affiche, sinon elle annonce un élève que le tableau ne
+// montre pas.
+
+/** L'ordre de `Date.getDay()` — dimanche en tête. À ne pas confondre avec
+ *  `DAYS`, qui porte l'ordre de la semaine scolaire (samedi en tête). */
+export const JS_DAY_KEYS: Day[] = [
+  "sunday",
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+];
+
+/** YYYY-MM-DD d'une Date, en heure LOCALE (jamais décalé en UTC). */
+export const isoDateOf = (d: Date): string => d.toLocaleDateString("fr-CA");
+
+/** Le jour de semaine d'une date ISO, sans piège de fuseau : la date est lue à
+ *  midi, l'heure qu'aucun décalage ne fait changer de jour. */
+export const dayOfIsoDate = (iso: string): Day =>
+  JS_DAY_KEYS[new Date(`${iso}T12:00:00`).getDay()];
+
+/**
+ * Les créneaux réellement posés une date donnée, triés par heure de début.
+ *
+ * Un créneau n'existe ce jour-là que s'il tombe sur ce jour de SEMAINE et,
+ * pour une séance libre, à l'intérieur de sa période de dates.
+ */
+export function sessionsOnDate<
+  T extends TimeRange & Pick<ScheduleSession, "days" | "periodStart" | "periodEnd">,
+>(sessions: T[], iso: string): T[] {
+  const day = dayOfIsoDate(iso);
+  return sessions
+    .filter((s) => s.days.includes(day))
+    .filter((s) => !s.periodStart || s.periodStart <= iso)
+    .filter((s) => !s.periodEnd || s.periodEnd >= iso)
+    .sort((a, b) => a.startTime.localeCompare(b.startTime));
+}
+
 /**
  * Créneaux DÉJÀ posés qui entrent en collision avec celui qu'on est en train de
  * créer : même salle, un jour en commun, et la même heure de début. Sert à

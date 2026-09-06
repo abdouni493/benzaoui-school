@@ -7,6 +7,7 @@ import { TimetablesPage } from "@/components/pages/TimetablesPage";
 import { RoomsPage } from "@/components/pages/RoomsPage";
 import { SubscriptionsPage } from "@/components/pages/SubscriptionsPage";
 import { StudentsPage } from "@/components/pages/StudentsPage";
+import { BirthdaysPage } from "@/components/pages/BirthdaysPage";
 import { AttendancePage } from "@/components/pages/AttendancePage";
 import { TeachersPage } from "@/components/pages/TeachersPage";
 import { SubjectsPage } from "@/components/pages/SubjectsPage";
@@ -62,6 +63,8 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
       return <SubscriptionsPage />;
     case "students":
       return <StudentsPage />;
+    case "birthdays":
+      return <BirthdaysPage />;
     case "attendance":
       return <AttendancePage />;
     case "teachers":
