@@ -1107,12 +1107,13 @@ export function StudentsPage() {
     } else {
       const failureMsgs: Record<string, string> = {
         "scan.noSession": "Aucune séance programmée à cette heure.",
-        "scan.noSessionToday": "Aucune séance de son niveau/module aujourd'hui.",
+        "scan.noSessionToday": "Aucune séance de SON emploi du temps aujourd'hui.",
         "scan.noSessionNow": "Ce n'est pas l'heure de la séance de cet élève.",
         "scan.tooEarly": `Trop tôt — la séance n'a pas encore commencé.${res.nextStart ? ` Prochaine séance à ${res.nextStart}.` : ""}`,
         "scan.sessionEnded": "Séance déjà terminée — scan refusé, l'élève reste absent.",
         "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui.",
-        "scan.notEligible": "La séance en cours est d'un autre niveau ou d'un module non affecté à cet élève.",
+        "scan.notEligible":
+          "La séance en cours n'est pas dans l'emploi du temps de cet élève — un cours n'accepte que ses propres inscrits.",
         "scan.expired": "Solde épuisé — entrée refusée (aucune présence, aucune dette créée).",
         "scan.debtBlocked": "Élève EN DETTE — entrée refusée. Veuillez régler la dette.",
         "scan.notFound": `Aucun élève ni travailleur ne porte la carte « ${code} ». Vérifiez le code sur sa fiche.`,

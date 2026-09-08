@@ -37,6 +37,7 @@ import {
   isRollCallOpen as isRollCallOpenFor,
   type RollCallPolicy,
 } from "@/lib/helpers";
+import { canAttendSession } from "@/lib/seanceAudience";
 import { printHtmlDocument } from "@/lib/print";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 
@@ -46,7 +47,8 @@ const MARK_FAILURE_MESSAGES: Record<string, string> = {
   // présence est TOUJOURS facturée, dette comprise, comme au badge.
   "scan.debtBlocked":
     "Élève en DETTE — présence refusée par la base. Exécutez la dernière migration : une présence doit désormais toujours être débitée, quitte à creuser la dette.",
-  "attendance.notEnrolled": "L'élève n'est pas inscrit à cette séance (ou son abonnement a expiré).",
+  "attendance.notEnrolled":
+    "Ce créneau n'est pas dans l'emploi du temps de cet élève — ou son abonnement a expiré. Un cours ordinaire n'accepte que ses propres inscrits : ni un autre groupe du même cours, ni une autre classe de la même année et de la même filière.",
   "attendance.notScheduledThatDay": "Cette séance n'est pas programmée ce jour-là.",
   "attendance.sessionNotFound": "Séance introuvable.",
   "scan.notFound": "Élève introuvable.",
@@ -306,9 +308,14 @@ export function AttendancePage() {
   /** Message de verrouillage de la séance affichée (undefined = pointage ouvert). */
   const rollCallLock = rollCallLockOf(activeSession);
 
-  // Students on this séance: the ones enrolled in it, PLUS the ones of another
-  // group of the same cours who came to this one (rattrapage) — their badge is
-  // accepted, so the roll-call must show them too.
+  // Les élèves de la feuille : ceux qui sont INSCRITS sur le créneau, plus ceux
+  // qui y ont déjà une présence ce jour-là sans y être inscrits.
+  //
+  // Sur une SÉANCE LIBRE, ce second lot est normal et le restera : le public de
+  // la séance (promotion, filière) et les passagers y badgent sans inscription.
+  // Sur un COURS ORDINAIRE, plus personne ne peut s'y ajouter désormais — mais
+  // les présences prises avant la règle restent affichées, sinon la réception
+  // ne pourrait plus les corriger depuis cet écran.
   const getSessionStudents = (sesId: string) => {
     const subIds = subscriptions.filter((su) => su.sessionId === sesId).map((su) => su.id);
     const enrolled = students.filter((stu) => stu.subscriptionIds.some((id) => subIds.includes(id)));
@@ -326,8 +333,9 @@ export function AttendancePage() {
     return [...enrolled, ...students.filter((s) => visitorIds.has(s.id))];
   };
 
-  /** True when the student follows this séance from another group of the same
-   *  cours (his own subscription points at a sibling timing). */
+  /** L'élève est-il sur cette feuille sans y être inscrit ? Sur une séance
+   *  libre c'est le cas ordinaire (rattrapage, promotion, passager) ; sur un
+   *  cours c'est désormais une présence héritée, antérieure à la règle. */
   const isVisitingStudent = (stu: Student, sesId: string) => {
     const subIds = subscriptions.filter((su) => su.sessionId === sesId).map((su) => su.id);
     return !stu.subscriptionIds.some((id) => subIds.includes(id));
@@ -394,6 +402,29 @@ export function AttendancePage() {
       if (!existing) return; // already absent (default state)
       setConfirmMark({ student: stu, status: "absent" });
       return;
+    }
+
+    // Chacun sur son emploi du temps : le même verdict que le badge, rendu ici
+    // pour que la réception lise le motif tout de suite au lieu de découvrir un
+    // refus du serveur. Une présence héritée (`existing`) reste modifiable :
+    // c'est le seul écran d'où elle peut être corrigée.
+    if (!existing) {
+      const verdict = canAttendSession({
+        session: activeSession,
+        student: stu,
+        sessions,
+        subscriptions,
+        classes,
+      });
+      if (!verdict.allowed) {
+        addToast({
+          type: "danger",
+          title: "Présence refusée",
+          message: verdict.reason ?? "Cet élève n'a pas cours sur ce créneau.",
+          studentName: `${stu.firstName} ${stu.lastName}`,
+        });
+        return;
+      }
     }
 
     if (existing) {
@@ -1199,7 +1230,14 @@ export function AttendancePage() {
                                     {isFree && <Badge tone="success" className="text-[8px] py-0">Gratuit</Badge>}{" "}
                                     {inDebt && <Badge tone="danger" className="text-[8px] py-0">DETTE</Badge>}{" "}
                                     {isVisitingStudent(stu, activeSession.id) && (
-                                      <Badge tone="primary" className="text-[8px] py-0">Rattrapage — autre groupe</Badge>
+                                      <Badge
+                                        tone={activeSession.isOpen ? "primary" : "warning"}
+                                        className="text-[8px] py-0"
+                                      >
+                                        {activeSession.isOpen
+                                          ? "Rattrapage — autre groupe"
+                                          : "Hors de son emploi du temps"}
+                                      </Badge>
                                     )}{" "}
                                     {pendingStart && (
                                       <Badge tone="success" className="text-[8px] py-0">

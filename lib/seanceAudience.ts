@@ -11,19 +11,22 @@
  *     réglage courant, et il suffit à laisser badger toute la promotion ;
  *   · "filiere"  — en plus, toutes les années de la filière.
  *
- * CE QUE « JUMELLE » VEUT DIRE DÉPEND DU CRÉNEAU :
+ * CETTE NOTION DE PUBLIC NE VAUT QUE POUR LES SÉANCES LIBRES.
  *
- *   · SÉANCE LIBRE (`isOpen`) — même niveau et MÊME ANNÉE, la filière ne
- *     compte pas. Une séance libre est ouverte à toute la promotion : deux
- *     élèves de 3AS, l'un en sciences l'autre en lettres, y badgent tous les
- *     deux.
- *   · COURS ORDINAIRE — même niveau, MÊME ANNÉE ET MÊME FILIÈRE. Un emploi du
- *     temps programmé pour les 3AS sciences n'accepte que des 3AS sciences.
+ *   · SÉANCE LIBRE (`isOpen`) — les classes jumelles sont celles de même
+ *     niveau et de MÊME ANNÉE, la filière ne compte pas. Une séance libre est
+ *     ouverte à toute la promotion : deux élèves de 3AS, l'un en sciences
+ *     l'autre en lettres, y badgent tous les deux.
+ *   · COURS ORDINAIRE — AUCUN PUBLIC. Le créneau n'admet QUE ses propres
+ *     inscrits : chacun sur son emploi du temps, et sur aucun autre — pas
+ *     même un autre groupe du même cours, pas même une autre classe de sa
+ *     propre année et de sa propre filière. C'est `studentSessionRank` qui le
+ *     dit ici, et `student_session_rank` qui le dit côté base.
  *
  * "enrolled" est inclus dans "filiere" : élargir le public n'enlève jamais
  * personne. Un créneau de séance libre sans réglage explicite est traité comme
  * "enrolled" — le guichet et le badge doivent dire la même chose, et le badge
- * (`student_session_rank`) a toujours contrôlé la classe.
+ * (`student_session_rank`) contrôle la classe sur les séances libres.
  *
  * Le GROUPE ne restreint plus rien. Il décrit le créneau ; il ne décidait de
  * personne d'utile, et fermait la porte à des élèves de la classe visée qui
@@ -134,7 +137,12 @@ export function classPeerIds(
     .map((c) => c.id);
 }
 
-/** Les classes admises sur un créneau, réglage de public compris. */
+/** Les classes admises sur un créneau, réglage de public compris.
+ *
+ *  N'a de sens que pour une SÉANCE LIBRE : un cours ordinaire n'admet plus
+ *  personne par sa classe. La fonction reste définie pour tout créneau — les
+ *  écrans s'en servent pour AFFICHER qui un emploi du temps concerne —, mais
+ *  seul `studentSessionRank` décide qui entre. */
 export function sessionAudienceClassIds(
   session: ScheduleSession,
   classes: SchoolClass[],
@@ -155,6 +163,66 @@ export function sessionAudienceClassIds(
       ...classes.filter((c) => c.filiereId && filiereIds.has(c.filiereId)).map((c) => c.id),
     ]),
   ];
+}
+
+/** Le rang d'un élève sur un créneau — miroir exact de la fonction SQL
+ *  `student_session_rank`, qui est LA porte : `scan_card` la consulte pour
+ *  accepter la carte, `mark_attendance` pour accepter une présence saisie à la
+ *  main.
+ *
+ *    0 — inscrit sur CE créneau ;
+ *    1 — inscrit au même cours dans un autre groupe (rattrapage) ;
+ *    2 — rattaché à une classe du public du créneau ;
+ *    undefined — rien à faire là.
+ *
+ *  UN COURS ORDINAIRE S'ARRÊTE AU RANG 0 : chacun sur son emploi du temps, et
+ *  sur aucun autre — pas même celui de sa classe, de son année et de sa
+ *  filière. Les rangs 1 et 2 n'existent plus que sur une SÉANCE LIBRE, où ils
+ *  gardent exactement le sens qu'ils avaient.
+ *
+ *  Une seule chose échappe à ce miroir : l'EXPIRATION de l'abonnement, que la
+ *  fiche élève ne porte pas côté écran. Le serveur, lui, la contrôle — il peut
+ *  donc refuser ce que cette fonction accepte, jamais l'inverse. */
+export function studentSessionRank(input: AudienceCheckInput): 0 | 1 | 2 | undefined {
+  const { session, student, sessions, subscriptions, classes } = input;
+  const enrolled = enrolledSessionsOf(student, sessions, subscriptions);
+
+  // Rang 0 — inscrit sur CE créneau.
+  if (enrolled.some((s) => s.id === session.id)) return 0;
+
+  // Cours ordinaire : la lecture s'arrête ici.
+  if (!session.isOpen) return undefined;
+
+  // Rang 1 — même cours, même classe, autre groupe.
+  if (enrolled.some((s) => s.moduleId === session.moduleId && s.classId === session.classId)) {
+    return 1;
+  }
+
+  // Rang 2 — une classe de l'élève figure dans le public de la séance libre.
+  const admitted = new Set(sessionAudienceClassIds(session, classes));
+  if (studentClassIds(student, sessions, subscriptions).some((id) => admitted.has(id))) {
+    return 2;
+  }
+
+  return undefined;
+}
+
+/**
+ * Cet élève peut-il être pointé — au badge ou à la main — sur ce créneau ?
+ *
+ * Miroir de la clause d'éligibilité de `scan_card` (« le rang n'est pas NULL »)
+ * et du refus `attendance.notEnrolled` de `mark_attendance`. Refuser est une
+ * décision de guichet : le motif rendu est la phrase que la réception lira.
+ */
+export function canAttendSession(input: AudienceCheckInput): AudienceVerdict {
+  if (studentSessionRank(input) !== undefined) return { allowed: true };
+
+  return {
+    allowed: false,
+    reason: input.session.isOpen
+      ? "Cette séance libre est réservée à son public : cet élève n'en fait pas partie."
+      : "Ce créneau n'est pas dans l'emploi du temps de cet élève. Un cours ordinaire n'accepte que ses propres inscrits — ni un autre groupe du même cours, ni une autre classe de la même année et de la même filière.",
+  };
 }
 
 /** Le public d'un créneau, ou undefined pour un cours ordinaire (le guichet

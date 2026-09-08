@@ -561,7 +561,8 @@ function TeacherAttendanceView({
       const res = await markAttendance(student.id, session.id, status);
       if (!res.ok) {
         const reasons: Record<string, string> = {
-          "attendance.notEnrolled": "Cet élève n'est pas inscrit sur ce créneau.",
+          "attendance.notEnrolled":
+            "Cet élève n'est pas inscrit sur ce créneau — un cours n'accepte que ses propres inscrits.",
           "attendance.notScheduledThatDay": "Cette séance n'a pas lieu aujourd'hui.",
           "attendance.sessionNotFound": "Créneau introuvable.",
           "scan.debtBlocked": "Solde insuffisant — la réception doit régler la dette d'abord.",

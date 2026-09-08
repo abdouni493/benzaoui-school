@@ -320,12 +320,13 @@ export function useScanProcessor() {
         // debt / expired subscription / unknown card).
         const failureMessages: Record<string, string> = {
           "scan.notFound": "Carte RFID introuvable ou non associée.",
-          "scan.noSessionToday": "Aucune séance de son niveau/module aujourd'hui — carte refusée.",
+          "scan.noSessionToday": "Aucune séance de SON emploi du temps aujourd'hui — carte refusée.",
           "scan.noSessionNow": "Ce n'est pas l'heure de la séance de cet élève.",
           "scan.tooEarly": `Trop tôt — la séance n'a pas encore commencé.${result.nextStart ? ` Prochaine séance à ${result.nextStart}.` : ""}`,
           "scan.sessionEnded": "Séance déjà terminée — scan refusé, l'élève est compté ABSENT.",
           "scan.subscriptionExpired": "Abonnement expiré pour la séance d'aujourd'hui — carte refusée.",
-          "scan.notEligible": "La séance en cours est d'un autre niveau ou d'un module non affecté à cet élève — carte refusée.",
+          "scan.notEligible":
+            "La séance en cours n'est pas dans l'emploi du temps de cet élève — carte refusée. Un cours n'accepte que ses propres inscrits, même venus d'un autre groupe de sa classe.",
           "scan.expired": `Solde épuisé${result.balance !== undefined ? ` (${formatDA(result.balance)})` : ""} — entrée refusée. Aucune présence ni dette enregistrée : la dette ne peut être créée que manuellement depuis l'écran Présences.`,
           "scan.debtBlocked": `Élève EN DETTE${result.balance !== undefined ? ` (${formatDA(result.balance)})` : ""} — entrée refusée. Veuillez régler la dette à la caisse.`,
           "scan.noSession": "Aucune séance active trouvée pour cet élève en ce moment.",
