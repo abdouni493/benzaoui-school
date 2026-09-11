@@ -114,6 +114,9 @@ export interface Teacher {
   /** "enseignant passager": intervenant sans compte de connexion, réglé
    *  créneau par créneau depuis la fiche enseignant */
   isPassager?: boolean;
+  /** de quoi se rappeler qui est ce passager (spécialité, provenance,
+   *  disponibilités) — sans ce champ, tout finissait dans le nom */
+  description?: string;
 }
 
 /** One settlement written for a teacher (fixed amount or percentage-based). */
@@ -165,9 +168,24 @@ export interface ReceptionStaff {
   rfid?: string;
   /** paymentType === "hourly": price of one worked hour */
   hourlyRate?: number;
+  /** the days this worker is expected — an absence is only ever counted on
+   *  one of them, so a Friday off never turns into an unjustified absence */
+  workDays?: Day[];
+  /** expected clock-in / clock-out ("HH:mm"), used to flag a late arrival */
+  dailyStart?: string;
+  dailyEnd?: string;
+  /** poste / fonction précise ("Agent d'accueil du soir"…) */
+  jobTitle?: string;
+  /** how many days before the due date the payment alert starts */
+  payAlertDays?: number;
 }
 
-/** One worked day of an hourly worker (clock-in / clock-out). */
+/** How a worked day got into the register. */
+export type WorkerShiftSource = "scan" | "manual" | "auto";
+/** Présent (pointé ou saisi) ou absent (constaté, ou relevé automatiquement). */
+export type WorkerShiftStatus = "present" | "absent";
+
+/** One day of a worker: badge swipes, manual entry, or an absence. */
 export interface WorkerShift {
   id: string;
   workerId: string;
@@ -180,6 +198,44 @@ export interface WorkerShift {
   paid: boolean;
   paymentId?: string;
   createdAt: string;
+  /** présent ou absent — une absence n'a ni arrivée ni sortie */
+  status?: WorkerShiftStatus;
+  /** badge, saisie manuelle de la réception, ou relevé automatique du soir */
+  source?: WorkerShiftSource;
+  /** motif d'une absence, correction d'un pointage… */
+  notes?: string;
+}
+
+/** One settlement written for a worker — the register the old screen lacked.
+ *  Without it, "is this month paid?" was answered by searching the cashier's
+ *  free-text descriptions, which a renamed worker or a typo silently broke. */
+export interface WorkerPayment {
+  id: string;
+  workerId: string;
+  amount: number;
+  /** the contract the settlement was computed on */
+  method: ReceptionPaymentType;
+  periodStart?: string;
+  periodEnd?: string;
+  /** "09/2026" for a month, "2026-09-12" for a day — what makes it unique */
+  periodKey: string;
+  daysCount: number;
+  minutes: number;
+  description: string;
+  /** frozen snapshot of the settled days, so the receipt can be reprinted */
+  details: WorkerPaymentDetail[];
+  paidAt: string;
+  cashTxId?: string;
+}
+
+export interface WorkerPaymentDetail {
+  workDate: string;
+  startAt?: string;
+  endAt?: string;
+  minutes: number;
+  status: WorkerShiftStatus;
+  source: WorkerShiftSource;
+  amount: number;
 }
 
 /**
@@ -221,6 +277,20 @@ export interface ScheduleSession {
    * Only meaningful when `isOpen` is true.
    */
   isFree?: boolean;
+  /**
+   * « Première séance officielle » du créneau (YYYY-MM-DD), facultative.
+   *
+   * Un emploi du temps se crée souvent AVANT que l'année commence : les
+   * quelques séances d'essai tenues d'ici là étaient pourtant facturées comme
+   * les autres, et les absences comptées. Quand cette date est posée, tout ce
+   * qui se passe AVANT elle est enregistré exactement pareil — la présence est
+   * écrite, l'élève apparaît dans la salle — mais RIEN n'est débité du solde et
+   * aucune absence n'est facturée. Le prix non facturé part dans
+   * `AttendanceRecord.waivedAmount`, comme pour toute autre gratuité.
+   *
+   * Absente = le créneau facture dès sa première séance, comme avant.
+   */
+  billingStartDate?: string;
   /**
    * Public du créneau : qui la réception peut encaisser dessus. Absent sur les
    * créneaux créés avant le réglage — aucune restriction n'est alors appliquée,
@@ -355,6 +425,8 @@ export interface BalanceTransaction {
   /** module of the séance behind a deduction/refund — used by the per-module
    *  transactions filter in the student file (null for plain topups) */
   moduleId?: string;
+  /** the account that recorded this movement (profiles.id) */
+  createdBy?: string;
 }
 
 /** One automatic weekly-absence charge: a module the student was absent on for
@@ -476,6 +548,18 @@ export interface CashTransaction {
   amount: number; // signed
   date: string;
   description: string;
+  /** the account that wrote this movement (profiles.id). Absent on every line
+   *  written before the caisse started recording it. */
+  createdBy?: string;
+}
+
+/** Un compte de l'application, tel que la caisse le nomme. */
+export interface Profile {
+  id: string;
+  role: Role;
+  fullName: string;
+  email?: string;
+  phone?: string;
 }
 
 export interface Parent {
@@ -533,4 +617,64 @@ export interface IndependentSession {
   isFree?: boolean;
   /** tariff that was NOT charged (0 on every ordinary séance libre) */
   waivedAmount?: number;
+}
+
+// =============================================================================
+// Séances particulières ("Particulier")
+// =============================================================================
+// Un cours particulier n'est ni un créneau de l'emploi du temps ni une séance
+// libre : il n'a ni jour de la semaine ni abonnement. C'est un rendez-vous —
+// un élève (inscrit à l'école, ou simplement nommé au guichet), une date, et un
+// ou plusieurs modules facturés à l'heure, chacun avec son enseignant et le
+// pourcentage qui lui revient. L'argent n'y passe donc pas par le solde de
+// l'élève : ce qu'il verse entre en caisse, ce qu'il ne verse pas reste une
+// dette attachée à CETTE séance.
+
+/** Où en est le rendez-vous. */
+export type PrivateSessionStatus = "planned" | "done" | "cancelled";
+
+export interface PrivateSession {
+  id: string;
+  /** élève déjà inscrit à l'école — absent pour un élève de passage */
+  studentId?: string;
+  /** élève de passage : ce que le guichet a noté de lui */
+  guestName?: string;
+  guestPhone?: string;
+  guestPhone2?: string;
+  /** scolarité déclarée (facultative pour un élève de passage) */
+  classId?: string;
+  year?: string;
+  filiereId?: string;
+  /** date ET heure du rendez-vous */
+  scheduledAt: string;
+  /** somme des durées des modules, en minutes */
+  durationMinutes: number;
+  /** ce que la séance coûte à la famille, tous modules confondus */
+  totalPrice: number;
+  /** ce qui a réellement été encaissé — le reste est une dette */
+  paidAmount: number;
+  status: PrivateSessionStatus;
+  notes?: string;
+  createdAt?: string;
+  createdBy?: string;
+}
+
+/** Un module d'une séance particulière : sa durée, son tarif horaire, et
+ *  l'enseignant qui l'assure avec le pourcentage qui lui revient. */
+export interface PrivateSessionModule {
+  id: string;
+  privateSessionId: string;
+  moduleId: string;
+  /** enseignant de l'école OU enseignant passager créé pour l'occasion */
+  teacherId?: string;
+  minutes: number;
+  /** prix d'UNE heure de ce module */
+  hourlyPrice: number;
+  /** minutes × tarif horaire, arrondi */
+  totalPrice: number;
+  teacherPercentage: number;
+  /** part de l'enseignant, figée à la création */
+  teacherAmount: number;
+  teacherPaid: boolean;
+  teacherPaidAt?: string;
 }

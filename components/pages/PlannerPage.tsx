@@ -143,6 +143,15 @@ export function PlannerPage() {
   const [endHour, setEndHour] = useState("10");
   const [endMin, setEndMin] = useState("00");
 
+  // ---- Première séance officielle (facultative) -----------------------------
+  // Un emploi du temps se crée souvent des semaines avant la rentrée. Les
+  // séances tenues d'ici là — essais, séances de rattrapage, mise en route —
+  // étaient facturées comme les autres : solde débité, absences comptées. La
+  // case ci-dessous reste DÉCOCHÉE par défaut, pour que rien ne change sur les
+  // créneaux qu'on ne touche pas.
+  const [billingStartEnabled, setBillingStartEnabled] = useState(false);
+  const [billingStartDate, setBillingStartDate] = useState("");
+
   // Inline creations
   const [newModuleName, setNewModuleName] = useState("");
   const [showAddModule, setShowAddModule] = useState(false);
@@ -629,6 +638,11 @@ export function PlannerPage() {
     }
     warnSalleClash({ salleIds: [salleId], days: selectedDays, startTime: `${startHour}:${startMin}` });
 
+    if (billingStartEnabled && !billingStartDate) {
+      alert("Indiquez la date de la première séance officielle, ou décochez l'option.");
+      return;
+    }
+
     const newSession: ScheduleSession = {
       id: uid("ses"),
       classId,
@@ -639,6 +653,7 @@ export function PlannerPage() {
       days: selectedDays,
       startTime: `${startHour}:${startMin}`,
       endTime: `${endHour}:${endMin}`,
+      billingStartDate: billingStartEnabled ? billingStartDate : undefined,
     };
     push("sessions", newSession);
     setIsCreateOpen(false);
@@ -658,6 +673,11 @@ export function PlannerPage() {
       startTime: `${startHour}:${startMin}`,
     });
 
+    if (billingStartEnabled && !billingStartDate) {
+      alert("Indiquez la date de la première séance officielle, ou décochez l'option.");
+      return;
+    }
+
     const updated: Partial<ScheduleSession> = {
       classId,
       moduleId,
@@ -667,6 +687,9 @@ export function PlannerPage() {
       days: selectedDays,
       startTime: `${startHour}:${startMin}`,
       endTime: `${endHour}:${endMin}`,
+      // `undefined` efface la date en base (voir `toRow` dans le store) :
+      // décocher la case remet donc le créneau en facturation immédiate.
+      billingStartDate: billingStartEnabled ? billingStartDate : undefined,
     };
     updateItem("sessions", selectedSession.id, updated);
     setIsEditOpen(false);
@@ -696,6 +719,8 @@ export function PlannerPage() {
     setStartMin("00");
     setEndHour("10");
     setEndMin("00");
+    setBillingStartEnabled(false);
+    setBillingStartDate("");
     setSelectedSession(null);
   };
 
@@ -713,6 +738,8 @@ export function PlannerPage() {
     setStartMin(sm);
     setEndHour(eh);
     setEndMin(em);
+    setBillingStartEnabled(!!s.billingStartDate);
+    setBillingStartDate(s.billingStartDate ?? "");
     setIsEditOpen(true);
     setIsDetailsOpen(false);
   };
@@ -1854,6 +1881,66 @@ export function PlannerPage() {
                 {salleId ? getSalleName(salleId) : "?"}) par {teacherId ? getTeacherName(teacherId) : "?"}
               </div>
             </div>
+
+            {/* ---- Première séance officielle (facultative) ---------------- */}
+            <div
+              className={`rounded-xl border p-3 transition-colors ${
+                billingStartEnabled ? "border-primary/40 bg-primary-50/40" : "border-line bg-canvas/40"
+              }`}
+            >
+              <label className="flex cursor-pointer items-start justify-between gap-3">
+                <span className="min-w-0">
+                  <strong className="block text-xs text-ink">
+                    Définir la première séance officielle
+                  </strong>
+                  <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                    Facultatif. Avant cette date, les présences sont enregistrées{" "}
+                    <strong className="text-ink">exactement comme d&apos;habitude</strong> — mais
+                    rien n&apos;est prélevé sur le solde de l&apos;élève et aucune absence
+                    n&apos;est facturée. À utiliser quand le créneau est créé avant la rentrée.
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={billingStartEnabled}
+                  onChange={(e) => {
+                    setBillingStartEnabled(e.target.checked);
+                    if (e.target.checked && !billingStartDate) {
+                      setBillingStartDate(new Date().toISOString().split("T")[0]);
+                    }
+                  }}
+                  className="mt-0.5 h-5 w-5 shrink-0 rounded border-line text-primary focus:ring-primary"
+                />
+              </label>
+
+              {billingStartEnabled && (
+                <div className="mt-3 border-t border-primary/20 pt-3">
+                  <label className="mb-1 block text-xs font-semibold text-muted">
+                    Date de la première séance facturée *
+                  </label>
+                  <Input
+                    type="date"
+                    value={billingStartDate}
+                    onChange={(e) => setBillingStartDate(e.target.value)}
+                  />
+                  <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
+                    {billingStartDate ? (
+                      <>
+                        Les séances tenues avant le{" "}
+                        <strong className="text-ink">
+                          {billingStartDate.split("-").reverse().join("/")}
+                        </strong>{" "}
+                        seront <strong className="text-success">offertes</strong> : présence
+                        écrite, solde intact, aucune absence comptée. À partir de cette date,
+                        la facturation reprend normalement.
+                      </>
+                    ) : (
+                      "Choisissez le jour à partir duquel le cours compte pour de bon."
+                    )}
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1975,6 +2062,55 @@ export function PlannerPage() {
                 </Select>
               </div>
             </div>
+
+            {/* ---- Première séance officielle (facultative) ---------------- */}
+            <div
+              className={`rounded-xl border p-3 transition-colors ${
+                billingStartEnabled ? "border-primary/40 bg-primary-50/40" : "border-line bg-canvas/40"
+              }`}
+            >
+              <label className="flex cursor-pointer items-start justify-between gap-3">
+                <span className="min-w-0">
+                  <strong className="block text-xs text-ink">
+                    Définir la première séance officielle
+                  </strong>
+                  <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                    Facultatif. Avant cette date, les présences sont enregistrées{" "}
+                    <strong className="text-ink">exactement comme d&apos;habitude</strong> — mais
+                    rien n&apos;est prélevé sur le solde de l&apos;élève et aucune absence
+                    n&apos;est facturée.
+                  </span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={billingStartEnabled}
+                  onChange={(e) => {
+                    setBillingStartEnabled(e.target.checked);
+                    if (e.target.checked && !billingStartDate) {
+                      setBillingStartDate(new Date().toISOString().split("T")[0]);
+                    }
+                  }}
+                  className="mt-0.5 h-5 w-5 shrink-0 rounded border-line text-primary focus:ring-primary"
+                />
+              </label>
+
+              {billingStartEnabled && (
+                <div className="mt-3 border-t border-primary/20 pt-3">
+                  <label className="mb-1 block text-xs font-semibold text-muted">
+                    Date de la première séance facturée *
+                  </label>
+                  <Input
+                    type="date"
+                    value={billingStartDate}
+                    onChange={(e) => setBillingStartDate(e.target.value)}
+                  />
+                  <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
+                    Ne change RIEN aux séances déjà pointées : elles gardent ce qu&apos;elles ont
+                    coûté. La règle vaut pour les présences à venir.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -2030,6 +2166,34 @@ export function PlannerPage() {
                       {(selectedSession.salleIds ?? [selectedSession.salleId]).map(getSalleName).join(" · ")}
                     </strong>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* Un créneau qui n'a pas encore officiellement commencé doit le
+                DIRE : sans ça, la réception voit des présences à 0 DA et croit
+                à une panne de facturation. */}
+            {selectedSession.billingStartDate && (
+              <div
+                className={`flex items-start gap-2 rounded-xl border p-3 text-xs ${
+                  selectedSession.billingStartDate > new Date().toISOString().split("T")[0]
+                    ? "border-warning/40 bg-warning/10"
+                    : "border-success/30 bg-success/5"
+                }`}
+              >
+                <span className="text-base leading-none">
+                  {selectedSession.billingStartDate > new Date().toISOString().split("T")[0] ? "⏳" : "✅"}
+                </span>
+                <div>
+                  <strong className="block text-ink">
+                    Première séance officielle :{" "}
+                    {formatDateFr(selectedSession.billingStartDate)}
+                  </strong>
+                  <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                    {selectedSession.billingStartDate > new Date().toISOString().split("T")[0]
+                      ? "Ce cours n'a pas encore commencé : les présences pointées d'ici là sont enregistrées mais offertes — aucun solde n'est débité, aucune absence n'est facturée."
+                      : "Le cours a officiellement commencé : les présences sont facturées et les absences comptées normalement."}
+                  </span>
                 </div>
               </div>
             )}

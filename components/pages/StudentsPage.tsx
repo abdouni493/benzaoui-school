@@ -66,6 +66,7 @@ import {
   isExpiredOpenSeance,
   matchesAllWords,
   netPriceFor,
+  normalizeSearchText,
   registrationFeeOptions,
   todayIso,
   COURS_LEVELS,
@@ -194,6 +195,9 @@ export function StudentsPage() {
   const [isFree, setIsFree] = useState(false);
   const [isEmailDirty, setIsEmailDirty] = useState(false);
   const [isPasswordDirty, setIsPasswordDirty] = useState(false);
+  /** L'homonyme dont on regarde le dossier, sans quitter l'écran de création.
+   *  `null` = l'alerte est affichée mais aucun dossier n'est ouvert. */
+  const [duplicateOpenId, setDuplicateOpenId] = useState<string | null>(null);
 
   // Form: first top-up written straight from the creation screen. It goes
   // through the very same `add_student_balance` RPC as the "Recharge" button,
@@ -447,6 +451,34 @@ export function StudentsPage() {
       }
     }
   }, [firstName, lastName, birthDate, isCreateOpen, isEmailDirty, isPasswordDirty]);
+
+  /**
+   * Les élèves qui portent EXACTEMENT le nom en train d'être saisi.
+   *
+   * Deux frères inscrits deux fois, un élève réinscrit à la rentrée par une
+   * autre personne du guichet : le doublon ne se voyait qu'après coup, une
+   * fois deux dossiers ouverts, deux soldes et deux cartes en circulation.
+   * La comparaison ignore la casse, les accents et les espaces en trop — «
+   * Belkacem » et « BELKACEM » sont le même nom — mais elle reste EXACTE sur
+   * les deux champs : un simple homonyme de prénom n'alerte pas.
+   *
+   * Ce n'est qu'un AVERTISSEMENT : deux élèves peuvent parfaitement porter le
+   * même nom, et la création reste ouverte.
+   */
+  const nameDuplicates = useMemo(() => {
+    const f = normalizeSearchText(firstName.trim());
+    const l = normalizeSearchText(lastName.trim());
+    if (!f || !l) return [];
+    return students.filter(
+      (st) =>
+        normalizeSearchText(st.firstName.trim()) === f &&
+        normalizeSearchText(st.lastName.trim()) === l,
+    );
+  }, [students, firstName, lastName]);
+
+  /** Un homonyme dont on regarde le dossier n'a de sens que tant qu'il est
+   *  dans la liste : changer le nom saisi referme le dossier. */
+  const openDuplicate = nameDuplicates.find((st) => st.id === duplicateOpenId) ?? null;
 
   const isSoonToRunOut = (student: Student) => {
     if (student.isFree) return false;
@@ -1156,6 +1188,7 @@ export function StudentsPage() {
     setSelectedStudent(null);
     setIsEmailDirty(false);
     setIsPasswordDirty(false);
+    setDuplicateOpenId(null);
     setInitialTopup(0);
     setInitialTopupDesc("Premier versement");
     setCreateFeeKey(undefined);
@@ -1956,6 +1989,368 @@ export function StudentsPage() {
   // owes and already has on his balance.
 
   /** 1. Frais d'inscription : quel tarif, encaissé tout de suite ou laissé dû. */
+  /**
+   * Le dossier COMPLET d'un homonyme, affiché dans l'écran de création.
+   *
+   * Il répond à la seule question qui compte à cet instant : « est-ce que
+   * c'est le même élève ? » — et pour ça il faut voir son emploi du temps, son
+   * argent et sa présence, pas seulement son nom. Tout est en lecture seule :
+   * on ne modifie jamais un dossier existant depuis l'écran de création d'un
+   * autre.
+   */
+  const renderDuplicateDossier = (stu: Student) => {
+    const debt = debtOf(stu);
+    const parent = parents.find((pa) => pa.id === stu.parentId);
+    const myTx = balanceTx
+      .filter((t) => t.studentId === stu.id)
+      .sort((a, b) => b.date.localeCompare(a.date));
+    const myAtt = attendance
+      .filter((a) => a.studentId === stu.id)
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    const myPenalties = absencePenalties
+      .filter((x) => x.studentId === stu.id)
+      .sort((a, b) => b.periodEnd.localeCompare(a.periodEnd));
+    const presents = myAtt.filter((a) => a.status !== "absent").length;
+    const absents = myAtt.filter((a) => a.status === "absent").length;
+    const totalPaid = myTx.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
+    const totalSpent = myTx.filter((t) => t.amount < 0).reduce((sum, t) => sum + -t.amount, 0);
+
+    /** Ses créneaux, tirés de ses inscriptions — ce que « son emploi du temps »
+     *  veut dire concrètement : quels jours, à quelle heure, avec qui. */
+    const myTimings = stu.subscriptionIds
+      .map((subId) => {
+        const sub = subscriptions.find((x) => x.id === subId);
+        const sess = sub ? sessions.find((se) => se.id === sub.sessionId) : undefined;
+        if (!sess) return null;
+        const dates = stu.subscriptionDates?.[subId];
+        const discount = stu.subscriptionDiscounts?.[subId];
+        return {
+          subId,
+          sess,
+          price: netPriceFor(sub?.pricePerSession ?? 0, discount),
+          basePrice: sub?.pricePerSession ?? 0,
+          dates,
+          moduleName: modules.find((m) => m.id === sess.moduleId)?.name ?? "Module",
+          className: classes.find((c) => c.id === sess.classId)?.name ?? "—",
+          groupName: groups.find((g) => g.id === sess.groupId)?.name ?? "—",
+          salleName: salles.find((sa) => sa.id === sess.salleId)?.name ?? "—",
+          teacherName: (() => {
+            const t = teachers.find((x) => x.id === sess.teacherId);
+            return t ? `${t.firstName} ${t.lastName}` : "—";
+          })(),
+        };
+      })
+      .filter(Boolean) as Array<{
+      subId: string;
+      sess: (typeof sessions)[number];
+      price: number;
+      basePrice: number;
+      dates?: SubscriptionDates;
+      moduleName: string;
+      className: string;
+      groupName: string;
+      salleName: string;
+      teacherName: string;
+    }>;
+
+    return (
+      <div className="space-y-3 rounded-xl border border-warning/40 bg-surface p-3">
+        {/* ---- Identité ---- */}
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line pb-3">
+          <div className="min-w-0">
+            <strong className="block text-sm text-ink">
+              {stu.firstName} {stu.lastName}
+            </strong>
+            <span className="mt-0.5 block text-[10px] text-muted">
+              Carte : <span className="font-mono text-ink">{stu.rfid || "aucune"}</span> · Né(e) le{" "}
+              {stu.birthDate ? formatDateFr(stu.birthDate) : "—"} · Tél{" "}
+              <span className="font-mono">{stu.phone || "—"}</span>
+            </span>
+            <span className="mt-0.5 block text-[10px] text-muted">
+              {stu.email || "sans email"}
+              {parent && ` · Parent : ${parent.firstName} ${parent.lastName}`}
+              {stu.createdAt && ` · Inscrit le ${formatDateFr(stu.createdAt.slice(0, 10))}`}
+            </span>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            {stu.isFree && <Badge tone="success" className="text-[9px] font-bold">Études gratuites</Badge>}
+            <Badge tone={stu.balance < 0 ? "danger" : "primary"} className="font-mono text-[10px] font-bold">
+              Solde {stu.balance} DA
+            </Badge>
+            {debt.alert && (
+              <Badge tone="danger" className="font-mono text-[10px] font-bold">
+                Dette {debt.total} DA
+              </Badge>
+            )}
+          </div>
+        </div>
+
+        {/* ---- Les chiffres du dossier ---- */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {[
+            { label: "Inscriptions", value: `${myTimings.length}`, tone: "text-ink" },
+            { label: "Présences", value: `${presents}`, tone: "text-success" },
+            { label: "Absences", value: `${absents + myPenalties.length}`, tone: "text-danger" },
+            { label: "Total versé", value: `${totalPaid} DA`, tone: "text-primary" },
+          ].map((k) => (
+            <div key={k.label} className="rounded-lg border border-line bg-canvas/40 p-2 text-center">
+              <span className="block text-[9px] uppercase text-muted">{k.label}</span>
+              <strong className={`font-mono text-sm ${k.tone}`}>{k.value}</strong>
+            </div>
+          ))}
+        </div>
+
+        {debt.alert && (
+          <div className="rounded-lg border border-danger/40 bg-danger/10 p-2 text-[10px] leading-relaxed text-danger">
+            <strong>Cet élève doit {debt.total} DA.</strong>{" "}
+            {debt.sessions > 0 && `Séances suivies non payées : ${debt.sessions} DA. `}
+            {debt.registration > 0 && `Frais d'inscription impayés : ${debt.registration} DA. `}
+            Si c&apos;est bien la même personne, réglez sa dette depuis sa fiche au lieu de
+            créer un second dossier.
+          </div>
+        )}
+
+        {/* ---- Emploi du temps ---- */}
+        <div>
+          <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted">
+            📅 Emploi du temps ({myTimings.length})
+          </span>
+          {myTimings.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-line py-3 text-center text-[10px] italic text-muted">
+              Aucune inscription — cet élève n&apos;a pas d&apos;emploi du temps.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {myTimings.map((t) => (
+                <div key={t.subId} className="rounded-lg border border-line bg-canvas/30 p-2 text-[10px]">
+                  <strong className="block truncate text-ink">
+                    {t.sess.isOpen && "🎯 "}
+                    {t.sess.title || t.moduleName}
+                  </strong>
+                  <span className="block truncate text-muted">
+                    {t.className} · Gr: {t.groupName} · {t.salleName}
+                  </span>
+                  <span className="block truncate text-muted">
+                    {t.teacherName} ·{" "}
+                    <span className="font-mono">
+                      {t.sess.startTime}-{t.sess.endTime}
+                    </span>
+                  </span>
+                  <span className="block truncate text-muted">{formatDays(t.sess.days) || "—"}</span>
+                  <span className="mt-1 flex flex-wrap items-center gap-1">
+                    <Badge tone="primary" className="font-mono text-[9px] font-bold">
+                      {t.price} DA / séance
+                    </Badge>
+                    {t.price !== t.basePrice && (
+                      <Badge tone="success" className="text-[9px] font-bold">
+                        remise
+                      </Badge>
+                    )}
+                    {t.dates?.startDate && (
+                      <Badge tone="neutral" className="text-[9px]">
+                        dès {formatDateFr(t.dates.startDate)}
+                      </Badge>
+                    )}
+                    {t.dates?.expiryDate && (
+                      <Badge tone="warning" className="text-[9px]">
+                        exp. {formatDateFr(t.dates.expiryDate)}
+                      </Badge>
+                    )}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ---- Présences & absences ---- */}
+        <div>
+          <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wider text-muted">
+            ✅ Présences &amp; absences ({myAtt.length + myPenalties.length})
+          </span>
+          {myAtt.length === 0 && myPenalties.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-line py-3 text-center text-[10px] italic text-muted">
+              Aucune présence enregistrée.
+            </p>
+          ) : (
+            <div className="max-h-40 overflow-y-auto rounded-lg border border-line">
+              <table className="w-full text-[10px]">
+                <thead className="sticky top-0 bg-canvas">
+                  <tr className="text-left uppercase text-muted">
+                    <th className="p-1.5">Date</th>
+                    <th className="p-1.5">Séance</th>
+                    <th className="p-1.5">Statut</th>
+                    <th className="p-1.5 text-right">Débité</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {myAtt.slice(0, 40).map((a) => {
+                    const sess = sessions.find((se) => se.id === a.sessionId);
+                    const free = freeReasonOf(a, {
+                      studentIsFree: stu.isFree,
+                      sessionIsFree: !!sess?.isFree,
+                    });
+                    return (
+                      <tr key={a.id} className="border-t border-line/50">
+                        <td className="p-1.5 font-mono">
+                          {new Date(a.timestamp).toLocaleDateString("fr-FR")}
+                        </td>
+                        <td className="max-w-[10rem] truncate p-1.5 text-ink">
+                          {sess?.title || modules.find((m) => m.id === sess?.moduleId)?.name || "Séance"}
+                        </td>
+                        <td className="p-1.5">
+                          <Badge
+                            tone={
+                              a.status === "absent" ? "danger" : a.status === "late" ? "warning" : "success"
+                            }
+                            className="text-[9px]"
+                          >
+                            {a.status === "absent" ? "Absent" : a.status === "late" ? "Retard" : "Présent"}
+                          </Badge>
+                        </td>
+                        <td className="p-1.5 text-right font-mono">
+                          {a.amountDeducted > 0 ? (
+                            `${a.amountDeducted} DA`
+                          ) : (
+                            <span className="text-success" title={free ? FREE_REASON_HINTS[free] : undefined}>
+                              🎁 {free ? FREE_REASON_LABELS[free] : "0 DA"}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {myPenalties.slice(0, 15).map((pen) => (
+                    <tr key={pen.id} className="border-t border-line/50 bg-danger/5">
+                      <td className="p-1.5 font-mono">{formatDateFr(pen.periodEnd)}</td>
+                      <td className="max-w-[10rem] truncate p-1.5 text-ink">
+                        Absence semaine · {modules.find((m) => m.id === pen.moduleId)?.name ?? "module"}
+                      </td>
+                      <td className="p-1.5">
+                        <Badge tone="danger" className="text-[9px]">Absence facturée</Badge>
+                      </td>
+                      <td className="p-1.5 text-right font-mono text-danger">{pen.amount} DA</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* ---- Paiements & dettes ---- */}
+        <div>
+          <span className="mb-1.5 flex flex-wrap items-center justify-between gap-2 text-[10px] font-bold uppercase tracking-wider text-muted">
+            <span>💵 Paiements &amp; transactions ({myTx.length})</span>
+            <span className="font-mono normal-case">
+              <span className="text-success">+{totalPaid} DA</span> ·{" "}
+              <span className="text-danger">-{totalSpent} DA</span>
+            </span>
+          </span>
+          {myTx.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-line py-3 text-center text-[10px] italic text-muted">
+              Aucune transaction.
+            </p>
+          ) : (
+            <div className="max-h-40 overflow-y-auto rounded-lg border border-line">
+              <table className="w-full text-[10px]">
+                <thead className="sticky top-0 bg-canvas">
+                  <tr className="text-left uppercase text-muted">
+                    <th className="p-1.5">Date</th>
+                    <th className="p-1.5">Type</th>
+                    <th className="p-1.5">Libellé</th>
+                    <th className="p-1.5 text-right">Montant</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {myTx.slice(0, 40).map((t) => (
+                    <tr key={t.id} className="border-t border-line/50">
+                      <td className="p-1.5 font-mono">
+                        {new Date(t.date).toLocaleDateString("fr-FR")}
+                      </td>
+                      <td className="p-1.5 text-muted">{TX_TYPE_LABELS[t.type]}</td>
+                      <td className="max-w-[12rem] truncate p-1.5 text-ink">{t.description}</td>
+                      <td
+                        className={`p-1.5 text-right font-mono font-bold ${
+                          t.amount > 0 ? "text-success" : "text-danger"
+                        }`}
+                      >
+                        {t.amount > 0 ? "+" : ""}
+                        {t.amount} DA
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  /**
+   * L'alerte d'homonymie de l'écran de création.
+   *
+   * Elle n'EMPÊCHE rien : deux élèves peuvent porter le même nom, et le
+   * bouton « Créer » reste actif. Elle rend simplement impossible de créer un
+   * doublon SANS L'AVOIR VU.
+   */
+  const renderDuplicateAlert = () => {
+    if (nameDuplicates.length === 0) return null;
+    return (
+      <div className="mt-4 space-y-3 rounded-xl border-2 border-warning/50 bg-warning/10 p-3">
+        <div className="flex items-start gap-2">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 animate-pulse text-warning" />
+          <div className="min-w-0">
+            <strong className="block text-xs text-warning">
+              {nameDuplicates.length === 1
+                ? "Un élève porte déjà exactement ce nom"
+                : `${nameDuplicates.length} élèves portent déjà exactement ce nom`}
+            </strong>
+            <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+              Cliquez sur une fiche pour voir son dossier complet — emploi du temps, présences,
+              paiements et dettes — sans quitter cet écran. Si ce n&apos;est pas la même
+              personne, continuez : <strong className="text-ink">rien n&apos;est bloqué</strong>.
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {nameDuplicates.map((st) => {
+            const open = duplicateOpenId === st.id;
+            const d = debtOf(st);
+            return (
+              <button
+                key={st.id}
+                type="button"
+                onClick={() => setDuplicateOpenId(open ? null : st.id)}
+                className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[10px] font-bold transition-colors ${
+                  open
+                    ? "border-primary bg-primary text-white"
+                    : "border-warning/40 bg-surface text-ink hover:bg-warning/20"
+                }`}
+              >
+                <Eye className="h-3.5 w-3.5" />
+                <span>
+                  {st.firstName} {st.lastName}
+                </span>
+                <span className={`font-mono ${open ? "text-white/80" : "text-muted"}`}>
+                  {st.rfid || "sans carte"}
+                </span>
+                {d.alert && (
+                  <span className={open ? "text-white" : "text-danger"}>· {d.total} DA dus</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {openDuplicate && renderDuplicateDossier(openDuplicate)}
+      </div>
+    );
+  };
+
   const renderFeeSection = (mode: "create" | "edit") => {
     const editing = mode === "edit";
     const option = editing ? editFeeOption : createFeeOption;
@@ -3475,6 +3870,9 @@ export function StudentsPage() {
             />
           </div>
         </div>
+
+        {/* Homonymes : l'alerte qui manquait, juste sous l'identité saisie. */}
+        {renderDuplicateAlert()}
 
         {/* La scolarité d'abord : c'est le niveau + l'année qui décident du
             tarif d'inscription (une 3e année secondaire est pré-tarifée), donc

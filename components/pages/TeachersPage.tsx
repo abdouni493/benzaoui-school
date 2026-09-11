@@ -200,6 +200,11 @@ export function TeachersPage() {
   const [deductAcomptes, setDeductAcomptes] = useState(true);
   const [deductAbsences, setDeductAbsences] = useState(true);
   const [timingSearch, setTimingSearch] = useState("");
+  /** L'emploi du temps que ce règlement couvre — "all" = tous les créneaux.
+   *  C'est le choix que l'écran ne proposait pas : on payait « les séances »
+   *  d'un enseignant en bloc, sans jamais pouvoir dire LEQUEL de ses cours on
+   *  réglait. */
+  const [payCreneauId, setPayCreneauId] = useState<string>("all");
   // Passager teacher created straight from this page
   const [isPassagerCreateOpen, setIsPassagerCreateOpen] = useState(false);
 
@@ -718,7 +723,94 @@ export function TeachersPage() {
     [selectedTeacher, unpaidTeacher, independent, attendance, sessions, students, groups, modules, classes, freePeriods, liveDues, subscriptions],
   );
 
+  /**
+   * Les créneaux (emplois du temps) de l'enseignant qui ont des séances à
+   * régler, chacun avec ses groupes et ce qu'il doit.
+   *
+   * Un « timing » est une séance datée ; un CRÉNEAU est la ligne d'emploi du
+   * temps qui la produit toutes les semaines. L'écran ne montrait que les
+   * premiers : trente lignes « 12/09 — Maths », sans jamais dire qu'elles
+   * venaient de trois cours différents, et sans permettre d'en régler un seul.
+   * Choisir un créneau ici ne coche QUE ses séances : celles des autres
+   * restent dues, exactement comme avant le règlement.
+   */
+  const payCreneaux = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        sessionId: string;
+        title: string;
+        moduleName: string;
+        className: string;
+        groupNames: string[];
+        days: Day[];
+        startTime: string;
+        endTime: string;
+        isOpen: boolean;
+        timings: UnpaidTiming[];
+        seances: number;
+        due: number;
+        revenue: number;
+      }
+    >();
+
+    payTimings.forEach((t) => {
+      let row = map.get(t.sessionId);
+      if (!row) {
+        const sess = sessions.find((se) => se.id === t.sessionId);
+        row = {
+          sessionId: t.sessionId,
+          title: t.title,
+          moduleName: t.moduleName,
+          className: t.className,
+          // Une séance libre couvre plusieurs groupes : on les liste tous.
+          groupNames: sess?.isOpen
+            ? (sess.groupIds?.length ? sess.groupIds : [sess.groupId]).map(
+                (id) => groups.find((g) => g.id === id)?.name ?? "—",
+              )
+            : [t.groupName],
+          days: sess?.days ?? [],
+          startTime: t.startTime,
+          endTime: t.endTime,
+          isOpen: t.isOpen,
+          timings: [],
+          seances: 0,
+          due: 0,
+          revenue: 0,
+        };
+        map.set(t.sessionId, row);
+      }
+      row.timings.push(t);
+      row.seances += 1;
+      row.due += t.totalShare;
+      row.revenue += t.totalFees;
+    });
+
+    return [...map.values()].sort((a, b) => b.due - a.due || a.title.localeCompare(b.title));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [payTimings, sessions, groups]);
+
+  /** Les séances que le filtre « emploi du temps » laisse voir. */
+  const creneauTimings =
+    payCreneauId === "all" ? payTimings : payTimings.filter((t) => t.sessionId === payCreneauId);
+
+  /** Ne cocher QUE ce créneau : le reste de l'emploi du temps garde ses séances
+   *  dues, ce qui est tout l'intérêt de régler cours par cours. */
+  const selectCreneau = (sessionId: string) => {
+    setPayCreneauId(sessionId);
+    setExpandedTimingKey(null);
+    setTimingGroupFilter("all");
+    setSelectedTimingKeys(
+      sessionId === "all"
+        ? payTimings.map((t) => t.key)
+        : payTimings.filter((t) => t.sessionId === sessionId).map((t) => t.key),
+    );
+  };
+
   const chosenTimings = payTimings.filter((t) => selectedTimingKeys.includes(t.key));
+  /** Les créneaux réellement couverts par ce règlement — ce que le bon de
+   *  paiement et l'historique doivent nommer. */
+  const chosenCreneaux = [...new Set(chosenTimings.map((t) => t.sessionId))];
   /** Tout le monde présent sur les créneaux cochés — c'est ce que l'écran
    *  montre, et c'est ce qui manquait : un créneau à moitié offert paraissait
    *  vide. */
@@ -767,6 +859,46 @@ export function TeachersPage() {
       return chosenTimings.length > 0 ? Math.round(computedPayout / chosenTimings.length) : 0;
     }
     return Math.round((computedPayout * t.totalFees) / chosenRevenue);
+  };
+
+  /** L'instantané figé que le règlement emporte : une ligne par séance réglée,
+   *  avec le créneau dont elle vient. C'est lui que le bon de paiement imprime,
+   *  aujourd'hui comme à la réimpression dans six mois. */
+  const buildPayDetails = (): TeacherPaymentDetail[] =>
+    chosenTimings.map((t) => ({
+      dateKey: t.dateKey,
+      sessionId: t.sessionId,
+      title: t.title,
+      moduleName: t.moduleName,
+      groupName: t.groupName,
+      startTime: t.startTime,
+      endTime: t.endTime,
+      presents: t.students.filter((st) => st.billable).length,
+      passagers: t.passagers,
+      gross: t.totalFees,
+      share: shareForTiming(t),
+    }));
+
+  /** Imprimer le détail AVANT de valider : l'enseignant signe ce qu'il a sous
+   *  les yeux, pas un total qu'on lui annonce. */
+  const printPaymentPreview = () => {
+    if (!selectedTeacher || chosenTimings.length === 0) {
+      alert("Sélectionnez au moins un créneau à régler avant d'imprimer.");
+      return;
+    }
+    printHtmlDocument(
+      buildTeacherSettlementReceipt({
+        teacher: selectedTeacher,
+        school,
+        lang: language,
+        amount: netPayout,
+        method: payMethod,
+        percentage: payMethod === "percent" ? payPercentage : undefined,
+        details: buildPayDetails(),
+        paidAt: new Date().toISOString(),
+        receiptNo: "PROJET — NON VALIDÉ",
+      }),
+    );
   };
 
   // ---------------------------------------------------------------------------
@@ -918,6 +1050,7 @@ export function TeachersPage() {
     setExpandedTimingKey(null);
     setTimingGroupFilter("all");
     setTimingSearch("");
+    setPayCreneauId("all");
     // Un passager n'a ni acompte ni retenue : les deux cases n'ont de sens que
     // pour un enseignant de l'école.
     setDeductAcomptes(!t.isPassager);
@@ -940,19 +1073,7 @@ export function TeachersPage() {
       return;
     }
 
-    const details: TeacherPaymentDetail[] = chosenTimings.map((t) => ({
-      dateKey: t.dateKey,
-      sessionId: t.sessionId,
-      title: t.title,
-      moduleName: t.moduleName,
-      groupName: t.groupName,
-      startTime: t.startTime,
-      endTime: t.endTime,
-      presents: t.students.filter((st) => st.billable).length,
-      passagers: t.passagers,
-      gross: t.totalFees,
-      share: shareForTiming(t),
-    }));
+    const details: TeacherPaymentDetail[] = buildPayDetails();
 
     setSavingPayment(true);
     try {
@@ -1566,6 +1687,31 @@ export function TeachersPage() {
                   {p.description && (
                     <span className="mt-0.5 block truncate text-[10px] text-muted/80">{p.description}</span>
                   )}
+                  {/* QUEL cours ce règlement a soldé. Sans cette ligne,
+                      l'historique n'était qu'une suite de montants : impossible
+                      de dire lequel des trois cours d'un enseignant avait déjà
+                      été payé, et lequel restait dû. */}
+                  {(() => {
+                    const rows = Array.isArray(p.details) ? p.details : [];
+                    const creneaux = [
+                      ...new Map(
+                        rows.map((d) => [
+                          d.sessionId,
+                          `${d.title}${d.groupName && d.groupName !== "-" ? ` · ${d.groupName}` : ""}`,
+                        ]),
+                      ).values(),
+                    ];
+                    if (creneaux.length === 0) return null;
+                    return (
+                      <span className="mt-1 flex flex-wrap gap-1">
+                        {creneaux.map((label, i) => (
+                          <Badge key={i} tone="primary" className="text-[9px] font-bold">
+                            📅 {label}
+                          </Badge>
+                        ))}
+                      </span>
+                    );
+                  })()}
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
                   <button
@@ -2957,14 +3103,15 @@ export function TeachersPage() {
         {selectedTeacher && (() => {
           const query = timingSearch.trim().toLowerCase();
           const visibleTimings = query
-            ? payTimings.filter((t) =>
+            ? creneauTimings.filter((t) =>
                 `${t.title} ${t.moduleName} ${t.className} ${t.groupName} ${t.dateKey} ${t.students
                   .map((s) => s.name)
                   .join(" ")}`
                   .toLowerCase()
                   .includes(query),
               )
-            : payTimings;
+            : creneauTimings;
+          const activeCreneau = payCreneaux.find((c) => c.sessionId === payCreneauId);
           const visibleKeys = visibleTimings.map((t) => t.key);
           const allVisibleChosen =
             visibleKeys.length > 0 && visibleKeys.every((k) => selectedTimingKeys.includes(k));
@@ -3021,6 +3168,103 @@ export function TeachersPage() {
                 <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
                   {/* =========== COLONNE GAUCHE : les créneaux =========== */}
                   <div className="space-y-3">
+                    {/* ---- L'EMPLOI DU TEMPS À RÉGLER -------------------- */}
+                    {/* Ce que cet écran ne savait pas dire : de QUEL cours on
+                        règle les séances. On liste ici tous les emplois du
+                        temps de l'enseignant qui ont quelque chose à payer,
+                        avec leurs groupes et leurs jours. En choisir un ne
+                        coche QUE ses séances — celles des autres créneaux
+                        restent dues, et c'est exactement ce qu'on veut. */}
+                    <div className="rounded-2xl border border-line bg-canvas/40 p-3">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">
+                          <CalendarDays className="h-3.5 w-3.5 text-primary" />
+                          Emploi du temps à régler
+                        </span>
+                        <span className="text-[10px] text-muted">
+                          {payCreneaux.length} cours avec des séances dues
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <button
+                          type="button"
+                          onClick={() => selectCreneau("all")}
+                          className={`rounded-xl border p-2.5 text-left transition-all ${
+                            payCreneauId === "all"
+                              ? "border-primary bg-primary/10 ring-2 ring-primary/25"
+                              : "border-line bg-surface hover:border-primary/40"
+                          }`}
+                        >
+                          <strong className="block text-[11px] text-ink">
+                            Tous ses emplois du temps
+                          </strong>
+                          <span className="mt-0.5 block text-[10px] text-muted">
+                            {payTimings.length} séance(s) ·{" "}
+                            <span className="font-mono font-bold text-primary">{totalDue} DA</span>
+                          </span>
+                        </button>
+
+                        {payCreneaux.map((c) => {
+                          const active = payCreneauId === c.sessionId;
+                          return (
+                            <button
+                              key={c.sessionId}
+                              type="button"
+                              onClick={() => selectCreneau(c.sessionId)}
+                              className={`rounded-xl border p-2.5 text-left transition-all ${
+                                active
+                                  ? "border-primary bg-primary/10 ring-2 ring-primary/25"
+                                  : "border-line bg-surface hover:border-primary/40"
+                              }`}
+                            >
+                              <strong className="flex items-center gap-1.5 text-[11px] text-ink">
+                                {c.isOpen && <span>🎯</span>}
+                                <span className="truncate">{c.title}</span>
+                              </strong>
+                              <span className="mt-0.5 block truncate text-[10px] text-muted">
+                                {c.className} · Gr: {c.groupNames.join(" · ")}
+                              </span>
+                              <span className="mt-0.5 block text-[10px] text-muted">
+                                <span className="font-mono">
+                                  {c.startTime}-{c.endTime}
+                                </span>
+                                {c.days.length > 0 && ` · ${formatDays(c.days)}`}
+                              </span>
+                              <span className="mt-1 flex flex-wrap items-center gap-1">
+                                <Badge tone="warning" className="text-[9px] font-bold">
+                                  {c.seances} séance(s)
+                                </Badge>
+                                <Badge tone="success" className="font-mono text-[9px] font-bold">
+                                  {c.due} DA dus
+                                </Badge>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      {activeCreneau && (
+                        <p className="mt-2 rounded-xl border border-primary/20 bg-primary-50/40 p-2 text-[10px] leading-relaxed text-muted">
+                          Ce règlement ne couvrira que{" "}
+                          <strong className="text-ink">{activeCreneau.title}</strong> (
+                          {activeCreneau.groupNames.join(" · ")}).{" "}
+                          {payTimings.length - activeCreneau.seances > 0 ? (
+                            <>
+                              Les{" "}
+                              <strong className="text-warning">
+                                {payTimings.length - activeCreneau.seances} séance(s)
+                              </strong>{" "}
+                              des autres emplois du temps restent dues et seront proposées au
+                              prochain règlement.
+                            </>
+                          ) : (
+                            "C'est le seul cours de cet enseignant à avoir des séances dues."
+                          )}
+                        </p>
+                      )}
+                    </div>
+
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="relative min-w-[12rem] flex-1">
                         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
@@ -3247,6 +3491,24 @@ export function TeachersPage() {
                           {dateSpan.length > 1 && ` → ${formatDateFr(dateSpan[1])}`}
                         </p>
                       )}
+                      {chosenCreneaux.length > 0 && (
+                        <div className="mt-2 border-t border-line/60 pt-2">
+                          <span className="mb-1 block text-[9px] font-bold uppercase text-muted">
+                            Emploi(s) du temps couvert(s)
+                          </span>
+                          <div className="flex flex-wrap gap-1">
+                            {chosenCreneaux.map((sid) => {
+                              const c = payCreneaux.find((x) => x.sessionId === sid);
+                              if (!c) return null;
+                              return (
+                                <Badge key={sid} tone="primary" className="text-[9px] font-bold">
+                                  {c.title} · {c.groupNames.join("/")}
+                                </Badge>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* Mode de calcul */}
@@ -3415,6 +3677,20 @@ export function TeachersPage() {
                         </span>
                       </div>
                     )}
+
+                    {/* Imprimer AVANT de valider : l'enseignant signe le
+                        détail qu'il a sous les yeux. Le bon porte « PROJET —
+                        NON VALIDÉ » tant que le règlement n'est pas
+                        enregistré, pour qu'aucun brouillon ne puisse passer
+                        pour une preuve de paiement. */}
+                    <Button
+                      variant="outline"
+                      className="w-full"
+                      onClick={printPaymentPreview}
+                      disabled={chosenTimings.length === 0}
+                    >
+                      <Printer className="h-4 w-4" /> Imprimer le détail
+                    </Button>
 
                     <div className="flex gap-2">
                       <Button variant="outline" className="flex-1" onClick={() => setIsTimingPayOpen(false)}>

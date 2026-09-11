@@ -13,6 +13,7 @@ import { TeachersPage } from "@/components/pages/TeachersPage";
 import { SubjectsPage } from "@/components/pages/SubjectsPage";
 import { AdministrationPage } from "@/components/pages/AdministrationPage";
 import { IndependentPage } from "@/components/pages/IndependentPage";
+import { ParticulierPage } from "@/components/pages/ParticulierPage";
 import { ParentsPage } from "@/components/pages/ParentsPage";
 import { AnnouncementsPage } from "@/components/pages/AnnouncementsPage";
 import { ExpensesPage } from "@/components/pages/ExpensesPage";
@@ -76,6 +77,8 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
       return <AdministrationPage />;
     case "independent":
       return <IndependentPage />;
+    case "particulier":
+      return <ParticulierPage />;
     case "parents":
       return <ParentsPage />;
     case "announcements":

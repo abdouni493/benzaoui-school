@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -24,12 +24,28 @@ import {
   UserCheck,
   Receipt,
   AlertTriangle,
+  Users,
+  Wallet,
   X
 } from "lucide-react";
 import type { CashTransaction, CashTxType } from "@/lib/types";
 
+/** La clé des mouvements écrits AVANT que la caisse enregistre les comptes
+ *  (migration du 12/09/2026). On ne devine pas qui tenait la caisse ce
+ *  jour-là : ces lignes sont regroupées à part, jamais attribuées. */
+const UNKNOWN_ACCOUNT = "__unknown__";
+
+/** Un mouvement dans l'intervalle [start, end], bornes incluses. Vide = pas de
+ *  borne de ce côté. */
+function inRange(isoDate: string, start: string, end: string): boolean {
+  const day = isoDate.substring(0, 10);
+  if (start && day < start) return false;
+  if (end && day > end) return false;
+  return true;
+}
+
 export function CashPage() {
-  const { cash, cashMove, deleteFrom, updateItem } = useData();
+  const { cash, profiles, students, balanceTx, cashMove, deleteFrom, updateItem } = useData();
 
   // Helper for timezone-safe local date string (YYYY-MM-DD)
   const getLocalDateString = (d: Date) => {
@@ -45,6 +61,15 @@ export function CashPage() {
   const [customEnd, setCustomEnd] = useState(getLocalDateString(new Date()));
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"all" | "students" | "teachers" | "school_expenses" | "manual">("all");
+
+  // ---- Encaissements par compte --------------------------------------------
+  // Le compte ouvert dans la fenêtre « historique », et SES propres bornes de
+  // dates : elles sont indépendantes du filtre de la page, parce qu'on
+  // contrôle une caisse sur une période choisie (une journée, une semaine de
+  // remplacement) sans vouloir changer ce que tout le reste de l'écran montre.
+  const [accountOpenId, setAccountOpenId] = useState<string | null>(null);
+  const [accountStart, setAccountStart] = useState("");
+  const [accountEnd, setAccountEnd] = useState("");
 
   // Modals
   const [isDepositOpen, setIsDepositOpen] = useState(false);
@@ -168,6 +193,113 @@ export function CashPage() {
   };
 
   const tabTxList = getTabFilteredTransactions();
+
+  // ---------------------------------------------------------------------------
+  // Qui a encaissé quoi
+  // ---------------------------------------------------------------------------
+  // La caisse disait ce qui était entré, jamais PAR QUI. Une réceptionniste ne
+  // pouvait pas rendre ses comptes en fin de poste, et un écart ne pouvait
+  // s'imputer à personne. Depuis la migration du 12/09/2026, chaque mouvement
+  // porte le compte qui l'a écrit ; les lignes plus anciennes n'en ont pas, et
+  // sont regroupées à part plutôt qu'attribuées à quelqu'un au hasard.
+
+  const accountLabel = (id: string) => {
+    if (id === UNKNOWN_ACCOUNT) return "Compte non enregistré";
+    const prof = profiles.find((x) => x.id === id);
+    if (prof) return prof.fullName || prof.email || "Compte sans nom";
+    return "Compte supprimé";
+  };
+
+  const accountRole = (id: string) => {
+    if (id === UNKNOWN_ACCOUNT) return "avant le 12/09/2026";
+    return profiles.find((x) => x.id === id)?.role ?? "—";
+  };
+
+  /** Le relevé de chaque compte sur la période DE LA PAGE — c'est le tableau de
+   *  bord ; la fenêtre par compte a ses propres dates. */
+  const accountSummaries = (() => {
+    const rows = new Map<
+      string,
+      { id: string; cashedIn: number; paidOut: number; moves: number; studentPayments: number }
+    >();
+    const get = (id: string) => {
+      let row = rows.get(id);
+      if (!row) {
+        row = { id, cashedIn: 0, paidOut: 0, moves: 0, studentPayments: 0 };
+        rows.set(id, row);
+      }
+      return row;
+    };
+
+    filteredTx.forEach((tx) => {
+      const row = get(tx.createdBy ?? UNKNOWN_ACCOUNT);
+      row.moves += 1;
+      if (tx.amount > 0) row.cashedIn += tx.amount;
+      else row.paidOut += -tx.amount;
+      if (tx.type === "student_payment" && tx.amount > 0) row.studentPayments += tx.amount;
+    });
+
+    return [...rows.values()].sort((a, b) => b.cashedIn - a.cashedIn || b.moves - a.moves);
+  })();
+
+  /** Les mouvements du compte ouvert, sur SES dates à lui. */
+  const accountTx = useMemo(
+    () =>
+      !accountOpenId
+        ? []
+        : cash
+            .filter(
+              (tx) =>
+                (tx.createdBy ?? UNKNOWN_ACCOUNT) === accountOpenId &&
+                inRange(tx.date, accountStart, accountEnd),
+            )
+            .sort((a, b) => b.date.localeCompare(a.date)),
+    [cash, accountOpenId, accountStart, accountEnd],
+  );
+
+  /**
+   * Les recharges d'élèves passées par ce compte, telles que l'historique des
+   * élèves les a enregistrées.
+   *
+   * Le mouvement de caisse dit « Versement Karim Belkacem » ; cette liste-ci
+   * dit DE QUEL ÉLÈVE il s'agit avec certitude (par son identifiant, pas par
+   * son nom dans un libellé) — c'est ce qu'il faut pour recouper une caisse
+   * avec les fiches élèves.
+   */
+  const accountStudentTx = useMemo(
+    () =>
+      !accountOpenId || accountOpenId === UNKNOWN_ACCOUNT
+        ? []
+        : balanceTx
+            .filter(
+              (tx) =>
+                tx.createdBy === accountOpenId &&
+                tx.amount > 0 &&
+                inRange(tx.date, accountStart, accountEnd),
+            )
+            .sort((a, b) => b.date.localeCompare(a.date)),
+    [balanceTx, accountOpenId, accountStart, accountEnd],
+  );
+
+  const accountTotals = {
+    in: accountTx.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0),
+    out: accountTx.filter((t) => t.amount < 0).reduce((sum, t) => sum + -t.amount, 0),
+    students: accountStudentTx.reduce((sum, t) => sum + t.amount, 0),
+  };
+
+  const openAccount = (id: string) => {
+    setAccountOpenId(id);
+    // Par défaut, la fenêtre s'ouvre sur le mois en cours : la question posée
+    // en fin de poste est presque toujours « et ce mois-ci ? ».
+    const now = new Date();
+    setAccountStart(getLocalDateString(new Date(now.getFullYear(), now.getMonth(), 1)));
+    setAccountEnd(getLocalDateString(now));
+  };
+
+  const studentNameOf = (id: string) => {
+    const stu = students.find((x) => x.id === id);
+    return stu ? `${stu.firstName} ${stu.lastName}` : "Élève supprimé";
+  };
 
   // Create Transaction Handlers
   const handleDepositSubmit = () => {
@@ -380,6 +512,99 @@ export function CashPage() {
             </Card>
           </div>
         </div>
+      </div>
+
+
+      {/* ================================================================== */}
+      {/* ENCAISSEMENTS PAR COMPTE                                            */}
+      {/* ================================================================== */}
+      {/* La caisse savait dire ce qui était entré, jamais par qui. En fin de
+          poste, personne ne pouvait rendre ses comptes, et un écart ne
+          s'imputait à personne. Chaque compte a maintenant sa ligne, et son
+          propre historique sur la période qu'on veut. */}
+      <div>
+        <span className="mb-2.5 block text-[10px] font-bold uppercase tracking-wider text-muted">
+          Encaissements par compte —{" "}
+          {filterPeriod === "today"
+            ? "aujourd'hui"
+            : filterPeriod === "week"
+              ? "7 derniers jours"
+              : filterPeriod === "month"
+                ? "ce mois-ci"
+                : "période personnalisée"}
+        </span>
+
+        {accountSummaries.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-line bg-surface p-6 text-center">
+            <Users className="mx-auto mb-2 h-6 w-6 text-muted" />
+            <p className="text-xs text-muted">
+              Aucun mouvement sur cette période.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {accountSummaries.map((acc) => {
+              const unknown = acc.id === UNKNOWN_ACCOUNT;
+              return (
+                <Card
+                  key={acc.id}
+                  className={`border transition-transform duration-300 hover:translate-y-[-2px] ${
+                    unknown ? "border-line bg-canvas/40" : "border-line bg-surface"
+                  }`}
+                >
+                  <CardBody className="space-y-3 p-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <div
+                          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold ${
+                            unknown
+                              ? "bg-muted/15 text-muted"
+                              : "bg-primary/10 text-primary"
+                          }`}
+                        >
+                          {unknown ? "?" : accountLabel(acc.id).slice(0, 2).toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <strong className="block truncate text-xs text-ink">
+                            {accountLabel(acc.id)}
+                          </strong>
+                          <span className="block text-[10px] capitalize text-muted">
+                            {accountRole(acc.id)} · {acc.moves} mouvement(s)
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="rounded-xl border border-success/20 bg-success/5 p-2 text-center">
+                        <span className="block text-[9px] uppercase text-muted">Encaissé</span>
+                        <strong className="font-mono text-sm text-success">+{acc.cashedIn} DA</strong>
+                      </div>
+                      <div className="rounded-xl border border-danger/20 bg-danger/5 p-2 text-center">
+                        <span className="block text-[9px] uppercase text-muted">Décaissé</span>
+                        <strong className="font-mono text-sm text-danger">-{acc.paidOut} DA</strong>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-xl border border-line bg-canvas/30 p-2 text-[10px]">
+                      <span className="text-muted">Dont paiements élèves</span>
+                      <strong className="font-mono text-primary">{acc.studentPayments} DA</strong>
+                    </div>
+
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="w-full"
+                      onClick={() => openAccount(acc.id)}
+                    >
+                      <Wallet className="h-3.5 w-3.5" /> Historique du compte
+                    </Button>
+                  </CardBody>
+                </Card>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Toolbar: Filters, Search, Custom Dates */}
@@ -700,6 +925,211 @@ export function CashPage() {
           </div>
         </div>
       </Modal>
+
+      {/* ================================================================== */}
+      {/* Historique d'UN compte, sur SES propres dates                       */}
+      {/* ================================================================== */}
+      <Modal
+        open={accountOpenId !== null}
+        onClose={() => setAccountOpenId(null)}
+        title={accountOpenId ? accountLabel(accountOpenId) : ""}
+        subtitle="Choisissez les dates : le total et les mouvements ci-dessous ne concernent que ce compte, indépendamment du filtre de la page."
+        size="xl"
+      >
+        {accountOpenId && (
+          <div className="space-y-4 text-xs">
+            {/* ---- Bornes de la période ---- */}
+            <div className="flex flex-wrap items-end gap-3 rounded-2xl border border-line bg-canvas/40 p-3">
+              <div>
+                <label className="mb-1 block text-[10px] font-bold text-muted">Du</label>
+                <Input
+                  type="date"
+                  value={accountStart}
+                  onChange={(e) => setAccountStart(e.target.value)}
+                  className="w-40"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[10px] font-bold text-muted">Au</label>
+                <Input
+                  type="date"
+                  value={accountEnd}
+                  onChange={(e) => setAccountEnd(e.target.value)}
+                  className="w-40"
+                />
+              </div>
+              <div className="flex gap-1.5">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    const today = getLocalDateString(new Date());
+                    setAccountStart(today);
+                    setAccountEnd(today);
+                  }}
+                >
+                  Aujourd&apos;hui
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    const now = new Date();
+                    setAccountStart(getLocalDateString(new Date(now.getFullYear(), now.getMonth(), 1)));
+                    setAccountEnd(getLocalDateString(now));
+                  }}
+                >
+                  Ce mois
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setAccountStart("");
+                    setAccountEnd("");
+                  }}
+                >
+                  Depuis toujours
+                </Button>
+              </div>
+            </div>
+
+            {/* ---- Les totaux de la période choisie ---- */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+              <div className="rounded-2xl border border-success/25 bg-success/5 p-3 text-center">
+                <span className="block text-[9px] uppercase text-muted">Total encaissé</span>
+                <strong className="font-mono text-lg text-success">+{accountTotals.in} DA</strong>
+              </div>
+              <div className="rounded-2xl border border-danger/25 bg-danger/5 p-3 text-center">
+                <span className="block text-[9px] uppercase text-muted">Total décaissé</span>
+                <strong className="font-mono text-lg text-danger">-{accountTotals.out} DA</strong>
+              </div>
+              <div className="rounded-2xl border border-primary/25 bg-primary-50/40 p-3 text-center">
+                <span className="block text-[9px] uppercase text-muted">Solde du poste</span>
+                <strong className="font-mono text-lg text-primary">
+                  {accountTotals.in - accountTotals.out} DA
+                </strong>
+              </div>
+              <div className="rounded-2xl border border-line bg-canvas/40 p-3 text-center">
+                <span className="block text-[9px] uppercase text-muted">Mouvements</span>
+                <strong className="font-mono text-lg text-ink">{accountTx.length}</strong>
+              </div>
+            </div>
+
+            {/* ---- Les recharges d'élèves passées par ce compte ---- */}
+            {/* Le libellé d'un mouvement de caisse porte un NOM ; cette liste
+                porte l'identifiant de l'élève. C'est elle qui permet de
+                recouper une caisse avec des fiches sans se tromper
+                d'homonyme. */}
+            <div className="rounded-2xl border border-line bg-surface p-3">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <strong className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">
+                  <UserCheck className="h-3.5 w-3.5 text-primary" />
+                  Recharges d&apos;élèves encaissées par ce compte ({accountStudentTx.length})
+                </strong>
+                <span className="font-mono text-xs font-bold text-primary">
+                  {accountTotals.students} DA
+                </span>
+              </div>
+              {accountStudentTx.length === 0 ? (
+                <p className="py-4 text-center text-[10px] italic text-muted">
+                  {accountOpenId === UNKNOWN_ACCOUNT
+                    ? "Les mouvements antérieurs au 12/09/2026 ne portent aucun compte : ils ne peuvent pas être rattachés à un poste."
+                    : "Aucune recharge d'élève sur cette période."}
+                </p>
+              ) : (
+                <div className="max-h-52 overflow-y-auto">
+                  <table className="w-full text-[11px]">
+                    <thead className="sticky top-0 bg-canvas">
+                      <tr className="text-left text-[9px] uppercase text-muted">
+                        <th className="p-2">Date</th>
+                        <th className="p-2">Élève</th>
+                        <th className="p-2">Libellé</th>
+                        <th className="p-2 text-right">Montant</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {accountStudentTx.map((t) => (
+                        <tr key={t.id} className="border-t border-line/50">
+                          <td className="p-2 font-mono text-[10px]">
+                            {new Date(t.date).toLocaleString("fr-DZ", {
+                              day: "2-digit",
+                              month: "2-digit",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </td>
+                          <td className="p-2 font-semibold text-ink">{studentNameOf(t.studentId)}</td>
+                          <td className="max-w-[16rem] truncate p-2 text-muted">{t.description}</td>
+                          <td className="p-2 text-right font-mono font-bold text-success">
+                            +{t.amount} DA
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* ---- Tous les mouvements de caisse du compte ---- */}
+            <div className="rounded-2xl border border-line bg-surface p-3">
+              <strong className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-muted">
+                Tous les mouvements de caisse ({accountTx.length})
+              </strong>
+              {accountTx.length === 0 ? (
+                <p className="py-6 text-center text-[10px] italic text-muted">
+                  Aucun mouvement sur cette période.
+                </p>
+              ) : (
+                <div className="max-h-72 overflow-y-auto">
+                  <table className="w-full text-[11px]">
+                    <thead className="sticky top-0 bg-canvas">
+                      <tr className="text-left text-[9px] uppercase text-muted">
+                        <th className="p-2">Date</th>
+                        <th className="p-2">Type</th>
+                        <th className="p-2">Libellé</th>
+                        <th className="p-2 text-right">Montant</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {accountTx.map((t) => (
+                        <tr key={t.id} className="border-t border-line/50">
+                          <td className="p-2 font-mono text-[10px]">
+                            {new Date(t.date).toLocaleString("fr-DZ", {
+                              day: "2-digit",
+                              month: "2-digit",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                          </td>
+                          <td className="p-2">{getTxTypeBadge(t.type)}</td>
+                          <td className="max-w-[18rem] truncate p-2 text-ink">{t.description}</td>
+                          <td
+                            className={`p-2 text-right font-mono font-bold ${
+                              t.amount > 0 ? "text-success" : "text-danger"
+                            }`}
+                          >
+                            {t.amount > 0 ? "+" : ""}
+                            {t.amount} DA
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end border-t border-line pt-3">
+              <Button variant="outline" onClick={() => setAccountOpenId(null)}>
+                Fermer
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
     </div>
   );
 }

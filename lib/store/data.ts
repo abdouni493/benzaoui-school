@@ -22,6 +22,11 @@ import type {
   ModuleAbsenceRule,
   Notification,
   Parent,
+  PrivateSession,
+  PrivateSessionModule,
+  PrivateSessionStatus,
+  Profile,
+  ReceptionPaymentType,
   ReceptionStaff,
   Salle,
   School,
@@ -36,7 +41,9 @@ import type {
   TeacherAcompte,
   TeacherPayment,
   UnpaidTeacherSession,
+  WorkerPayment,
   WorkerShift,
+  WorkerShiftStatus,
 } from "@/lib/types";
 
 export interface Database {
@@ -50,6 +57,7 @@ export interface Database {
   teacherPayments: TeacherPayment[];
   reception: ReceptionStaff[];
   workerShifts: WorkerShift[];
+  workerPayments: WorkerPayment[];
   sessions: ScheduleSession[];
   subscriptions: Subscription[];
   freePeriods: FreePeriod[];
@@ -71,6 +79,10 @@ export interface Database {
   notifications: Notification[];
   coursework: Coursework[];
   independent: IndependentSession[];
+  privateSessions: PrivateSession[];
+  privateSessionModules: PrivateSessionModule[];
+  /** Les comptes de l'application — la caisse a besoin de NOMMER qui a encaissé. */
+  profiles: Profile[];
 }
 
 /** Real UUIDs now (Postgres primary keys), the prefix argument is kept only
@@ -101,6 +113,7 @@ function emptyDatabase(): Database {
     teacherPayments: [],
     reception: [],
     workerShifts: [],
+    workerPayments: [],
     sessions: [],
     subscriptions: [],
     freePeriods: [],
@@ -122,6 +135,9 @@ function emptyDatabase(): Database {
     notifications: [],
     coursework: [],
     independent: [],
+    privateSessions: [],
+    privateSessionModules: [],
+    profiles: [],
   };
 }
 
@@ -193,6 +209,7 @@ const teachersMapper = makeMapper<Teacher>([
   ["startDate", "start_date"],
   ["percentage", "percentage"],
   ["isPassager", "is_passager"],
+  ["description", "description"],
 ]);
 
 const teacherPaymentsMapper = makeMapper<TeacherPayment>([
@@ -221,6 +238,11 @@ const receptionMapper = makeMapper<ReceptionStaff>([
   ["role", "role"],
   ["rfid", "rfid"],
   ["hourlyRate", "hourly_rate"],
+  ["workDays", "work_days"],
+  ["dailyStart", "daily_start"],
+  ["dailyEnd", "daily_end"],
+  ["jobTitle", "job_title"],
+  ["payAlertDays", "pay_alert_days"],
 ]);
 
 const workerShiftsMapper = makeMapper<WorkerShift>([
@@ -234,6 +256,66 @@ const workerShiftsMapper = makeMapper<WorkerShift>([
   ["paid", "paid"],
   ["paymentId", "payment_id"],
   ["createdAt", "created_at"],
+  ["status", "status"],
+  ["source", "source"],
+  ["notes", "notes"],
+]);
+
+const workerPaymentsMapper = makeMapper<WorkerPayment>([
+  ["id", "id"],
+  ["workerId", "worker_id"],
+  ["amount", "amount"],
+  ["method", "method"],
+  ["periodStart", "period_start"],
+  ["periodEnd", "period_end"],
+  ["periodKey", "period_key"],
+  ["daysCount", "days_count"],
+  ["minutes", "minutes"],
+  ["description", "description"],
+  ["details", "details"],
+  ["paidAt", "paid_at"],
+  ["cashTxId", "cash_tx_id"],
+]);
+
+const profilesMapper = makeMapper<Profile>([
+  ["id", "id"],
+  ["role", "role"],
+  ["fullName", "full_name"],
+  ["email", "email"],
+  ["phone", "phone"],
+]);
+
+const privateSessionsMapper = makeMapper<PrivateSession>([
+  ["id", "id"],
+  ["studentId", "student_id"],
+  ["guestName", "guest_name"],
+  ["guestPhone", "guest_phone"],
+  ["guestPhone2", "guest_phone2"],
+  ["classId", "class_id"],
+  ["year", "year"],
+  ["filiereId", "filiere_id"],
+  ["scheduledAt", "scheduled_at"],
+  ["durationMinutes", "duration_minutes"],
+  ["totalPrice", "total_price"],
+  ["paidAmount", "paid_amount"],
+  ["status", "status"],
+  ["notes", "notes"],
+  ["createdAt", "created_at"],
+  ["createdBy", "created_by"],
+]);
+
+const privateSessionModulesMapper = makeMapper<PrivateSessionModule>([
+  ["id", "id"],
+  ["privateSessionId", "private_session_id"],
+  ["moduleId", "module_id"],
+  ["teacherId", "teacher_id"],
+  ["minutes", "minutes"],
+  ["hourlyPrice", "hourly_price"],
+  ["totalPrice", "total_price"],
+  ["teacherPercentage", "teacher_percentage"],
+  ["teacherAmount", "teacher_amount"],
+  ["teacherPaid", "teacher_paid"],
+  ["teacherPaidAt", "teacher_paid_at"],
 ]);
 
 const studentCredentialsMapper = makeMapper<StudentCredential>([
@@ -293,6 +375,7 @@ const sessionsMapper = makeMapper<ScheduleSession>([
   ["openPrice", "open_price"],
   ["isFree", "is_free"],
   ["openAudience", "open_audience"],
+  ["billingStartDate", "billing_start_date"],
 ]);
 
 const subscriptionsMapper = makeMapper<Subscription>([
@@ -324,6 +407,7 @@ const balanceTxMapper = makeMapper<BalanceTransaction>([
   ["type", "type"],
   ["description", "description"],
   ["moduleId", "module_id"],
+  ["createdBy", "created_by"],
 ]);
 
 const attendanceMapper = makeMapper<AttendanceRecord>([
@@ -416,6 +500,7 @@ const cashMapper = makeMapper<CashTransaction>([
   ["amount", "amount"],
   ["date", "date"],
   ["description", "description"],
+  ["createdBy", "created_by"],
 ]);
 
 const notificationsMapper = makeMapper<Notification>([
@@ -464,6 +549,8 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
   teacherPayments: { table: "teacher_payments", select: "*", ...teacherPaymentsMapper },
   reception: { table: "reception_staff", select: "*", ...receptionMapper },
   workerShifts: { table: "worker_shifts", select: "*", ...workerShiftsMapper },
+  workerPayments: { table: "worker_payments", select: "*", ...workerPaymentsMapper },
+  profiles: { table: "profiles", select: "*", ...profilesMapper },
   studentCredentials: { table: "student_credentials", select: "*", ...studentCredentialsMapper },
   moduleAbsenceRules: { table: "module_absence_rules", select: "*", ...moduleAbsenceRulesMapper },
   sessions: { table: "sessions", select: "*", ...sessionsMapper },
@@ -523,6 +610,12 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
   notifications: { table: "notifications", select: "*", ...notificationsMapper },
   coursework: { table: "coursework", select: "*", ...courseworkMapper },
   independent: { table: "independent_sessions", select: "*", ...independentMapper },
+  privateSessions: { table: "private_sessions", select: "*", ...privateSessionsMapper },
+  privateSessionModules: {
+    table: "private_session_modules",
+    select: "*",
+    ...privateSessionModulesMapper,
+  },
 };
 
 // ---- Lire une table EN ENTIER ----------------------------------------------
@@ -831,6 +924,110 @@ interface DataActions {
   scanWorkerCard: (code: string) => Promise<WorkerScanResult>;
   /** Freezes days started without a clock-out once the day is over. */
   freezeOpenWorkerShifts: () => Promise<{ ok: boolean; frozen?: number }>;
+  /** Écrit (ou corrige) LA journée d'un travailleur à la main : arrivée,
+   *  sortie, ou absence constatée. Le badge n'est qu'une des portes — une
+   *  journée saisie ici vaut exactement la même chose qu'une journée pointée. */
+  setWorkerShift: (args: {
+    workerId: string;
+    workDate: string;
+    startAt?: string | null;
+    endAt?: string | null;
+    status?: WorkerShiftStatus;
+    notes?: string;
+  }) => Promise<{ ok: boolean; shiftId?: string; minutes?: number; messageKey?: string }>;
+  /** Clôture la journée en cours d'un travailleur (fin de service à la main). */
+  endWorkerShift: (
+    workerId: string,
+    endAt?: string,
+  ) => Promise<{ ok: boolean; minutes?: number; messageKey?: string }>;
+  /** Constate les absences : chaque jour ouvré RÉVOLU où le travailleur n'a ni
+   *  badgé ni été pointé à la main devient une absence enregistrée. Idempotent :
+   *  une journée déjà présente ou déjà marquée absente n'est jamais réécrite. */
+  markWorkerAbsences: (args?: {
+    workerId?: string;
+    from?: string;
+    to?: string;
+  }) => Promise<{ ok: boolean; marked?: number; workers?: number }>;
+  /** Règle une PÉRIODE de travail (mois, journée, demi-journée ou heures) et
+   *  l'inscrit au registre des règlements — le seul endroit qui dise avec
+   *  certitude si un mois a déjà été payé. */
+  payWorkerPeriod: (args: {
+    workerId: string;
+    method: ReceptionPaymentType;
+    periodKey: string;
+    periodStart?: string;
+    periodEnd?: string;
+    shiftIds?: string[];
+    amount: number;
+    description?: string;
+    details?: unknown[];
+    settleDeductions?: boolean;
+    acompteIds?: string[];
+    absenceIds?: string[];
+  }) => Promise<{ ok: boolean; paymentId?: string; days?: number; minutes?: number; messageKey?: string }>;
+  /** Annule un règlement : les journées redeviennent dues, les acomptes et
+   *  retenues redeviennent exigibles, et la ligne de caisse est retirée. */
+  deleteWorkerPayment: (
+    paymentId: string,
+  ) => Promise<{ ok: boolean; restored?: number; amount?: number; messageKey?: string }>;
+
+  // ---- Séances particulières ------------------------------------------------
+  /** Crée le rendez-vous, ses modules et — si la famille paie tout de suite —
+   *  son encaissement, en une seule transaction. */
+  createPrivateSession: (payload: {
+    id?: string;
+    studentId?: string;
+    guestName?: string;
+    guestPhone?: string;
+    guestPhone2?: string;
+    classId?: string;
+    year?: string;
+    filiereId?: string;
+    scheduledAt: string;
+    notes?: string;
+    paidAmount?: number;
+    modules: Array<{
+      moduleId: string;
+      teacherId?: string;
+      minutes: number;
+      hourlyPrice: number;
+      teacherPercentage: number;
+      /** l'enseignant est réglé dans la foulée */
+      teacherPaid?: boolean;
+    }>;
+  }) => Promise<{ ok: boolean; id?: string; total?: number; messageKey?: string }>;
+  /** Réécrit le rendez-vous et ses modules (l'encaissement déjà fait est
+   *  conservé ; seule la dette bouge si le total change). */
+  updatePrivateSession: (
+    id: string,
+    payload: Parameters<DataActions["createPrivateSession"]>[0],
+  ) => Promise<{ ok: boolean; total?: number; messageKey?: string }>;
+  /** Encaisse (tout ou partie de) la dette de la famille sur ce rendez-vous. */
+  payPrivateSession: (
+    id: string,
+    amount: number,
+  ) => Promise<{ ok: boolean; paid?: number; due?: number; messageKey?: string }>;
+  /** Règle l'enseignant d'UN module de ce rendez-vous : caisse + historique de
+   *  l'enseignant, comme n'importe quel autre versement. */
+  payPrivateSessionTeacher: (
+    moduleRowId: string,
+    amount?: number,
+  ) => Promise<{ ok: boolean; amount?: number; messageKey?: string }>;
+  /** Séance tenue / annulée / replanifiée. */
+  setPrivateSessionStatus: (
+    id: string,
+    status: PrivateSessionStatus,
+  ) => Promise<{ ok: boolean; messageKey?: string }>;
+  reschedulePrivateSession: (
+    id: string,
+    scheduledAt: string,
+  ) => Promise<{ ok: boolean; messageKey?: string }>;
+  /** Supprime le rendez-vous. Refusé tant qu'il reste de l'argent dessus. */
+  deletePrivateSession: (
+    id: string,
+    force?: boolean,
+  ) => Promise<{ ok: boolean; messageKey?: string }>;
+
   /** Settles the selected worked days; they never reappear as unpaid. */
   payWorkerShifts: (
     workerId: string,
@@ -1253,6 +1450,237 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "worker.error" };
     }
     const res = data as { ok: boolean; days?: number; minutes?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  // ---- Workers: manual register, absences, period settlements ---------------
+  //
+  // Le badge ne suffit pas : un travailleur qui oublie sa carte, un agent de
+  // ménage qui n'en a pas, une journée à corriger — tout cela doit pouvoir
+  // s'écrire à la main, et valoir exactement autant qu'un pointage.
+  setWorkerShift: async ({ workerId, workDate, startAt, endAt, status, notes }) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("set_worker_shift", {
+      p_worker_id: workerId,
+      p_work_date: workDate,
+      p_start_at: startAt ?? null,
+      p_end_at: endAt ?? null,
+      p_status: status ?? "present",
+      p_notes: notes ?? "",
+    });
+    if (error || !data) {
+      console.error("set_worker_shift failed:", error?.message);
+      reportWriteFailure("worker_shifts", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "worker.error" };
+    }
+    const res = data as { ok: boolean; shiftId?: string; minutes?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  endWorkerShift: async (workerId, endAt) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("end_worker_shift", {
+      p_worker_id: workerId,
+      p_end_at: endAt ?? null,
+    });
+    if (error || !data) {
+      console.error("end_worker_shift failed:", error?.message);
+      reportWriteFailure("worker_shifts", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "worker.error" };
+    }
+    const res = data as { ok: boolean; minutes?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  markWorkerAbsences: async (args = {}) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("mark_worker_absences", {
+      p_worker_id: args.workerId ?? null,
+      p_from: args.from ?? null,
+      p_to: args.to ?? null,
+    });
+    // Migration pas encore passée : l'écran continue de fonctionner, il ne
+    // constate simplement aucune absence automatique.
+    if (error || !data) return { ok: false };
+    const res = data as { ok: boolean; marked?: number; workers?: number };
+    if (res.ok && (res.marked ?? 0) > 0) await get().fetchAll();
+    return res;
+  },
+
+  payWorkerPeriod: async ({
+    workerId,
+    method,
+    periodKey,
+    periodStart,
+    periodEnd,
+    shiftIds,
+    amount,
+    description,
+    details,
+    settleDeductions,
+    acompteIds,
+    absenceIds,
+  }) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("pay_worker_period", {
+      p_worker_id: workerId,
+      p_method: method,
+      p_period_key: periodKey,
+      p_period_start: periodStart ?? null,
+      p_period_end: periodEnd ?? null,
+      p_shift_ids: shiftIds ?? null,
+      p_amount: Math.round(amount),
+      p_description: description ?? "",
+      p_details: details ?? [],
+      p_acompte_ids: acompteIds ?? null,
+      p_absence_ids: absenceIds ?? null,
+      p_settle_deductions: !!settleDeductions,
+    });
+    if (error || !data) {
+      console.error("pay_worker_period failed:", error?.message);
+      reportWriteFailure("worker_payments", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "worker.error" };
+    }
+    const res = data as {
+      ok: boolean;
+      paymentId?: string;
+      days?: number;
+      minutes?: number;
+      messageKey?: string;
+    };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  deleteWorkerPayment: async (paymentId) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("delete_worker_payment", {
+      p_payment_id: paymentId,
+    });
+    if (error || !data) {
+      console.error("delete_worker_payment failed:", error?.message);
+      reportWriteFailure("worker_payments", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "worker.error" };
+    }
+    const res = data as { ok: boolean; restored?: number; amount?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  // ---- Séances particulières -------------------------------------------------
+  // Le rendez-vous, ses modules et son encaissement partent ensemble : une
+  // séance à moitié écrite (les modules sans la séance, l'argent sans la
+  // séance) n'aurait aucun sens et laisserait une dette orpheline.
+  createPrivateSession: async (payload) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("create_private_session", {
+      p_payload: payload,
+    });
+    if (error || !data) {
+      console.error("create_private_session failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; id?: string; total?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  updatePrivateSession: async (id, payload) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("update_private_session", {
+      p_id: id,
+      p_payload: payload,
+    });
+    if (error || !data) {
+      console.error("update_private_session failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; total?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  payPrivateSession: async (id, amount) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("pay_private_session", {
+      p_id: id,
+      p_amount: Math.round(amount),
+    });
+    if (error || !data) {
+      console.error("pay_private_session failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; paid?: number; due?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  payPrivateSessionTeacher: async (moduleRowId, amount) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("pay_private_session_teacher", {
+      p_module_row_id: moduleRowId,
+      p_amount: amount === undefined ? null : Math.round(amount),
+    });
+    if (error || !data) {
+      console.error("pay_private_session_teacher failed:", error?.message);
+      reportWriteFailure("private_session_modules", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; amount?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  setPrivateSessionStatus: async (id, status) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("set_private_session_status", {
+      p_id: id,
+      p_status: status,
+    });
+    if (error || !data) {
+      console.error("set_private_session_status failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  reschedulePrivateSession: async (id, scheduledAt) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("reschedule_private_session", {
+      p_id: id,
+      p_scheduled_at: scheduledAt,
+    });
+    if (error || !data) {
+      console.error("reschedule_private_session failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  deletePrivateSession: async (id, force) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("delete_private_session", {
+      p_id: id,
+      p_force: !!force,
+    });
+    if (error || !data) {
+      console.error("delete_private_session failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; messageKey?: string };
     if (res.ok) await get().fetchAll();
     return res;
   },

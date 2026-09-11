@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useData } from "@/lib/store/data";
 import { useSession } from "@/lib/store/session";
 import { Card, CardBody } from "@/components/ui/Card";
@@ -10,6 +11,8 @@ import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import { WhatsAppAlertsCard } from "@/components/whatsapp/WhatsAppAlertsCard";
 import { BirthdayAlertsCard } from "@/components/birthdays/BirthdayAlertsCard";
 import { balanceDriftByStudent, studentDebtOf } from "@/lib/helpers";
+import { payAlertsOf } from "@/lib/workerPay";
+import Link from "next/link";
 import { motion } from "framer-motion";
 import {
   Users,
@@ -57,6 +60,15 @@ const itemVariants = {
 };
 
 function AdminDashboard({ reception = false }: { reception?: boolean }) {
+  // L'heure courante ne se lit pas pendant le rendu — deux rendus successifs
+  // donneraient deux réponses. Rafraîchie chaque minute, elle fait basculer
+  // une séance « en retard » sous les yeux de la réception, sans rechargement.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   const {
     students,
     teachers,
@@ -69,6 +81,11 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     groups,
     subscriptions,
     balanceTx,
+    reception: workers,
+    workerShifts,
+    workerPayments,
+    privateSessions,
+    privateSessionModules,
     complete,
   } = useData();
 
@@ -181,6 +198,40 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     return amt >= 5000;
   });
 
+  // ---------------------------------------------------------------------------
+  // 5.a  Les salaires du personnel
+  // ---------------------------------------------------------------------------
+  // Calculés par `lib/workerPay.ts`, exactement comme sur l'écran Travailleurs.
+  // Deux calculs séparés finissaient toujours par annoncer deux retards
+  // différents — et c'est le tableau de bord qu'on croit.
+  const workerAlerts = payAlertsOf(workers, workerShifts, workerPayments);
+  const lateWorkers = workerAlerts.filter((a) => a.urgency === "late");
+  const soonWorkers = workerAlerts.filter((a) => a.urgency === "soon");
+
+  // ---------------------------------------------------------------------------
+  // 5.b  Les séances particulières
+  // ---------------------------------------------------------------------------
+  const plannedPrivate = privateSessions.filter((p) => p.status === "planned");
+  // « En retard » : l'heure est passée et la séance n'a jamais été conclue.
+  // C'est le cas qui se perd, et avec lui l'argent de la séance.
+  const latePrivate = plannedPrivate.filter((p) => new Date(p.scheduledAt).getTime() < nowMs);
+  const soonPrivate = plannedPrivate.filter((p) => {
+    const t = new Date(p.scheduledAt).getTime();
+    return t >= nowMs && t - nowMs <= 24 * 3600 * 1000;
+  });
+  const privateTeacherDue = privateSessions
+    .filter((p) => p.status !== "cancelled")
+    .map((p) => ({
+      session: p,
+      due: privateSessionModules
+        .filter((m) => m.privateSessionId === p.id && m.teacherId && !m.teacherPaid)
+        .reduce((sum, m) => sum + m.teacherAmount, 0),
+    }))
+    .filter((row) => row.due > 0);
+  const privateStudentDebt = privateSessions
+    .filter((p) => p.status !== "cancelled" && p.totalPrice > p.paidAmount)
+    .reduce((sum, p) => sum + (p.totalPrice - p.paidAmount), 0);
+
   const alerts = [];
   // La première alerte de la journée : qui a étudié sans avoir de quoi payer.
   // Depuis que le badge n'est plus refusé pour solde épuisé, c'est la seule
@@ -195,6 +246,50 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     alerts.push({
       type: "warning" as const,
       text: `${driftingBalances.length} élève(s) ont un solde qui ne correspond pas à la somme de leur historique. Ce n'est pas de l'argent dû : à corriger en base avec reconcile_student_balances(true).`,
+    });
+  }
+  // Un salaire en retard passe avant tout le reste : c'est la seule dette de
+  // l'école envers quelqu'un qui travaille encore pour elle.
+  if (lateWorkers.length > 0) {
+    alerts.push({
+      type: "danger" as const,
+      text: `${lateWorkers.length} salaire(s) de travailleur EN RETARD — ${lateWorkers.reduce((sum, a) => sum + a.period.amount, 0)} DA à verser (${lateWorkers.map((a) => `${a.worker.firstName} ${a.worker.lastName}`).join(", ")}).`,
+      href: "/workers",
+    });
+  }
+  if (soonWorkers.length > 0) {
+    alerts.push({
+      type: "warning" as const,
+      text: `${soonWorkers.length} salaire(s) de travailleur à verser dans les prochains jours — ${soonWorkers.reduce((sum, a) => sum + a.period.amount, 0)} DA.`,
+      href: "/workers",
+    });
+  }
+  if (latePrivate.length > 0) {
+    alerts.push({
+      type: "danger" as const,
+      text: `${latePrivate.length} séance(s) particulière(s) en retard : l'heure est passée sans qu'elles soient marquées tenues ou annulées.`,
+      href: "/particulier",
+    });
+  }
+  if (soonPrivate.length > 0) {
+    alerts.push({
+      type: "info" as const,
+      text: `${soonPrivate.length} séance(s) particulière(s) dans les 24 heures.`,
+      href: "/particulier",
+    });
+  }
+  if (privateTeacherDue.length > 0) {
+    alerts.push({
+      type: "warning" as const,
+      text: `${privateTeacherDue.length} séance(s) particulière(s) avec un enseignant non réglé — ${privateTeacherDue.reduce((sum, r) => sum + r.due, 0)} DA.`,
+      href: "/particulier",
+    });
+  }
+  if (privateStudentDebt > 0) {
+    alerts.push({
+      type: "warning" as const,
+      text: `${privateStudentDebt} DA de dettes sur les séances particulières.`,
+      href: "/particulier",
     });
   }
   if (severeDebtors.length > 0) {
@@ -285,21 +380,33 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
       {/* Row 2: Operational Alerts (All Users) */}
       {alerts.length > 0 && (
         <motion.div variants={itemVariants} className="space-y-2">
-          {alerts.map((alert, idx) => (
-            <div
-              key={idx}
-              className={`p-3.5 rounded-2xl border flex items-center gap-3 text-xs font-semibold ${
-                alert.type === "danger"
-                  ? "bg-danger/10 border-danger/20 text-danger"
-                  : alert.type === "warning"
-                  ? "bg-warning/10 border-warning/20 text-warning"
-                  : "bg-primary-50 text-primary border-primary/20"
-              }`}
-            >
-              <AlertTriangle className="h-4.5 w-4.5 shrink-0" />
-              <span>{alert.text}</span>
-            </div>
-          ))}
+          {alerts.map((alert, idx) => {
+            const className = `p-3.5 rounded-2xl border flex items-center gap-3 text-xs font-semibold ${
+              alert.type === "danger"
+                ? "bg-danger/10 border-danger/20 text-danger animate-pulse"
+                : alert.type === "warning"
+                ? "bg-warning/10 border-warning/20 text-warning"
+                : "bg-primary-50 text-primary border-primary/20"
+            }`;
+            const body = (
+              <>
+                <AlertTriangle className="h-4.5 w-4.5 shrink-0" />
+                <span>{alert.text}</span>
+              </>
+            );
+            // Une alerte qu'on ne peut pas suivre jusqu'à l'écran qui la règle
+            // se relit tous les matins sans que rien ne bouge.
+            const href = "href" in alert ? (alert as { href?: string }).href : undefined;
+            return href ? (
+              <Link key={idx} href={href} className={`${className} transition-transform hover:scale-[1.01]`}>
+                {body}
+              </Link>
+            ) : (
+              <div key={idx} className={className}>
+                {body}
+              </div>
+            );
+          })}
         </motion.div>
       )}
 
