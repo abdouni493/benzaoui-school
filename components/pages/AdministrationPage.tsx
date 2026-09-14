@@ -45,12 +45,16 @@ import { buildWorkerPaymentReceipt } from "@/lib/reports/workerPayment";
 import { useSettings } from "@/lib/store/settings";
 import {
   DEFAULT_WORK_DAYS,
+  addMonthsKeepingDay,
   buildPaymentDetails,
   dayKey,
   fmtHours,
   frDate,
+  payAnchorOf,
+  pendingAbsencesOf,
   todayKey,
   unpaidPeriodsOf,
+  workDaysBetween,
   urgencyOf,
   worksOn,
   type WorkerPeriod,
@@ -123,6 +127,7 @@ export function AdministrationPage() {
     setWorkerShift,
     endWorkerShift,
     markWorkerAbsences,
+    resolveWorkerAbsence,
     payWorkerPeriod,
     deleteWorkerPayment,
   } = useData();
@@ -152,6 +157,9 @@ export function AdministrationPage() {
   const [hourlyRate, setHourlyRate] = useState<number>(0);
   const [rfid, setRfid] = useState("");
   const [startDate, setStartDate] = useState(todayKey());
+  /** « Payé à partir du » — travailleurs au mois. Vide = même date que
+   *  l'embauche, ce qui est le cas le plus courant. */
+  const [payStartDate, setPayStartDate] = useState("");
   const [workDays, setWorkDays] = useState<Day[]>(DEFAULT_WORK_DAYS);
   const [dailyStart, setDailyStart] = useState("08:00");
   const [dailyEnd, setDailyEnd] = useState("16:00");
@@ -165,7 +173,6 @@ export function AdministrationPage() {
   // Règlement
   const [payPeriodKey, setPayPeriodKey] = useState<string>("");
   const [payAmountOverride, setPayAmountOverride] = useState<number | null>(null);
-  const [deductAbsences, setDeductAbsences] = useState(false);
   const [deductAcomptes, setDeductAcomptes] = useState(true);
   const [deductRetenues, setDeductRetenues] = useState(true);
   const [payDetailsOpen, setPayDetailsOpen] = useState(false);
@@ -180,6 +187,16 @@ export function AdministrationPage() {
   const [savingShift, setSavingShift] = useState(false);
 
   // Badge
+  // ---- Trancher la retenue d'une absence ------------------------------------
+  // Une absence constatée ne dit pas encore ce qu'elle coûte. Tant que
+  // personne n'a tranché, elle reste en alerte — ici et sur le tableau de bord
+  // — et le règlement de la période refuse de se conclure sans elle.
+  const [absenceShift, setAbsenceShift] = useState<WorkerShift | null>(null);
+  const [absenceCost, setAbsenceCost] = useState<number>(0);
+  const [absenceDeduct, setAbsenceDeduct] = useState(true);
+  const [absenceReason, setAbsenceReason] = useState("");
+  const [savingAbsence, setSavingAbsence] = useState(false);
+
   const [scanCode, setScanCode] = useState("");
   const [scanFeedback, setScanFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -285,6 +302,67 @@ export function AdministrationPage() {
     [reception, workerShifts],
   );
 
+  /**
+   * Les absences dont la retenue n'a pas encore été tranchée.
+   *
+   * Calculées par `lib/workerPay.ts`, comme les alertes de paie et comme le
+   * tableau de bord : une seule source, donc jamais deux comptes différents de
+   * la même absence. Ne concerne que les travailleurs AU MOIS — un journalier
+   * payé aux journées travaillées n'a rien à se faire retenir quand il ne
+   * vient pas.
+   */
+  const absenceAlerts = useMemo(
+    () => pendingAbsencesOf(reception, workerShifts, todayKey()),
+    [reception, workerShifts],
+  );
+
+  /** Ce qu'une journée d'absence coûterait par défaut : le salaire mensuel
+   *  réparti sur les jours ouvrés du mois. C'est une PROPOSITION — la
+   *  direction garde la main, y compris pour ne rien retenir. */
+  const defaultAbsenceCost = (w: ReceptionStaff, date: string) => {
+    if (w.paymentType !== "monthly") return 0;
+    const [y, m] = date.split("-").map(Number);
+    const start = dayKey(new Date(y, m - 1, 1));
+    const end = dayKey(new Date(y, m, 0));
+    const days = workDaysBetween(w, start, end) || 1;
+    return Math.round((w.salary || 0) / days);
+  };
+
+  const openAbsenceResolver = (w: ReceptionStaff, shift: WorkerShift) => {
+    setSelectedStaff(w);
+    setAbsenceShift(shift);
+    setAbsenceDeduct(true);
+    setAbsenceCost(defaultAbsenceCost(w, shift.workDate));
+    setAbsenceReason(shift.notes ?? "");
+    setActiveMenuId(null);
+  };
+
+  const handleResolveAbsence = async () => {
+    if (!absenceShift) return;
+    setSavingAbsence(true);
+    try {
+      const res = await resolveWorkerAbsence({
+        shiftId: absenceShift.id,
+        // Ne rien retenir est une DÉCISION, pas une absence de décision : la
+        // journée sort des alertes avec 0 DA de retenue.
+        cost: absenceDeduct ? Math.max(0, absenceCost) : 0,
+        description:
+          absenceReason.trim() ||
+          `Absence du ${frDate(absenceShift.workDate)}`,
+      });
+      if (!res.ok) {
+        alert(
+          "L'enregistrement a échoué. Si le message parle d'une fonction manquante, passez la " +
+            "migration supabase/migrations/20260915_teacher_pay_matrix_particulier_workflow.sql.",
+        );
+        return;
+      }
+      setAbsenceShift(null);
+    } finally {
+      setSavingAbsence(false);
+    }
+  };
+
   // ---- CRUD travailleur ------------------------------------------------------
   const resetForm = () => {
     setFirstName("");
@@ -299,6 +377,7 @@ export function AdministrationPage() {
     setHourlyRate(0);
     setRfid("");
     setStartDate(todayKey());
+    setPayStartDate("");
     setWorkDays(DEFAULT_WORK_DAYS);
     setDailyStart("08:00");
     setDailyEnd("16:00");
@@ -344,6 +423,9 @@ export function AdministrationPage() {
       dailyEnd,
       jobTitle: jobTitle.trim(),
       payAlertDays,
+      // Vide = même date que l'embauche ; on n'écrit alors rien, pour que
+      // `payAnchorOf` retombe sur `startDate` comme il l'a toujours fait.
+      payStartDate: paymentType === "monthly" ? payStartDate || undefined : undefined,
     };
 
     // Ménage n'a jamais de compte ; les autres n'en ont un que si les
@@ -458,6 +540,7 @@ export function AdministrationPage() {
       dailyEnd,
       jobTitle: jobTitle.trim(),
       payAlertDays,
+      payStartDate: paymentType === "monthly" ? payStartDate || undefined : undefined,
     });
     setIsEditOpen(false);
     resetForm();
@@ -642,7 +725,6 @@ export function AdministrationPage() {
     const periods = periodsOf(w).filter((p) => !p.running);
     setPayPeriodKey(periods[0] ? `${periods[0].key}|${periods[0].start}` : "");
     setPayAmountOverride(null);
-    setDeductAbsences(false);
     setDeductAcomptes(true);
     setDeductRetenues(true);
     setPayDetailsOpen(false);
@@ -661,8 +743,15 @@ export function AdministrationPage() {
   const acomptesTotal = payOpenAcomptes.reduce((s, a) => s + a.amount, 0);
   const retenuesTotal = payOpenRetenues.reduce((s, a) => s + a.cost, 0);
 
-  const grossOf = (p: WorkerPeriod | null) =>
-    !p ? 0 : Math.max(0, p.amount - (deductAbsences ? p.absenceDeduction : 0));
+  /**
+   * La rémunération BRUTE de la période, avant acomptes et retenues.
+   *
+   * Elle ne retire plus les absences : depuis qu'une absence se tranche, sa
+   * retenue est une ligne de `teacher_absences` que le bloc « Retenues »
+   * déduit déjà. La retirer ici AUSSI comptait la même absence deux fois —
+   * le travailleur perdait deux journées pour une.
+   */
+  const grossOf = (p: WorkerPeriod | null) => (!p ? 0 : Math.max(0, p.amount));
 
   const computedNet = (() => {
     const gross = grossOf(chosenPeriod);
@@ -735,9 +824,7 @@ export function AdministrationPage() {
             amount: finalPay,
             gross: grossOf(chosenPeriod),
             acomptes: deductAcomptes ? acomptesTotal : 0,
-            deductions:
-              (deductRetenues ? retenuesTotal : 0) +
-              (deductAbsences ? chosenPeriod.absenceDeduction : 0),
+            deductions: deductRetenues ? retenuesTotal : 0,
             periodLabel: chosenPeriod.label,
             details,
             paidAt: new Date().toISOString(),
@@ -795,6 +882,7 @@ export function AdministrationPage() {
     setJobTitle(w.jobTitle ?? "");
     setPaymentType(w.paymentType);
     setStartDate(w.startDate);
+    setPayStartDate(w.payStartDate ?? "");
     setSalary(w.salary);
     setHourlyRate(w.hourlyRate ?? 0);
     setRfid(w.rfid ?? "");
@@ -958,11 +1046,48 @@ export function AdministrationPage() {
             <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
             <p className="mt-1 text-[10px] text-muted">
               {paymentType === "monthly"
-                ? "Les mois dus partent de cette date — jamais avant."
+                ? "Les périodes dues partent de cette date — jamais avant."
                 : "Aucune journée n'est comptée avant cette date."}
             </p>
           </div>
         </div>
+
+        {/* ---- La date d'où part la PAIE (travailleurs au mois) --------------
+            Un salaire mensuel se compte depuis le jour où l'employé commence
+            à être payé, pas depuis le 1er : payé à partir du 10 septembre, il
+            est dû le 10 octobre. L'écran découpait la paie en mois civils et
+            annonçait le salaire dû le 30 septembre — puis « en retard »
+            pendant les dix jours où il n'était pas encore gagné. */}
+        {paymentType === "monthly" && (
+          <div className="mt-3 rounded-xl border border-line bg-surface p-3">
+            <label className="mb-1 block text-xs font-semibold text-muted">
+              Payé à partir du <span className="font-normal">(facultatif)</span>
+            </label>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,14rem)_1fr]">
+              <Input
+                type="date"
+                value={payStartDate}
+                onChange={(e) => setPayStartDate(e.target.value)}
+              />
+              <p className="self-center text-[10px] leading-relaxed text-muted">
+                {(() => {
+                  const anchor = payAnchorOf({ payStartDate, startDate });
+                  if (!anchor) return "Laissez vide pour partir de la date d'embauche.";
+                  const next = addMonthsKeepingDay(anchor, 1);
+                  return (
+                    <>
+                      La paie court du <strong className="text-ink">{frDate(anchor)}</strong> au
+                      jour précédant le <strong className="text-ink">{frDate(next)}</strong>, et
+                      le salaire est dû le{" "}
+                      <strong className="text-primary">{frDate(next)}</strong>. L&apos;alerte de
+                      paiement se déclenche {payAlertDays} jour(s) avant.
+                    </>
+                  );
+                })()}
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ---- Jours et horaires attendus ---- */}
@@ -1114,6 +1239,47 @@ export function AdministrationPage() {
                     {a.daysLeft === 0 ? "aujourd'hui" : `dans ${a.daysLeft} j`}
                   </button>
                 ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ---- ABSENCES À TRANCHER --------------------------------------------
+          Une absence constatée — relevée le soir, ou saisie à la main — ne dit
+          pas encore ce qu'elle retient sur la paie. Elle reste ici jusqu'à ce
+          que quelqu'un tranche, même pour décider de ne rien retenir : sans
+          cette étape, un mois se payait plein alors qu'il ne l'était pas. */}
+      {absenceAlerts.length > 0 && (
+        <div className="mb-4 rounded-2xl border-2 border-warning/50 bg-warning/10 p-4">
+          <div className="flex items-start gap-3">
+            <UserX className="mt-0.5 h-5 w-5 shrink-0 animate-pulse text-warning" />
+            <div className="min-w-0 flex-1">
+              <strong className="block text-sm text-warning">
+                {absenceAlerts.length} absence(s) à trancher
+              </strong>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
+                Ces journées sont enregistrées comme <strong>absences</strong> mais personne
+                n&apos;a encore dit ce qu&apos;elles retiennent sur la paie. Cliquez pour fixer la
+                retenue — ou pour décider de <strong>ne rien retenir</strong>. Tant
+                qu&apos;elles restent ici, le règlement de la période les rappellera.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {absenceAlerts.slice(0, 24).map((a) => (
+                  <button
+                    key={a.shift.id}
+                    onClick={() => openAbsenceResolver(a.worker, a.shift)}
+                    className="rounded-lg border border-warning/30 bg-warning/15 px-2.5 py-1 text-[10px] font-bold text-warning transition-colors hover:bg-warning/25"
+                  >
+                    {a.worker.firstName} {a.worker.lastName} · {frDate(a.shift.workDate)}
+                    {a.daysAgo > 0 && ` · il y a ${a.daysAgo} j`}
+                  </button>
+                ))}
+                {absenceAlerts.length > 24 && (
+                  <span className="self-center text-[10px] text-muted">
+                    … et {absenceAlerts.length - 24} autre(s)
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -1891,10 +2057,26 @@ export function AdministrationPage() {
                             </div>
                             {p.absent > 0 && (
                               <p className="mt-2 border-t border-line/60 pt-2 text-[10px] text-muted">
-                                {p.absent} journée(s) d&apos;absence sur la période — déduction
-                                possible de{" "}
-                                <strong className="text-danger">{p.absenceDeduction} DA</strong> au
-                                moment du règlement.
+                                {p.absent} journée(s) d&apos;absence sur la période
+                                {p.absenceDeduction > 0 ? (
+                                  <>
+                                    {" "}— retenue décidée :{" "}
+                                    <strong className="text-danger">
+                                      {p.absenceDeduction} DA
+                                    </strong>
+                                    .
+                                  </>
+                                ) : p.pendingAbsences.length > 0 ? (
+                                  <>
+                                    {" — "}
+                                    <strong className="text-warning">
+                                      {p.pendingAbsences.length} à trancher
+                                    </strong>{" "}
+                                    avant de pouvoir régler.
+                                  </>
+                                ) : (
+                                  " — aucune retenue décidée."
+                                )}
                               </p>
                             )}
                           </div>
@@ -2200,6 +2382,137 @@ export function AdministrationPage() {
       </Modal>
 
       {/* ---- Acompte ---- */}
+      {/* ------------------------------------------------------------------ */}
+      {/* TRANCHER UNE ABSENCE                                                */}
+      {/*                                                                     */}
+      {/* Une absence constatée ne dit pas encore ce qu'elle coûte : la        */}
+      {/* direction peut retenir une journée, une partie, ou rien du tout     */}
+      {/* (un arrêt justifié, un jour de congé accordé après coup). Tant que  */}
+      {/* personne n'a tranché, l'absence reste en alerte — et le règlement    */}
+      {/* de la période refuse de se conclure.                                */}
+      {/*                                                                     */}
+      {/* « Ne rien retenir » est une DÉCISION, pas une absence de décision :  */}
+      {/* la journée sort alors des alertes avec 0 DA de retenue, et on sait   */}
+      {/* que quelqu'un a regardé.                                            */}
+      {/* ------------------------------------------------------------------ */}
+      <Modal
+        open={!!absenceShift}
+        onClose={() => setAbsenceShift(null)}
+        title="Trancher une absence"
+        subtitle={
+          absenceShift && selectedStaff
+            ? `${selectedStaff.firstName} ${selectedStaff.lastName} — journée du ${frDate(absenceShift.workDate)}`
+            : undefined
+        }
+      >
+        {absenceShift && selectedStaff && (
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-line bg-canvas/40 p-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-muted">Journée</span>
+                <strong className="font-mono text-ink">{frDate(absenceShift.workDate)}</strong>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-muted">Constatée par</span>
+                <Badge tone="neutral" className="text-[10px]">
+                  {SOURCE_LABELS[absenceShift.source ?? "auto"]?.label ?? absenceShift.source}
+                </Badge>
+              </div>
+              <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-muted">Salaire mensuel</span>
+                <strong className="font-mono text-ink">{selectedStaff.salary} DA</strong>
+              </div>
+            </div>
+
+            {/* Retenir, ou ne rien retenir — les deux se disent ici. */}
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setAbsenceDeduct(true)}
+                className={`w-full rounded-2xl border p-3 text-left transition-all ${
+                  absenceDeduct
+                    ? "border-danger bg-danger/10 ring-2 ring-danger/20"
+                    : "border-line bg-surface hover:border-danger/40"
+                }`}
+              >
+                <strong className="block text-xs text-ink">Retenir sur la paie</strong>
+                <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                  Le montant ci-dessous est déduit du prochain règlement de ce travailleur.
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAbsenceDeduct(false)}
+                className={`w-full rounded-2xl border p-3 text-left transition-all ${
+                  !absenceDeduct
+                    ? "border-success bg-success/10 ring-2 ring-success/20"
+                    : "border-line bg-surface hover:border-success/40"
+                }`}
+              >
+                <strong className="block text-xs text-ink">Ne rien retenir</strong>
+                <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                  Absence justifiée, congé accordé après coup… La journée reste enregistrée
+                  comme absence, mais la paie n&apos;est pas touchée.
+                </span>
+              </button>
+            </div>
+
+            {absenceDeduct && (
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-muted">
+                  Montant retenu (DA) *
+                </label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={absenceCost || ""}
+                  onChange={(e) => setAbsenceCost(Number(e.target.value))}
+                />
+                <p className="mt-1 text-[10px] leading-relaxed text-muted">
+                  Proposé : le salaire mensuel réparti sur les jours ouvrés du mois
+                  {" — "}
+                  <strong className="text-ink">
+                    {defaultAbsenceCost(selectedStaff, absenceShift.workDate)} DA
+                  </strong>
+                  . À vous d&apos;ajuster.
+                </p>
+              </div>
+            )}
+
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-muted">
+                Motif / observation
+              </label>
+              <Input
+                value={absenceReason}
+                onChange={(e) => setAbsenceReason(e.target.value)}
+                placeholder="Absence non justifiée, certificat médical reçu…"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-2 rounded-2xl border-2 border-line bg-canvas p-3">
+              <span className="text-[10px] font-bold uppercase text-muted">Retenue</span>
+              <strong
+                className={`font-mono text-xl font-black ${
+                  absenceDeduct && absenceCost > 0 ? "text-danger" : "text-success"
+                }`}
+              >
+                {absenceDeduct ? Math.max(0, absenceCost) : 0} DA
+              </strong>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-line pt-4">
+              <Button variant="outline" onClick={() => setAbsenceShift(null)}>
+                Annuler
+              </Button>
+              <Button onClick={handleResolveAbsence} disabled={savingAbsence}>
+                {savingAbsence ? "Enregistrement..." : "Enregistrer la décision"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       <Modal open={isAcompteOpen} onClose={() => setIsAcompteOpen(false)} title="Nouvel acompte">
         <div className="space-y-4">
           <div>
@@ -2402,6 +2715,45 @@ export function AdministrationPage() {
                               </Badge>
                             )}
                           </div>
+
+                          {/* Les pointages de la période. Sur un contrat à la
+                              journée (une journée = une période), c'est la
+                              donnée qui JUSTIFIE le montant : arrivée, sortie,
+                              et comment la journée est entrée au registre. */}
+                          {p.days.length > 0 && p.days.length <= 3 && (
+                            <div className="mt-1.5 space-y-1 border-t border-line/60 pt-1.5">
+                              {p.days.map((d) => (
+                                <div
+                                  key={d.shiftId}
+                                  className="flex flex-wrap items-center justify-between gap-2 text-[10px]"
+                                >
+                                  <span className="font-mono text-muted">
+                                    {frDate(d.workDate)}
+                                  </span>
+                                  <span className="flex items-center gap-2 font-mono">
+                                    <span className="flex items-center gap-1 text-success">
+                                      <LogIn className="h-3 w-3" /> {fmtTime(d.startAt)}
+                                    </span>
+                                    <span className="flex items-center gap-1 text-danger">
+                                      <LogOut className="h-3 w-3" /> {fmtTime(d.endAt)}
+                                    </span>
+                                    <span className="text-muted">
+                                      {d.minutes > 0 ? fmtHours(d.minutes) : "—"}
+                                    </span>
+                                    <span className="text-[9px] text-muted">
+                                      {SOURCE_LABELS[d.source]?.label ?? d.source}
+                                    </span>
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {p.pendingAbsences.length > 0 && (
+                            <div className="mt-1.5 rounded-lg border border-warning/30 bg-warning/10 px-2 py-1 text-[10px] font-bold text-warning">
+                              {p.pendingAbsences.length} absence(s) à trancher sur cette période
+                            </div>
+                          )}
                         </button>
                       );
                     })}
@@ -2525,6 +2877,37 @@ export function AdministrationPage() {
                     )}
                   </div>
 
+                  {/* ---- Absences à trancher sur la période ---- */}
+                  {chosenPeriod && chosenPeriod.pendingAbsences.length > 0 && (
+                    <div className="space-y-2 rounded-2xl border-2 border-warning/50 bg-warning/10 p-4">
+                      <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-warning">
+                        <UserX className="h-3.5 w-3.5" />
+                        {chosenPeriod.pendingAbsences.length} absence(s) à trancher
+                      </span>
+                      <p className="text-[10px] leading-relaxed text-muted">
+                        Ces journées sont enregistrées comme absences, mais personne n&apos;a dit
+                        ce qu&apos;elles retiennent. Tranchez-les — y compris pour décider de{" "}
+                        <strong>ne rien retenir</strong> — avant de régler la période.
+                      </p>
+                      <div className="space-y-1">
+                        {chosenPeriod.pendingAbsences.map((d) => (
+                          <button
+                            key={d.shiftId}
+                            type="button"
+                            onClick={() => {
+                              const shift = workerShifts.find((x) => x.id === d.shiftId);
+                              if (shift) openAbsenceResolver(selectedStaff, shift);
+                            }}
+                            className="flex w-full items-center justify-between gap-2 rounded-xl border border-warning/30 bg-surface px-2.5 py-1.5 text-[11px] font-bold text-warning transition-colors hover:bg-warning/15"
+                          >
+                            <span className="font-mono">{frDate(d.workDate)}</span>
+                            <span>Trancher →</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Retenues */}
                   {chosenPeriod &&
                     (chosenPeriod.absenceDeduction > 0 || acomptesTotal > 0 || retenuesTotal > 0) && (
@@ -2533,29 +2916,29 @@ export function AdministrationPage() {
                           Retenues à déduire
                         </span>
 
-                        {chosenPeriod.absenceDeduction > 0 && (
-                          <label className="flex cursor-pointer items-center justify-between gap-2 text-xs">
-                            <span className="flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                checked={deductAbsences}
-                                onChange={(e) => {
-                                  setDeductAbsences(e.target.checked);
-                                  setPayAmountOverride(null);
-                                }}
-                                className="h-4 w-4"
-                              />
-                              <span className="text-ink">
-                                Absences de la période
-                                <span className="block text-[10px] text-muted">
-                                  {chosenPeriod.absent} jour(s) non travaillé(s)
-                                </span>
-                              </span>
-                            </span>
-                            <strong className="font-mono text-danger">
-                              -{chosenPeriod.absenceDeduction} DA
-                            </strong>
-                          </label>
+                        {/* Les absences tranchées ne sont PAS une case à part :
+                            leur retenue est une ligne de « Retenues » ci-dessous.
+                            Leur donner sa propre case comptait la même absence
+                            deux fois. On la rappelle donc, sans la déduire. */}
+                        {chosenPeriod.absent > 0 && (
+                          <p className="rounded-xl border border-line bg-surface p-2 text-[10px] leading-relaxed text-muted">
+                            <strong className="text-ink">
+                              {chosenPeriod.absent} absence(s)
+                            </strong>{" "}
+                            sur cette période
+                            {chosenPeriod.absenceDeduction > 0 ? (
+                              <>
+                                , dont{" "}
+                                <strong className="text-danger">
+                                  {chosenPeriod.absenceDeduction} DA
+                                </strong>{" "}
+                                de retenue décidée — comprise dans les
+                                « Retenues » ci-dessous.
+                              </>
+                            ) : (
+                              " — aucune retenue décidée dessus."
+                            )}
+                          </p>
                         )}
 
                         {acomptesTotal > 0 && (
@@ -2620,12 +3003,6 @@ export function AdministrationPage() {
                         {chosenPeriod ? chosenPeriod.amount : 0} DA
                       </strong>
                     </div>
-                    {deductAbsences && (chosenPeriod?.absenceDeduction ?? 0) > 0 && (
-                      <div className="flex justify-between text-danger">
-                        <span>Absences</span>
-                        <strong className="font-mono">-{chosenPeriod?.absenceDeduction} DA</strong>
-                      </div>
-                    )}
                     {deductAcomptes && acomptesTotal > 0 && (
                       <div className="flex justify-between text-danger">
                         <span>Acomptes</span>
@@ -2687,8 +3064,7 @@ export function AdministrationPage() {
                           gross: grossOf(chosenPeriod),
                           acomptes: deductAcomptes ? acomptesTotal : 0,
                           deductions:
-                            (deductRetenues ? retenuesTotal : 0) +
-                            (deductAbsences ? chosenPeriod.absenceDeduction : 0),
+                            deductRetenues ? retenuesTotal : 0,
                           periodLabel: chosenPeriod.label,
                           details: buildPaymentDetails(
                             periodShifts(chosenPeriod),
@@ -2712,9 +3088,26 @@ export function AdministrationPage() {
                       variant="success"
                       className="flex-1"
                       onClick={handlePay}
-                      disabled={savingPay || !chosenPeriod || finalPay <= 0}
+                      disabled={
+                        savingPay ||
+                        !chosenPeriod ||
+                        finalPay <= 0 ||
+                        // Une absence non tranchée ferme le règlement : un mois
+                        // payé plein alors qu'il ne l'était pas ne se corrige
+                        // plus qu'en annulant le versement.
+                        chosenPeriod.pendingAbsences.length > 0
+                      }
+                      title={
+                        chosenPeriod && chosenPeriod.pendingAbsences.length > 0
+                          ? `Tranchez d'abord les ${chosenPeriod.pendingAbsences.length} absence(s) de cette période.`
+                          : undefined
+                      }
                     >
-                      {savingPay ? "Enregistrement..." : `Payer ${finalPay} DA`}
+                      {savingPay
+                        ? "Enregistrement..."
+                        : chosenPeriod && chosenPeriod.pendingAbsences.length > 0
+                          ? `${chosenPeriod.pendingAbsences.length} absence(s) à trancher`
+                          : `Payer ${finalPay} DA`}
                     </Button>
                   </div>
                 </div>

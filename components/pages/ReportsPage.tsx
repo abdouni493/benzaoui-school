@@ -395,6 +395,11 @@ export function ReportsPage() {
     subscriptions,
     categories,
     parents,
+    privateSessions,
+    privateSessionModules,
+    privateSessionStudents,
+    filieres,
+    profiles,
   } = useData();
 
   const [startDate, setStartDate] = useState(
@@ -468,6 +473,32 @@ export function ReportsPage() {
       const se = sessions.find((s) => s.id === sessionId);
       return se ? classes.find((c) => c.id === se.classId)?.name ?? "" : "";
     };
+    /** Le nom d'un compte de l'application — « qui a encaissé ». */
+    const accountNameOf = (id?: string) => {
+      if (!id) return "—";
+      const prof = profiles.find((x) => x.id === id);
+      if (prof) return prof.fullName;
+      const w = reception.find((x) => x.id === id);
+      return w ? `${w.firstName} ${w.lastName}` : "—";
+    };
+    /** La scolarité déclarée sur une ligne (séance libre, élève de particulier). */
+    const schoolingOf = (r: {
+      classId?: string;
+      year?: string;
+      filiereId?: string;
+    }): string => {
+      const cls = r.classId ? classes.find((c) => c.id === r.classId) : undefined;
+      return [
+        cls?.name ?? "",
+        r.year ? `${r.year} Année` : "",
+        r.filiereId ? filieres.find((f) => f.id === r.filiereId)?.name ?? "" : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    };
+    /** Le nom lisible d'un élève de séance particulière (inscrit ou de passage). */
+    const attendeeName = (r: { studentId?: string; guestName?: string }) =>
+      r.studentId ? sName(r.studentId) : r.guestName || "Élève";
 
     // Formatting
     const inflow = (n: number) => `+${formatDA(Math.abs(n))}`;
@@ -1109,6 +1140,13 @@ export function ReportsPage() {
     // elle ni rémunérée à l'enseignant.
     const paidCasual = fInd.filter((i) => !i.isFree);
     const offeredCasual = fInd.filter((i) => i.isFree);
+    // Les séances libres à pourcentage DÉDIÉ : elles ne passent pas par le taux
+    // habituel du prof, elles se chiffrent à part — et c'est la seule ligne de
+    // ce rapport qui sache dire combien elles coûtent.
+    const dedicatedCasual = paidCasual.filter(
+      (i) => i.teacherPercentage !== undefined && i.teacherPercentage !== null,
+    );
+    const dedicatedTeacherShare = sum(dedicatedCasual, (i) => i.teacherAmount ?? 0);
     const independentRevenue = sum(paidCasual, (i) => i.price);
     const offeredCasualValue = sum(offeredCasual, (i) => i.waivedAmount ?? 0);
     const courseworkInRange = coursework.filter((c) => c.dates.some((d) => inRange(d)));
@@ -1132,9 +1170,58 @@ export function ReportsPage() {
               { label: "Date", render: (r) => dateCell(r.date) },
               {
                 label: "Bénéficiaire",
-                render: (r) => <span className="font-bold text-ink">{r.studentId ? sName(r.studentId) : r.passagerName || "Passager"}</span>,
+                render: (r) => (
+                  <span>
+                    <strong className="block text-ink">
+                      {r.studentId ? sName(r.studentId) : r.passagerName || "Passager"}
+                    </strong>
+                    <span className="block font-mono text-[10px] text-muted">
+                      {r.studentId
+                        ? students.find((x) => x.id === r.studentId)?.phone || ""
+                        : r.passagerPhone || ""}
+                    </span>
+                  </span>
+                ),
               },
-              { label: "Prestation", render: (r) => <span className="text-primary">{r.itemLabel}</span> },
+              {
+                label: "Scolarité",
+                render: (r) => <span className="text-[10px] text-muted">{schoolingOf(r)}</span>,
+              },
+              {
+                label: "Prestation",
+                render: (r) => (
+                  <span>
+                    <span className="block text-primary">{r.itemLabel}</span>
+                    {r.moduleId && (
+                      <span className="block text-[10px] text-muted">
+                        {modules.find((m) => m.id === r.moduleId)?.name ?? ""}
+                      </span>
+                    )}
+                  </span>
+                ),
+              },
+              {
+                label: "Encaissé par",
+                render: (r) => (
+                  <span className="text-[10px] text-muted">{accountNameOf(r.createdBy)}</span>
+                ),
+              },
+              {
+                // La part de l'enseignant n'existe QUE sur les séances où le
+                // guichet a posé un taux dédié. Ailleurs, elle se fond dans le
+                // pourcentage habituel du prof et se lit sur son règlement.
+                label: "Part prof dédiée",
+                align: "right",
+                render: (r) =>
+                  r.teacherPercentage === undefined || r.teacherPercentage === null ? (
+                    <span className="text-[10px] italic text-muted">taux habituel</span>
+                  ) : (
+                    <span>
+                      <strong className="text-primary">{formatDA(r.teacherAmount ?? 0)}</strong>
+                      <span className="block text-[10px] text-muted">{r.teacherPercentage} %</span>
+                    </span>
+                  ),
+              },
               { label: "Montant", align: "right", render: (r) => <strong className="text-success">{inflow(r.price)}</strong> },
             ],
             rows: [...paidCasual].sort((a, b) => (a.date < b.date ? 1 : -1)),
@@ -1220,6 +1307,25 @@ export function ReportsPage() {
           lines: [
             { label: "Séances libres (nombre)", value: `${fInd.length}` },
             { label: "dont encaissées", value: `${paidCasual.length}` },
+            {
+              label: "dont élèves inscrits",
+              value: `${fInd.filter((i) => i.studentId).length}`,
+            },
+            {
+              label: "dont passagers",
+              value: `${fInd.filter((i) => !i.studentId).length}`,
+            },
+            {
+              label: "à pourcentage enseignant dédié",
+              value: `${dedicatedCasual.length}`,
+              formula:
+                "Séances libres où le guichet a fixé la part du prof à la séance, hors de son taux habituel",
+            },
+            {
+              label: "Part des enseignants (taux dédié)",
+              value: outflow(dedicatedTeacherShare),
+              tone: "warning",
+            },
             { label: "Recette séances libres", value: inflow(independentRevenue), tone: "success" },
             { label: "dont offertes (gratuites)", value: `${offeredCasual.length}`, tone: "warning" },
             {
@@ -1232,6 +1338,492 @@ export function ReportsPage() {
             { label: "Recette stages (période)", value: formatDA(courseworkRevenue), tone: "sky" },
             { label: "Total activités indépendantes", value: inflow(independentRevenue + courseworkRevenue), tone: "success", emphasis: true },
           ],
+        },
+      ],
+    };
+
+    /* ============================= PARTICULIER ======================== */
+    //
+    // UN COURS PARTICULIER N'EST PAS UNE SÉANCE LIBRE, et les confondre rendait
+    // ce rapport muet sur la moitié de l'argent des cours à la demande :
+    //   · il se déroule en trois temps (demande, programmation, séance tenue),
+    //     et une demande jamais programmée est de l'argent qui n'entrera
+    //     JAMAIS — c'est la ligne la plus importante de ce bloc ;
+    //   · il peut porter plusieurs élèves, chacun avec sa part ;
+    //   · son argent ne passe pas par le solde de l'élève : ce qui est versé
+    //     entre en caisse, ce qui ne l'est pas reste une dette attachée à CE
+    //     rendez-vous.
+    //
+    // On date une séance sur ce qu'elle a de plus concret : son rendez-vous
+    // quand elle en a un, sa demande sinon.
+    const privateDateOf = (ps: (typeof privateSessions)[number]) =>
+      (ps.scheduledAt ?? ps.requestDate ?? ps.createdAt ?? "").substring(0, 10);
+
+    const fPrivate = privateSessions.filter((ps) => inRange(privateDateOf(ps)));
+    const privateRequested = fPrivate.filter((ps) => ps.status === "requested");
+    const privatePlanned = fPrivate.filter((ps) => ps.status === "planned");
+    const privateDone = fPrivate.filter((ps) => ps.status === "done");
+    const privateCancelled = fPrivate.filter((ps) => ps.status === "cancelled");
+    const privateLive = fPrivate.filter((ps) => ps.status !== "cancelled");
+
+    const privateBilled = sum(privateLive, (ps) => ps.totalPrice);
+    const privateCashed = sum(privateLive, (ps) => ps.paidAmount);
+    const privateDebt = sum(privateLive, (ps) => Math.max(0, ps.totalPrice - ps.paidAmount));
+    const privateDeposits = sum(fPrivate, (ps) => ps.depositAmount ?? 0);
+    const privateTeacherShare = sum(privateDone, (ps) => ps.teacherShare ?? 0);
+    const privateSchoolShare = sum(privateDone, (ps) => ps.schoolShare ?? 0);
+
+    const privateModsIn = (ids: Set<string>) =>
+      privateSessionModules.filter((m) => ids.has(m.privateSessionId));
+    const liveIds = new Set(privateLive.map((ps) => ps.id));
+    const privateTeacherDueRows = privateModsIn(liveIds).filter(
+      (m) => !m.teacherPaid && m.teacherId,
+    );
+    const privateTeacherDue = sum(privateTeacherDueRows, (m) => m.teacherAmount);
+    /** Un enseignant SANS fiche ne peut pas être réglé par l'application : son
+     *  dû doit se voir à part, sinon il disparaît des deux côtés. */
+    const privateTeacherNoFile = privateModsIn(liveIds).filter(
+      (m) => !m.teacherPaid && !m.teacherId && m.teacherAmount > 0,
+    );
+
+    const privateStudentRows = privateSessionStudents.filter((r) =>
+      fPrivate.some((ps) => ps.id === r.privateSessionId),
+    );
+
+    const sessionOfRow = (id: string) => fPrivate.find((ps) => ps.id === id);
+
+    const particulierSection: Section = {
+      id: "particulier",
+      label: "Particulier",
+      icon: <GraduationCap className="h-4 w-4" />,
+      cards: [
+        {
+          label: "Encaissé sur les cours particuliers",
+          value: inflow(privateCashed),
+          tone: "success",
+          icon: <CircleDollarSign className="h-5 w-5" />,
+          featured: true,
+          detail: {
+            columns: [
+              { label: "Date", render: (r) => dateCell(privateDateOf(r)) },
+              {
+                label: "Élève(s)",
+                render: (r) => {
+                  const rows = privateSessionStudents.filter((x) => x.privateSessionId === r.id);
+                  return (
+                    <span>
+                      <strong className="block text-ink">
+                        {rows.length > 0 ? attendeeName(rows[0]) : attendeeName(r)}
+                        {rows.length > 1 && (
+                          <span className="font-normal text-muted"> +{rows.length - 1}</span>
+                        )}
+                      </strong>
+                      <span className="block text-[10px] text-muted">
+                        {schoolingOf(rows[0] ?? r)}
+                      </span>
+                    </span>
+                  );
+                },
+              },
+              {
+                label: "État",
+                render: (r) => (
+                  <Badge
+                    tone={
+                      r.status === "done"
+                        ? "success"
+                        : r.status === "requested"
+                          ? "warning"
+                          : r.status === "cancelled"
+                            ? "neutral"
+                            : "primary"
+                    }
+                  >
+                    {r.status === "requested"
+                      ? "À programmer"
+                      : r.status === "planned"
+                        ? "Programmée"
+                        : r.status === "done"
+                          ? "Terminée"
+                          : "Annulée"}
+                  </Badge>
+                ),
+              },
+              {
+                label: "Reçu par",
+                render: (r) => (
+                  <span className="text-[10px] text-muted">
+                    {r.receptionistName || accountNameOf(r.receptionistId)}
+                  </span>
+                ),
+              },
+              {
+                label: "Modules",
+                render: (r) => {
+                  const mods = privateSessionModules.filter((m) => m.privateSessionId === r.id);
+                  return (
+                    <span className="text-[10px] text-muted">
+                      {mods.length === 0
+                        ? "—"
+                        : mods
+                            .map(
+                              (m) =>
+                                `${modules.find((x) => x.id === m.moduleId)?.name ?? "Module"} (${tName(m.teacherId) !== "—" ? tName(m.teacherId) : m.teacherName || "—"})`,
+                            )
+                            .join(", ")}
+                    </span>
+                  );
+                },
+              },
+              {
+                label: "Total",
+                align: "right",
+                render: (r) => <span className="text-ink">{formatDA(r.totalPrice)}</span>,
+              },
+              {
+                label: "Encaissé",
+                align: "right",
+                render: (r) => <strong className="text-success">{formatDA(r.paidAmount)}</strong>,
+              },
+              {
+                label: "Dette",
+                align: "right",
+                render: (r) => {
+                  const left = Math.max(0, r.totalPrice - r.paidAmount);
+                  return (
+                    <strong className={left > 0 ? "text-danger" : "text-muted"}>
+                      {formatDA(left)}
+                    </strong>
+                  );
+                },
+              },
+            ],
+            rows: [...privateLive].sort((a, b) =>
+              privateDateOf(a) < privateDateOf(b) ? 1 : -1,
+            ),
+            totalLabel: "Total encaissé",
+            totalValue: inflow(privateCashed),
+            totalTone: "success",
+            empty: "Aucun cours particulier sur la période.",
+            searchable: (r) =>
+              [
+                ...privateSessionStudents
+                  .filter((x) => x.privateSessionId === r.id)
+                  .map((x) => attendeeName(x)),
+                r.receptionistName ?? "",
+                ...privateSessionModules
+                  .filter((m) => m.privateSessionId === r.id)
+                  .map(
+                    (m) =>
+                      `${modules.find((x) => x.id === m.moduleId)?.name ?? ""} ${m.teacherName ?? ""} ${tName(m.teacherId)}`,
+                  ),
+              ].join(" "),
+          },
+        },
+        {
+          label: "Demandes jamais programmées",
+          value: `${privateRequested.length}`,
+          tone: privateRequested.length > 0 ? "danger" : "neutral",
+          icon: <ClipboardList className="h-5 w-5" />,
+          hint: "De l'argent qui n'entrera jamais si personne ne rappelle",
+          detail: {
+            columns: [
+              { label: "Demandé le", render: (r) => dateCell(r.requestDate ?? "") },
+              {
+                label: "Élève(s)",
+                render: (r) => {
+                  const rows = privateSessionStudents.filter((x) => x.privateSessionId === r.id);
+                  return (
+                    <strong className="text-ink">
+                      {rows.length > 0 ? attendeeName(rows[0]) : attendeeName(r)}
+                      {rows.length > 1 && ` +${rows.length - 1}`}
+                    </strong>
+                  );
+                },
+              },
+              {
+                label: "Téléphone",
+                render: (r) => {
+                  const rows = privateSessionStudents.filter((x) => x.privateSessionId === r.id);
+                  const stu = rows[0]?.studentId
+                    ? students.find((x) => x.id === rows[0].studentId)
+                    : undefined;
+                  return (
+                    <span className="font-mono text-[10px] text-muted">
+                      {stu?.phone || rows[0]?.guestPhone || r.guestPhone || "—"}
+                    </span>
+                  );
+                },
+              },
+              {
+                label: "Reçu par",
+                render: (r) => (
+                  <span className="text-[10px] text-muted">
+                    {r.receptionistName || accountNameOf(r.receptionistId)}
+                  </span>
+                ),
+              },
+              {
+                label: "Ce qu'elle demande",
+                render: (r) => (
+                  <span className="text-[10px] text-muted">{r.observation || r.notes || "—"}</span>
+                ),
+              },
+              {
+                label: "Déjà versé",
+                align: "right",
+                render: (r) => (
+                  <strong className={r.paidAmount > 0 ? "text-warning" : "text-muted"}>
+                    {formatDA(r.paidAmount)}
+                  </strong>
+                ),
+              },
+            ],
+            rows: [...privateRequested].sort((a, b) =>
+              (a.requestDate ?? "") < (b.requestDate ?? "") ? 1 : -1,
+            ),
+            totalLabel: "Versé sur des demandes non programmées",
+            totalValue: formatDA(sum(privateRequested, (r) => r.paidAmount)),
+            totalTone: "warning",
+            empty: "Toutes les demandes de la période ont été programmées.",
+            searchable: (r) =>
+              privateSessionStudents
+                .filter((x) => x.privateSessionId === r.id)
+                .map((x) => attendeeName(x))
+                .join(" "),
+          },
+        },
+        {
+          label: "Dettes sur cours particuliers",
+          value: formatDA(privateDebt),
+          tone: privateDebt > 0 ? "danger" : "neutral",
+          icon: <AlertCircle className="h-5 w-5" />,
+          hint: "Attachées à la séance, jamais mélangées au solde de l'élève",
+          detail: {
+            columns: [
+              {
+                label: "Élève",
+                render: (r) => (
+                  <span>
+                    <strong className="block text-ink">{attendeeName(r)}</strong>
+                    <span className="block text-[10px] text-muted">{schoolingOf(r)}</span>
+                  </span>
+                ),
+              },
+              {
+                label: "Séance",
+                render: (r) => {
+                  const ps = sessionOfRow(r.privateSessionId);
+                  return (
+                    <span className="font-mono text-[10px] text-muted">
+                      {ps ? dateCell(privateDateOf(ps)) : "—"}
+                    </span>
+                  );
+                },
+              },
+              {
+                label: "À payer",
+                align: "right",
+                render: (r) => <span className="text-ink">{formatDA(r.totalPrice)}</span>,
+              },
+              {
+                label: "Versé",
+                align: "right",
+                render: (r) => <span className="text-success">{formatDA(r.paidAmount)}</span>,
+              },
+              {
+                label: "Reste dû",
+                align: "right",
+                render: (r) => (
+                  <strong className="text-danger">
+                    {formatDA(Math.max(0, r.totalPrice - r.paidAmount))}
+                  </strong>
+                ),
+              },
+            ],
+            rows: privateStudentRows
+              .filter((r) => r.totalPrice > r.paidAmount)
+              .filter((r) => sessionOfRow(r.privateSessionId)?.status !== "cancelled")
+              .sort(
+                (a, b) =>
+                  b.totalPrice - b.paidAmount - (a.totalPrice - a.paidAmount),
+              ),
+            totalLabel: "Total des dettes élève par élève",
+            totalValue: formatDA(
+              sum(
+                privateStudentRows.filter(
+                  (r) =>
+                    r.totalPrice > r.paidAmount &&
+                    sessionOfRow(r.privateSessionId)?.status !== "cancelled",
+                ),
+                (r) => r.totalPrice - r.paidAmount,
+              ),
+            ),
+            totalTone: "danger",
+            empty: "Aucune dette sur les cours particuliers.",
+            searchable: (r) => attendeeName(r),
+          },
+        },
+        {
+          label: "Part des enseignants encore due",
+          value: formatDA(privateTeacherDue),
+          tone: privateTeacherDue > 0 ? "warning" : "neutral",
+          icon: <UserCog className="h-5 w-5" />,
+          detail: {
+            columns: [
+              {
+                label: "Séance",
+                render: (r) => {
+                  const ps = sessionOfRow(r.privateSessionId);
+                  const rows = ps
+                    ? privateSessionStudents.filter((x) => x.privateSessionId === ps.id)
+                    : [];
+                  return (
+                    <span>
+                      <strong className="block text-ink">
+                        {rows.length > 0 ? attendeeName(rows[0]) : "Élève"}
+                      </strong>
+                      <span className="block font-mono text-[10px] text-muted">
+                        {ps ? privateDateOf(ps) : "—"}
+                      </span>
+                    </span>
+                  );
+                },
+              },
+              {
+                label: "Module",
+                render: (r) => (
+                  <span className="text-primary">
+                    {modules.find((m) => m.id === r.moduleId)?.name ?? "Module"}
+                  </span>
+                ),
+              },
+              {
+                label: "Enseignant",
+                render: (r) => (
+                  <span className="text-muted">
+                    {r.teacherId ? tName(r.teacherId) : r.teacherName || "—"}
+                    {!r.teacherId && (
+                      <Badge tone="warning" className="ml-1.5 text-[8px]">
+                        sans fiche
+                      </Badge>
+                    )}
+                  </span>
+                ),
+              },
+              {
+                label: "Prix module",
+                align: "right",
+                render: (r) => <span className="text-ink">{formatDA(r.totalPrice)}</span>,
+              },
+              {
+                label: "Part prof",
+                align: "right",
+                render: (r) => (
+                  <span>
+                    <strong className="text-warning">{formatDA(r.teacherAmount)}</strong>
+                    <span className="block text-[10px] text-muted">{r.teacherPercentage} %</span>
+                  </span>
+                ),
+              },
+            ],
+            rows: [...privateTeacherDueRows, ...privateTeacherNoFile].sort(
+              (a, b) => b.teacherAmount - a.teacherAmount,
+            ),
+            totalLabel: "Total dû aux enseignants",
+            totalValue: formatDA(
+              privateTeacherDue + sum(privateTeacherNoFile, (m) => m.teacherAmount),
+            ),
+            totalTone: "warning",
+            empty: "Tous les enseignants des cours particuliers sont réglés.",
+            searchable: (r) =>
+              `${modules.find((m) => m.id === r.moduleId)?.name ?? ""} ${r.teacherName ?? ""} ${tName(r.teacherId)}`,
+          },
+        },
+      ],
+      panels: [
+        {
+          title: "Cours particuliers — où en est l'argent",
+          subtitle: `Période du ${reportRange.start} au ${reportRange.end}`,
+          icon: <GraduationCap className="h-4 w-4 text-primary" />,
+          lines: [
+            { label: "Demandes reçues", value: `${fPrivate.length}` },
+            {
+              label: "dont jamais programmées",
+              value: `${privateRequested.length}`,
+              tone: privateRequested.length > 0 ? "danger" : "neutral",
+              formula: "Ni date, ni module : personne ne les réclamera tout seul",
+            },
+            { label: "Programmées, pas encore tenues", value: `${privatePlanned.length}`, tone: "primary" },
+            { label: "Séances tenues", value: `${privateDone.length}`, tone: "success" },
+            { label: "Annulées", value: `${privateCancelled.length}`, tone: "neutral" },
+            {
+              label: "Versements pris à la demande",
+              value: inflow(privateDeposits),
+              tone: "success",
+              formula: "Argent reçu avant toute programmation — en caisse dès le jour de la demande",
+            },
+            { label: "Total facturé", value: formatDA(privateBilled), strong: true },
+            { label: "Total encaissé", value: inflow(privateCashed), tone: "success" },
+            {
+              label: "Reste dû par les familles",
+              value: formatDA(privateDebt),
+              tone: privateDebt > 0 ? "danger" : "neutral",
+            },
+            {
+              label: "Part des enseignants (séances tenues)",
+              value: outflow(privateTeacherShare),
+              tone: "warning",
+            },
+            {
+              label: "Part de l'école (séances tenues)",
+              value: inflow(privateSchoolShare),
+              tone: "success",
+              formula: "Total de la séance MOINS la part des enseignants — jamais un second pourcentage",
+              emphasis: true,
+            },
+            {
+              label: "Enseignants encore à régler",
+              value: outflow(privateTeacherDue + sum(privateTeacherNoFile, (m) => m.teacherAmount)),
+              tone: privateTeacherDue > 0 ? "warning" : "neutral",
+            },
+            ...(privateTeacherNoFile.length > 0
+              ? [
+                  {
+                    label: "dont enseignants SANS fiche",
+                    value: outflow(sum(privateTeacherNoFile, (m) => m.teacherAmount)),
+                    tone: "danger" as Tone,
+                    formula:
+                      "L'application ne peut pas les régler : créez leur fiche pour que le versement laisse une trace",
+                  },
+                ]
+              : []),
+          ],
+        },
+        {
+          title: "Qui a reçu les demandes",
+          subtitle: "Ce que chaque guichet a apporté en cours particuliers",
+          icon: <UserCog className="h-4 w-4 text-primary" />,
+          lines: (() => {
+            const byRecep = new Map<string, { count: number; cashed: number }>();
+            for (const ps of fPrivate) {
+              const key = ps.receptionistName || accountNameOf(ps.receptionistId);
+              const cur = byRecep.get(key) ?? { count: 0, cashed: 0 };
+              cur.count += 1;
+              cur.cashed += ps.paidAmount;
+              byRecep.set(key, cur);
+            }
+            const rows = [...byRecep.entries()]
+              .sort((a, b) => b[1].cashed - a[1].cashed)
+              .map(([name, v]) => ({
+                label: `${name} — ${v.count} demande(s)`,
+                value: inflow(v.cashed),
+                tone: "success" as Tone,
+              }));
+            return rows.length > 0
+              ? rows
+              : [{ label: "Aucune demande sur la période", value: "—" }];
+          })(),
         },
       ],
     };
@@ -1894,6 +2486,7 @@ export function ReportsPage() {
         teachersSection,
         receptionSection,
         independentSection,
+        particulierSection,
         expensesSection,
         cashSection,
       ],
@@ -1922,6 +2515,11 @@ export function ReportsPage() {
     subscriptions,
     categories,
     parents,
+    privateSessions,
+    privateSessionModules,
+    privateSessionStudents,
+    filieres,
+    profiles,
   ]);
 
   const current = report?.sections.find((s) => s.id === activeSection) ?? report?.sections[0];

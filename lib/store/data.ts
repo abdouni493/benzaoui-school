@@ -25,6 +25,7 @@ import type {
   PrivateSession,
   PrivateSessionModule,
   PrivateSessionStatus,
+  PrivateSessionStudent,
   Profile,
   ReceptionPaymentType,
   ReceptionStaff,
@@ -81,6 +82,7 @@ export interface Database {
   independent: IndependentSession[];
   privateSessions: PrivateSession[];
   privateSessionModules: PrivateSessionModule[];
+  privateSessionStudents: PrivateSessionStudent[];
   /** Les comptes de l'application — la caisse a besoin de NOMMER qui a encaissé. */
   profiles: Profile[];
 }
@@ -137,6 +139,7 @@ function emptyDatabase(): Database {
     independent: [],
     privateSessions: [],
     privateSessionModules: [],
+    privateSessionStudents: [],
     profiles: [],
   };
 }
@@ -243,6 +246,7 @@ const receptionMapper = makeMapper<ReceptionStaff>([
   ["dailyEnd", "daily_end"],
   ["jobTitle", "job_title"],
   ["payAlertDays", "pay_alert_days"],
+  ["payStartDate", "pay_start_date"],
 ]);
 
 const workerShiftsMapper = makeMapper<WorkerShift>([
@@ -259,6 +263,9 @@ const workerShiftsMapper = makeMapper<WorkerShift>([
   ["status", "status"],
   ["source", "source"],
   ["notes", "notes"],
+  ["absenceResolved", "absence_resolved"],
+  ["absenceCost", "absence_cost"],
+  ["absenceId", "absence_id"],
 ]);
 
 const workerPaymentsMapper = makeMapper<WorkerPayment>([
@@ -302,6 +309,15 @@ const privateSessionsMapper = makeMapper<PrivateSession>([
   ["notes", "notes"],
   ["createdAt", "created_at"],
   ["createdBy", "created_by"],
+  ["requestDate", "request_date"],
+  ["receptionistId", "receptionist_id"],
+  ["receptionistName", "receptionist_name"],
+  ["observation", "observation"],
+  ["depositAmount", "deposit_amount"],
+  ["schoolPercentage", "school_percentage"],
+  ["teacherShare", "teacher_share"],
+  ["schoolShare", "school_share"],
+  ["completedAt", "completed_at"],
 ]);
 
 const privateSessionModulesMapper = makeMapper<PrivateSessionModule>([
@@ -316,6 +332,24 @@ const privateSessionModulesMapper = makeMapper<PrivateSessionModule>([
   ["teacherAmount", "teacher_amount"],
   ["teacherPaid", "teacher_paid"],
   ["teacherPaidAt", "teacher_paid_at"],
+  ["scheduledAt", "scheduled_at"],
+  ["flatPrice", "flat_price"],
+  ["teacherName", "teacher_name"],
+  ["teacherPhone", "teacher_phone"],
+]);
+
+const privateSessionStudentsMapper = makeMapper<PrivateSessionStudent>([
+  ["id", "id"],
+  ["privateSessionId", "private_session_id"],
+  ["studentId", "student_id"],
+  ["guestName", "guest_name"],
+  ["guestPhone", "guest_phone"],
+  ["classId", "class_id"],
+  ["year", "year"],
+  ["filiereId", "filiere_id"],
+  ["totalPrice", "total_price"],
+  ["paidAmount", "paid_amount"],
+  ["createdAt", "created_at"],
 ]);
 
 const studentCredentialsMapper = makeMapper<StudentCredential>([
@@ -537,6 +571,14 @@ const independentMapper = makeMapper<IndependentSession>([
   ["teacherPaid", "teacher_paid"],
   ["isFree", "is_free"],
   ["waivedAmount", "waived_amount"],
+  ["passagerPhone", "passager_phone"],
+  ["classId", "class_id"],
+  ["year", "year"],
+  ["filiereId", "filiere_id"],
+  ["moduleId", "module_id"],
+  ["teacherPercentage", "teacher_percentage"],
+  ["teacherAmount", "teacher_amount"],
+  ["createdBy", "created_by"],
 ]);
 
 const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
@@ -615,6 +657,11 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
     table: "private_session_modules",
     select: "*",
     ...privateSessionModulesMapper,
+  },
+  privateSessionStudents: {
+    table: "private_session_students",
+    select: "*",
+    ...privateSessionStudentsMapper,
   },
 };
 
@@ -942,12 +989,28 @@ interface DataActions {
   ) => Promise<{ ok: boolean; minutes?: number; messageKey?: string }>;
   /** Constate les absences : chaque jour ouvré RÉVOLU où le travailleur n'a ni
    *  badgé ni été pointé à la main devient une absence enregistrée. Idempotent :
-   *  une journée déjà présente ou déjà marquée absente n'est jamais réécrite. */
+   *  une journée déjà présente ou déjà marquée absente n'est jamais réécrite.
+   *  Ne concerne que les travailleurs AU MOIS : un journalier payé aux journées
+   *  travaillées n'a rien à se faire retenir quand il ne vient pas. */
   markWorkerAbsences: (args?: {
     workerId?: string;
     from?: string;
     to?: string;
   }) => Promise<{ ok: boolean; marked?: number; workers?: number }>;
+  /**
+   * Tranche la retenue d'une absence : « elle coûte tant », ou « elle ne
+   * coûte rien ».
+   *
+   * Une absence constatée ne dit pas encore ce qu'elle retient sur la paie. Le
+   * RPC écrit la décision sur la journée (`absence_resolved`) et, quand il y a
+   * une retenue, la ligne `teacher_absences` que le règlement déduira. Décider
+   * 0 DA est une décision : la journée sort des alertes sans rien retenir.
+   */
+  resolveWorkerAbsence: (args: {
+    shiftId: string;
+    cost: number;
+    description?: string;
+  }) => Promise<{ ok: boolean; absenceId?: string; cost?: number; messageKey?: string }>;
   /** Règle une PÉRIODE de travail (mois, journée, demi-journée ou heures) et
    *  l'inscrit au registre des règlements — le seul endroit qui dise avec
    *  certitude si un mois a déjà été payé. */
@@ -972,6 +1035,96 @@ interface DataActions {
   ) => Promise<{ ok: boolean; restored?: number; amount?: number; messageKey?: string }>;
 
   // ---- Séances particulières ------------------------------------------------
+  //
+  // UNE SÉANCE PARTICULIÈRE SE DÉROULE EN TROIS TEMPS, et chacun a son RPC :
+  //
+  //   1. `createPrivateRequest`  — le RENSEIGNEMENT. Quelqu'un demande un cours.
+  //      On note qui (un ou plusieurs élèves), quand il a demandé, quel
+  //      réceptionniste l'a reçu, ce qu'il veut, et le versement pris au
+  //      passage. Rien n'est programmé — et c'est une alerte tant que ça dure.
+  //   2. `programPrivateSession` — la PROGRAMMATION. Les modules, leurs dates,
+  //      leurs prix, leurs enseignants.
+  //   3. `completePrivateSession` — la CONCLUSION. L'élève a étudié et vient
+  //      payer : total ajusté, répartition école / enseignant, enseignants
+  //      réglés ou pas.
+  //
+  // L'ancien `createPrivateSession` (tout d'un bloc) reste : il sert encore à
+  // l'édition complète d'une séance déjà programmée.
+
+  /** Étape 1 — le dossier de demande, un ou plusieurs élèves. */
+  createPrivateRequest: (payload: {
+    id?: string;
+    requestDate?: string;
+    receptionistId?: string;
+    receptionistName?: string;
+    observation?: string;
+    notes?: string;
+    /** versement pris à la demande (entre en caisse tout de suite) */
+    depositAmount?: number;
+    students: Array<{
+      studentId?: string;
+      guestName?: string;
+      guestPhone?: string;
+      guestPhone2?: string;
+      classId?: string;
+      year?: string;
+      filiereId?: string;
+    }>;
+  }) => Promise<{ ok: boolean; id?: string; students?: number; messageKey?: string }>;
+  /** Corrige le dossier de demande (les élèves sont réécrits en bloc). */
+  updatePrivateRequest: (
+    id: string,
+    payload: Parameters<DataActions["createPrivateRequest"]>[0],
+  ) => Promise<{ ok: boolean; students?: number; messageKey?: string }>;
+  /** Étape 2 — la programmation : modules, dates, prix, enseignants. */
+  programPrivateSession: (
+    id: string,
+    payload: {
+      /** repli quand aucun module ne porte sa propre date */
+      scheduledAt?: string;
+      modules: Array<{
+        moduleId: string;
+        teacherId?: string;
+        /** enseignant hors base : un nom, un téléphone */
+        teacherName?: string;
+        teacherPhone?: string;
+        scheduledAt?: string;
+        minutes: number;
+        hourlyPrice: number;
+        /** prix forfaitaire ; > 0, c'est LUI le prix du module */
+        flatPrice?: number;
+        teacherPercentage: number;
+      }>;
+    },
+  ) => Promise<{ ok: boolean; total?: number; scheduledAt?: string; messageKey?: string }>;
+  /** Étape 3 — la conclusion : total, répartition, encaissement, enseignants. */
+  completePrivateSession: (
+    id: string,
+    payload: {
+      totalPrice: number;
+      /** lequel des deux pourcentages a été saisi — l'autre s'en déduit */
+      percentageMode: "school" | "teacher";
+      percentage: number;
+      /** encaissé maintenant */
+      cashNow?: number;
+      /** régler les enseignants fichés dans la foulée */
+      teacherPaid?: boolean;
+      /** ce que chaque élève doit et a versé */
+      students?: Array<{ id: string; totalPrice?: number; paidAmount?: number }>;
+    },
+  ) => Promise<{
+    ok: boolean;
+    total?: number;
+    paid?: number;
+    due?: number;
+    teacherShare?: number;
+    schoolShare?: number;
+    teacherPercentage?: number;
+    schoolPercentage?: number;
+    teachersPaid?: number;
+    messageKey?: string;
+  }>;
+
   /** Crée le rendez-vous, ses modules et — si la famille paie tout de suite —
    *  son encaissement, en une seule transaction. */
   createPrivateSession: (payload: {
@@ -1050,6 +1203,16 @@ interface DataActions {
     settleDeductions?: boolean;
     acompteIds?: string[];
     absenceIds?: string[];
+    /**
+     * Les séances libres (`independent_sessions.id`) que ce règlement solde.
+     *
+     * Le RPC savait déjà retourner les passagers d'un créneau-jour, mais il les
+     * devinait — `student_id is null` et la date. Une séance libre suivie par
+     * un élève INSCRIT restait donc éternellement due à l'enseignant, et une
+     * séance libre à pourcentage dédié n'avait aucun moyen d'être soldée sans
+     * emporter ses voisines. On envoie désormais les identifiants exacts.
+     */
+    independentIds?: string[];
   }) => Promise<{ ok: boolean; paymentId?: string; sessions?: number; messageKey?: string }>;
   /** Removes séances the teacher is owed for but should not be paid on (a
    *  créneau recorded by mistake, a séance that turned out to be offered).
@@ -1510,6 +1673,23 @@ export const useData = create<DataStore>((set, get) => ({
     return res;
   },
 
+  resolveWorkerAbsence: async ({ shiftId, cost, description }) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("resolve_worker_absence", {
+      p_shift_id: shiftId,
+      p_cost: Math.max(0, Math.round(cost || 0)),
+      p_description: description ?? "",
+    });
+    if (error || !data) {
+      console.error("resolve_worker_absence failed:", error?.message);
+      reportWriteFailure("worker_shifts", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "worker.error" };
+    }
+    const res = data as { ok: boolean; absenceId?: string; cost?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
   payWorkerPeriod: async ({
     workerId,
     method,
@@ -1574,6 +1754,85 @@ export const useData = create<DataStore>((set, get) => ({
   // Le rendez-vous, ses modules et son encaissement partent ensemble : une
   // séance à moitié écrite (les modules sans la séance, l'argent sans la
   // séance) n'aurait aucun sens et laisserait une dette orpheline.
+  createPrivateRequest: async (payload) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("create_private_request", {
+      p_payload: payload,
+    });
+    if (error || !data) {
+      console.error("create_private_request failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; id?: string; students?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  updatePrivateRequest: async (id, payload) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("update_private_request", {
+      p_id: id,
+      p_payload: payload,
+    });
+    if (error || !data) {
+      console.error("update_private_request failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as { ok: boolean; students?: number; messageKey?: string };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  programPrivateSession: async (id, payload) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("program_private_session", {
+      p_id: id,
+      p_payload: payload,
+    });
+    if (error || !data) {
+      console.error("program_private_session failed:", error?.message);
+      reportWriteFailure("private_session_modules", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as {
+      ok: boolean;
+      total?: number;
+      scheduledAt?: string;
+      messageKey?: string;
+    };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
+  completePrivateSession: async (id, payload) => {
+    const supabase = createClient();
+    const { data, error } = await supabase.rpc("complete_private_session", {
+      p_id: id,
+      p_payload: payload,
+    });
+    if (error || !data) {
+      console.error("complete_private_session failed:", error?.message);
+      reportWriteFailure("private_sessions", error?.message ?? "RPC absente");
+      return { ok: false, messageKey: "particulier.error" };
+    }
+    const res = data as {
+      ok: boolean;
+      total?: number;
+      paid?: number;
+      due?: number;
+      teacherShare?: number;
+      schoolShare?: number;
+      teacherPercentage?: number;
+      schoolPercentage?: number;
+      teachersPaid?: number;
+      messageKey?: string;
+    };
+    if (res.ok) await get().fetchAll();
+    return res;
+  },
+
   createPrivateSession: async (payload) => {
     const supabase = createClient();
     const { data, error } = await supabase.rpc("create_private_session", {
@@ -1696,9 +1955,10 @@ export const useData = create<DataStore>((set, get) => ({
     settleDeductions,
     acompteIds,
     absenceIds,
+    independentIds,
   }) => {
     const supabase = createClient();
-    const { data, error } = await supabase.rpc("pay_teacher_sessions", {
+    const args: Record<string, unknown> = {
       p_teacher_id: teacherId,
       p_keys: keys,
       p_amount: Math.round(amount),
@@ -1709,7 +1969,16 @@ export const useData = create<DataStore>((set, get) => ({
       p_acompte_ids: acompteIds ?? null,
       p_absence_ids: absenceIds ?? null,
       p_settle_deductions: !!settleDeductions,
-    });
+      p_independent_ids: independentIds ?? null,
+    };
+    let { data, error } = await supabase.rpc("pay_teacher_sessions", args);
+    // Base pas encore migrée : le paramètre est inconnu, donc TOUT le règlement
+    // échouait. On réessaie sans lui — les séances libres à pourcentage dédié
+    // ne seront pas soldées, mais le versement, lui, est enregistré.
+    if (error && /p_independent_ids|does not exist|Could not find/i.test(error.message)) {
+      delete args.p_independent_ids;
+      ({ data, error } = await supabase.rpc("pay_teacher_sessions", args));
+    }
     if (error || !data) {
       console.error("pay_teacher_sessions failed:", error?.message);
       return { ok: false, messageKey: "pay.error" };

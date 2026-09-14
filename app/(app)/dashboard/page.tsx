@@ -11,7 +11,7 @@ import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import { WhatsAppAlertsCard } from "@/components/whatsapp/WhatsAppAlertsCard";
 import { BirthdayAlertsCard } from "@/components/birthdays/BirthdayAlertsCard";
 import { balanceDriftByStudent, studentDebtOf } from "@/lib/helpers";
-import { payAlertsOf } from "@/lib/workerPay";
+import { payAlertsOf, pendingAbsencesOf } from "@/lib/workerPay";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import {
@@ -207,16 +207,27 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   const workerAlerts = payAlertsOf(workers, workerShifts, workerPayments);
   const lateWorkers = workerAlerts.filter((a) => a.urgency === "late");
   const soonWorkers = workerAlerts.filter((a) => a.urgency === "soon");
+  // Les absences dont la retenue n'a jamais été tranchée. Même module que
+  // l'écran Travailleurs : les deux annoncent donc exactement les mêmes.
+  const pendingWorkerAbsences = pendingAbsencesOf(workers, workerShifts);
 
   // ---------------------------------------------------------------------------
   // 5.b  Les séances particulières
   // ---------------------------------------------------------------------------
-  const plannedPrivate = privateSessions.filter((p) => p.status === "planned");
+  // « À programmer » : la demande est prise, mais rien n'est posé. Elle n'a
+  // même pas de date à partir de laquelle on pourrait la dire en retard — c'est
+  // ainsi qu'une famille attend un coup de fil qui ne vient jamais.
+  const unplannedPrivate = privateSessions.filter((p) => p.status === "requested");
+  const plannedPrivate = privateSessions.filter(
+    (p) => p.status === "planned" && !!p.scheduledAt,
+  );
   // « En retard » : l'heure est passée et la séance n'a jamais été conclue.
   // C'est le cas qui se perd, et avec lui l'argent de la séance.
-  const latePrivate = plannedPrivate.filter((p) => new Date(p.scheduledAt).getTime() < nowMs);
+  const latePrivate = plannedPrivate.filter(
+    (p) => new Date(p.scheduledAt as string).getTime() < nowMs,
+  );
   const soonPrivate = plannedPrivate.filter((p) => {
-    const t = new Date(p.scheduledAt).getTime();
+    const t = new Date(p.scheduledAt as string).getTime();
     return t >= nowMs && t - nowMs <= 24 * 3600 * 1000;
   });
   const privateTeacherDue = privateSessions
@@ -262,6 +273,27 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
       type: "warning" as const,
       text: `${soonWorkers.length} salaire(s) de travailleur à verser dans les prochains jours — ${soonWorkers.reduce((sum, a) => sum + a.period.amount, 0)} DA.`,
       href: "/workers",
+    });
+  }
+  // Une absence non tranchée bloque le règlement de sa période : elle doit se
+  // voir d'ici, sinon on découvre le blocage le jour de la paie.
+  if (pendingWorkerAbsences.length > 0) {
+    alerts.push({
+      type: "warning" as const,
+      text:
+        `${pendingWorkerAbsences.length} absence(s) de travailleur à trancher ` +
+        `(${[...new Set(pendingWorkerAbsences.map((a) => `${a.worker.firstName} ${a.worker.lastName}`))].join(", ")}) — ` +
+        "fixez la retenue, ou décidez de ne rien retenir : le règlement de la période l'attend.",
+      href: "/workers",
+    });
+  }
+  if (unplannedPrivate.length > 0) {
+    alerts.push({
+      type: "warning" as const,
+      text:
+        `${unplannedPrivate.length} séance(s) particulière(s) à PROGRAMMER : la demande est ` +
+        "prise, mais aucune date n'est posée — ni l'élève ni l'enseignant ne savent quand.",
+      href: "/particulier",
     });
   }
   if (latePrivate.length > 0) {

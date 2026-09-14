@@ -25,6 +25,7 @@ import { StudentPages } from "@/components/pages/StudentPages";
 import { TeacherPages } from "@/components/pages/TeacherPages";
 import { ParentPages } from "@/components/pages/ParentPages";
 import { ModulePlaceholder } from "@/components/ModulePlaceholder";
+import { RestrictedPage } from "@/components/RestrictedPage";
 
 /** Client-side role+slug dispatch for every module route. Kept separate from
  *  the route file so the page itself can stay a server component and export
@@ -84,7 +85,16 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
     case "announcements":
       return <AnnouncementsPage />;
     case "expenses":
-      return <ExpensesPage />;
+      // Réservé à la direction. Le menu n'y mène plus pour un compte de
+      // réception, mais l'URL reste tapable — et un signet la garde.
+      return role === "admin" ? (
+        <ExpensesPage />
+      ) : (
+        <RestrictedPage
+          title="Dépenses — écran réservé à la direction"
+          message="Les dépenses de l'école ne sont pas consultables depuis un compte de réception."
+        />
+      );
     case "analytics":
       return <AnalyticsPage />;
     case "cash":

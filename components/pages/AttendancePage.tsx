@@ -31,6 +31,7 @@ import { useSettings, rollCallKey, type AttendanceOpenMode } from "@/lib/store/s
 import { formatDA } from "@/lib/utils";
 import {
   formatDateFr,
+  matchesAllWords,
   freePeriodCovering,
   netPriceFor,
   rollCallOpensAt,
@@ -127,6 +128,17 @@ export function AttendancePage() {
   );
   const [histSearch, setHistSearch] = useState("");
   const [histStatus, setHistStatus] = useState<"all" | "present" | "late">("all");
+
+  /**
+   * Retrouver UN élève dans la feuille de pointage.
+   *
+   * Un cours de quarante inscrits se pointait en faisant défiler la liste
+   * entière à chaque élève qui se présente au guichet — et un élève qui donne
+   * son numéro de carte ou son téléphone plutôt que son nom n'était pas
+   * trouvable du tout. La recherche porte donc sur les quatre entrées que la
+   * réception a sous la main : prénom, nom, téléphone, carte RFID.
+   */
+  const [rosterSearch, setRosterSearch] = useState("");
 
   // Helpers
   const getDayName = (d: Date): string => {
@@ -331,6 +343,27 @@ export function AttendancePage() {
         .map((a) => a.studentId),
     );
     return [...enrolled, ...students.filter((s) => visitorIds.has(s.id))];
+  };
+
+  /**
+   * Les élèves de la feuille que la recherche laisse voir.
+   *
+   * La recherche accepte plusieurs mots dans n'importe quel ordre
+   * (« benzaoui amine » comme « amine benzaoui ») et ignore accents et casse —
+   * `matchesAllWords` est la même règle que l'écran Étudiants, pour qu'un nom
+   * trouvé là-bas se retrouve ici. Un numéro de carte ou de téléphone se tape
+   * tel quel.
+   */
+  const visibleRoster = (sesId: string) => {
+    const all = getSessionStudents(sesId);
+    const q = rosterSearch.trim();
+    if (!q) return all;
+    return all.filter((stu) =>
+      matchesAllWords(
+        `${stu.firstName} ${stu.lastName} ${stu.phone ?? ""} ${stu.rfid ?? ""} ${stu.email ?? ""}`,
+        q,
+      ),
+    );
   };
 
   /** L'élève est-il sur cette feuille sans y être inscrit ? Sur une séance
@@ -1205,13 +1238,55 @@ export function AttendancePage() {
 
                     {/* Students table/list */}
                     <div className="space-y-3">
-                      <h4 className="text-xs font-bold text-ink uppercase tracking-wide">Liste des élèves</h4>
+                      {(() => {
+                        const roster = getSessionStudents(activeSession.id);
+                        const shown = visibleRoster(activeSession.id);
+                        return (
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <h4 className="text-xs font-bold text-ink uppercase tracking-wide">
+                              Liste des élèves
+                              <span className="ms-1.5 font-mono text-[10px] font-normal normal-case text-muted">
+                                {rosterSearch.trim()
+                                  ? `${shown.length} / ${roster.length}`
+                                  : `${roster.length}`}
+                              </span>
+                            </h4>
+                            {/* Chercher un élève de CE créneau : nom, prénom,
+                                téléphone ou numéro de carte. */}
+                            <div className="relative w-full sm:w-72">
+                              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                              <Input
+                                value={rosterSearch}
+                                onChange={(e) => setRosterSearch(e.target.value)}
+                                placeholder="Nom, prénom, téléphone ou carte RFID..."
+                                className="pl-9 pr-9"
+                              />
+                              {rosterSearch && (
+                                <button
+                                  type="button"
+                                  onClick={() => setRosterSearch("")}
+                                  title="Effacer la recherche"
+                                  className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-lg text-muted hover:bg-primary-50 hover:text-ink"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                       {getSessionStudents(activeSession.id).length === 0 ? (
                         <p className="text-xs text-muted italic">Aucun étudiant n'est inscrit dans ce module/emploi du temps.</p>
+                      ) : visibleRoster(activeSession.id).length === 0 ? (
+                        <p className="rounded-xl border border-dashed border-line py-6 text-center text-xs italic text-muted">
+                          Aucun élève de ce créneau ne correspond à « {rosterSearch.trim()} ».
+                          <br />
+                          Essayez son numéro de carte, son téléphone, ou une partie du nom.
+                        </p>
                       ) : (
                         <div className="space-y-2">
-                          {getSessionStudents(activeSession.id).map((stu) => {
+                          {visibleRoster(activeSession.id).map((stu) => {
                             const attToday = getStudentSheetAttendance(stu.id, activeSession.id);
                             const isFree = stu.isFree;
                             const inDebt = stu.balance < 0;

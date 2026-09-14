@@ -8,6 +8,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Input } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { useCanSeeGains } from "@/lib/store/session";
 import {
   BookOpen,
   Calendar,
@@ -80,6 +81,8 @@ export function TimetablesPage() {
     subscriptions,
     filieres,
   } = useData();
+  /** Un compte de réception encaisse ; il ne voit pas ce que l'école gagne. */
+  const canSeeGains = useCanSeeGains();
 
   // Cet écran ne montre que les créneaux vivants : une séance libre dont la
   // période est terminée n'a plus lieu d'être proposée sur l'emploi du temps.
@@ -792,12 +795,17 @@ export function TimetablesPage() {
                           <strong className="block truncate text-sm text-ink">
                             {teacher.firstName} {teacher.lastName}
                           </strong>
+                          {/* Ce que l'enseignant gagne n'est pas une donnée de
+                              guichet : un compte de réception voit qui assure le
+                              créneau, pas ce qu'il coûte à l'école. */}
                           <span className="block text-[10px] text-muted">
                             {teacher.isPassager
                               ? "Enseignant passager — réglé à la séance"
-                              : teacher.paymentType === "monthly"
-                                ? `Salaire fixe : ${teacher.monthlyAmount ?? 0} DA / mois`
-                                : `Rémunération : ${teacher.percentage ?? 0}% par séance`}
+                              : !canSeeGains
+                                ? "Enseignant de l'école"
+                                : teacher.paymentType === "monthly"
+                                  ? `Salaire fixe : ${teacher.monthlyAmount ?? 0} DA / mois`
+                                  : `Rémunération : ${teacher.percentage ?? 0}% par séance`}
                           </span>
                         </div>
                       </div>

@@ -30,6 +30,9 @@ import {
   CheckSquare,
   Square,
   AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  Table as TableIcon,
 } from "lucide-react";
 import type {
   AttendanceRecord,
@@ -45,6 +48,8 @@ import { DAYS } from "@/lib/types";
 import { printHtmlDocument } from "@/lib/print";
 import { buildTeacherPaymentReport } from "@/lib/reports/teacherPayment";
 import { buildTeacherSettlementReceipt } from "@/lib/reports/teacherSettlement";
+import { buildTeacherPaymentMatrixReceipt } from "@/lib/reports/teacherPaymentMatrix";
+import { buildPayMatrix, shortDate } from "@/lib/teacherPayMatrix";
 import {
   DAY_LABELS_FR,
   FREE_REASON_LABELS,
@@ -102,6 +107,34 @@ interface UnpaidTiming {
    *  du calcul au pourcentage et de la répartition d'un montant fixe */
   totalFees: number;
   totalShare: number;
+  /**
+   * Les séances libres de ce créneau-jour qui portent LEUR PROPRE pourcentage.
+   *
+   * Une séance libre encaissée au guichet peut désormais fixer la part de
+   * l'enseignant séance par séance. Quand elle le fait, elle sort du lot : son
+   * montant ne se calcule pas au taux habituel du prof, et il s'affiche dans
+   * une colonne à part. Quand elle ne le fait pas, elle reste un présent de
+   * plus parmi les autres (`students`).
+   */
+  freeSeances: FreeSeanceShare[];
+  /** part due au titre de ces séances-là */
+  freeShare: number;
+  /** ce que l'école a encaissé sur elles */
+  freeFees: number;
+  /** toutes les séances libres (`independent_sessions.id`) que régler ce
+   *  créneau-jour doit solder — dédiées ou non */
+  independentIds: string[];
+}
+
+/** Une séance libre réglée à son propre pourcentage. */
+interface FreeSeanceShare {
+  id: string;
+  name: string;
+  /** ce que la séance a coûté à la famille */
+  price: number;
+  percentage: number;
+  share: number;
+  time: string;
 }
 
 export function TeachersPage() {
@@ -189,7 +222,6 @@ export function TeachersPage() {
 
   // ---- Per-timing settlement (séance libre + enseignant passager) ----------
   const [isTimingPayOpen, setIsTimingPayOpen] = useState(false);
-  const [selectedTimingKeys, setSelectedTimingKeys] = useState<string[]>([]);
   const [payMethod, setPayMethod] = useState<"fixed" | "percent">("fixed");
   const [payFixedAmount, setPayFixedAmount] = useState<number>(0);
   const [payPercentage, setPayPercentage] = useState<number>(50);
@@ -200,11 +232,20 @@ export function TeachersPage() {
   const [deductAcomptes, setDeductAcomptes] = useState(true);
   const [deductAbsences, setDeductAbsences] = useState(true);
   const [timingSearch, setTimingSearch] = useState("");
-  /** L'emploi du temps que ce règlement couvre — "all" = tous les créneaux.
-   *  C'est le choix que l'écran ne proposait pas : on payait « les séances »
-   *  d'un enseignant en bloc, sans jamais pouvoir dire LEQUEL de ses cours on
-   *  réglait. */
-  const [payCreneauId, setPayCreneauId] = useState<string>("all");
+  /**
+   * LE RÈGLEMENT SE FAIT EN DEUX TEMPS.
+   *
+   * 1. « Emploi du temps » — on choisit les cours à régler. Tous sont cochés
+   *    d'entrée (c'est le cas courant : on paie le mois entier), et on peut
+   *    tout décocher pour n'en régler qu'un.
+   * 2. « Détail & versement » — le tableau Niveau × dates, le calcul, le net.
+   *
+   * L'écran ne posait aucune de ces deux questions : il listait trente séances
+   * datées à plat, sans jamais dire de quel cours elles venaient.
+   */
+  const [payStep, setPayStep] = useState<1 | 2>(1);
+  /** Les emplois du temps cochés à l'étape 1. */
+  const [paySessionIds, setPaySessionIds] = useState<string[]>([]);
   // Passager teacher created straight from this page
   const [isPassagerCreateOpen, setIsPassagerCreateOpen] = useState(false);
 
@@ -630,6 +671,10 @@ export function TeachersPage() {
           passagers: 0,
           totalFees: 0,
           totalShare: 0,
+          freeSeances: [],
+          freeShare: 0,
+          freeFees: 0,
+          independentIds: [],
         };
         map.set(key, t);
       }
@@ -665,40 +710,86 @@ export function TeachersPage() {
         t.totalShare += dueShare(u);
       });
 
-    // Passagers of the same timings (séances libres, no student account).
-    // `teacherPaid` is their own settlement flag: a créneau attended only by
-    // passagers has no unpaid_teacher_sessions row to flip. A séance OFFERTE
-    // (`isFree`) is skipped outright: nobody is paid on it, teacher included.
-    // Un créneau coché « offert » est exclu en bloc, en plus de la case
-    // « offerte » cochée présence par présence au guichet.
+    // ---- Les séances libres du même créneau -------------------------------
+    //
+    // Deux populations, longtemps confondues :
+    //
+    //  · la séance libre SANS pourcentage propre — un présent de plus. Elle
+    //    entre dans `students`, au taux habituel de l'enseignant, exactement
+    //    comme un élève inscrit qui aurait badgé.
+    //
+    //  · la séance libre AVEC son pourcentage — elle se calcule à part, à son
+    //    propre taux, et s'affiche dans sa propre colonne.
+    //
+    // Une séance OFFERTE (`isFree`, ou créneau coché « offert ») est exclue en
+    // bloc : personne n'est payé dessus, l'enseignant compris.
+    //
+    // Les séances libres d'un élève INSCRIT sont désormais comptées elles
+    // aussi. Elles ne l'étaient pas — le filtre `!ind.studentId` les écartait —
+    // et l'enseignant ne touchait donc rien sur un élève encaissé au guichet
+    // plutôt qu'au badge. On évite le double compte en sautant une séance dont
+    // la présence a DÉJÀ produit une ligne de rémunération (`seenDues`).
     const teacherSessionIds = new Set(
       sessions.filter((s) => s.teacherId === tid && !s.isFree).map((s) => s.id),
+    );
+    const seenDues = new Set(
+      getPayableDues(tid).map(
+        (u) => `${u.studentId}|${u.sessionId}|${new Date(u.date).toLocaleDateString("fr-CA")}`,
+      ),
     );
     independent
       .filter(
         (ind) =>
           ind.sessionId &&
           teacherSessionIds.has(ind.sessionId) &&
-          !ind.studentId &&
           !ind.isFree &&
-          !ind.teacherPaid,
+          !ind.teacherPaid &&
+          !(ind.studentId && seenDues.has(`${ind.studentId}|${ind.sessionId}|${ind.date}`)),
       )
       .forEach((ind) => {
         const key = `${ind.date}|${ind.sessionId}`;
-        // A passager alone can also create the timing: he still generated money.
+        // Une séance libre seule peut créer le créneau-jour : elle a rapporté
+        // de l'argent, l'enseignant doit la voir.
         const t = map.get(key) ?? timingFor(ind.sessionId!, ind.date);
+        t.independentIds.push(ind.id);
+
+        const dedicated =
+          ind.teacherPercentage !== undefined && ind.teacherPercentage !== null;
+        const person = ind.studentId
+          ? (() => {
+              const stu = students.find((st) => st.id === ind.studentId);
+              return stu ? `${stu.firstName} ${stu.lastName}` : "Élève";
+            })()
+          : ind.passagerName ?? "Passager";
+
+        if (dedicated) {
+          const pct = Math.min(Math.max(ind.teacherPercentage ?? 0, 0), 100);
+          t.freeSeances.push({
+            id: ind.id,
+            name: person,
+            price: ind.price,
+            percentage: pct,
+            share: Math.round((ind.price * pct) / 100),
+            time: ind.startTime ?? "-",
+          });
+          t.freeShare += Math.round((ind.price * pct) / 100);
+          t.freeFees += ind.price;
+          if (!ind.studentId) t.passagers += 1;
+          return;
+        }
+
         t.students.push({
-          studentId: "",
-          name: ind.passagerName ?? "Passager",
-          groupName: "Passager",
+          studentId: ind.studentId ?? "",
+          name: person,
+          groupName: ind.studentId ? "Séance libre" : "Passager",
           time: ind.startTime ?? "-",
           status: "Présent",
           fee: ind.price,
           share: 0,
-          isPassager: true,
+          isPassager: !ind.studentId,
           billable: true,
         });
-        t.passagers += 1;
+        if (!ind.studentId) t.passagers += 1;
         t.totalFees += ind.price;
       });
 
@@ -790,24 +881,40 @@ export function TeachersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payTimings, sessions, groups]);
 
-  /** Les séances que le filtre « emploi du temps » laisse voir. */
-  const creneauTimings =
-    payCreneauId === "all" ? payTimings : payTimings.filter((t) => t.sessionId === payCreneauId);
-
-  /** Ne cocher QUE ce créneau : le reste de l'emploi du temps garde ses séances
-   *  dues, ce qui est tout l'intérêt de régler cours par cours. */
-  const selectCreneau = (sessionId: string) => {
-    setPayCreneauId(sessionId);
-    setExpandedTimingKey(null);
-    setTimingGroupFilter("all");
-    setSelectedTimingKeys(
-      sessionId === "all"
-        ? payTimings.map((t) => t.key)
-        : payTimings.filter((t) => t.sessionId === sessionId).map((t) => t.key),
+  /** Cocher / décocher UN emploi du temps. Les créneaux non cochés gardent
+   *  leurs séances dues : elles seront proposées au prochain règlement, et
+   *  c'est exactement l'intérêt de régler cours par cours. */
+  const toggleCreneau = (sessionId: string) =>
+    setPaySessionIds((prev) =>
+      prev.includes(sessionId) ? prev.filter((id) => id !== sessionId) : [...prev, sessionId],
     );
-  };
 
-  const chosenTimings = payTimings.filter((t) => selectedTimingKeys.includes(t.key));
+  const allCreneauxChosen =
+    payCreneaux.length > 0 && payCreneaux.every((c) => paySessionIds.includes(c.sessionId));
+
+  const toggleAllCreneaux = () =>
+    setPaySessionIds(allCreneauxChosen ? [] : payCreneaux.map((c) => c.sessionId));
+
+  /** Les séances des emplois du temps cochés — la matière de l'étape 2. */
+  const creneauTimings = useMemo(
+    () => payTimings.filter((t) => paySessionIds.includes(t.sessionId)),
+    [payTimings, paySessionIds],
+  );
+
+  /** Les clés que le RPC de règlement attend : "YYYY-MM-DD|sessionId". Elles
+   *  découlent des créneaux cochés — plus aucune case à cocher séance par
+   *  séance, c'est l'emploi du temps qu'on règle. */
+  const chosenTimings = creneauTimings;
+
+  /** Prix d'UNE séance de ce créneau — celui de l'abonnement du cours, ou le
+   *  tarif affiché de la séance libre. C'est le « 500 DA » de la formule
+   *  « tarif × pourcentage × élèves » imprimée sur le bon. */
+  const unitPriceOf = (sessionId: string) => {
+    const sub = subscriptions.find((su) => su.sessionId === sessionId);
+    if (sub && sub.pricePerSession > 0) return sub.pricePerSession;
+    const sess = sessions.find((se) => se.id === sessionId);
+    return Math.max(0, Math.round(sess?.openPrice ?? 0));
+  };
   /** Les créneaux réellement couverts par ce règlement — ce que le bon de
    *  paiement et l'historique doivent nommer. */
   const chosenCreneaux = [...new Set(chosenTimings.map((t) => t.sessionId))];
@@ -835,8 +942,15 @@ export function TeachersPage() {
    */
   const computedPayout = useMemo(() => {
     if (payMethod === "fixed") return Math.max(0, Math.round(payFixedAmount || 0));
-    return chosenTimings.reduce((sum, t) => sum + teacherShareOf(t.students, payPercentage), 0);
+    return chosenTimings.reduce(
+      (sum, t) => sum + teacherShareOf(t.students, payPercentage) + t.freeShare,
+      0,
+    );
   }, [payMethod, payFixedAmount, payPercentage, chosenTimings]);
+
+  /** Ce que les séances libres à pourcentage dédié rapportent sur les créneaux
+   *  cochés. La colonne qui les porte n'existe QUE s'il y en a. */
+  const chosenFreeShare = chosenTimings.reduce((s, t) => s + t.freeShare, 0);
 
   // Acomptes déjà versés et retenues d'absence encore exigibles : ce sont eux
   // que le règlement déduit. Ils ne sont PAS supprimés en payant — ils sont
@@ -850,16 +964,24 @@ export function TeachersPage() {
   /** Ce qui sort réellement de la caisse. */
   const netPayout = Math.max(0, computedPayout - appliedAcomptes - appliedAbsences);
 
-  /** Per-timing share, distributed the same way the total is computed. */
+  /** Part « cours » d'une séance (hors séances libres à taux dédié, qui se
+   *  chiffrent toutes seules), répartie comme le total l'est. */
   const shareForTiming = (t: UnpaidTiming) => {
     if (payMethod === "percent") return teacherShareOf(t.students, payPercentage);
-    // Fixed amount: spread proportionally to what each timing generated so the
-    // printed slip still adds up to the amount actually paid.
+    // Montant fixe : réparti au prorata de ce que chaque séance a rapporté,
+    // pour que le bon imprimé additionne bien la somme réellement versée. Les
+    // séances libres à taux dédié gardent leur montant propre, on ne répartit
+    // donc que le reste.
+    const spread = Math.max(0, computedPayout - chosenFreeShare);
     if (chosenRevenue <= 0) {
-      return chosenTimings.length > 0 ? Math.round(computedPayout / chosenTimings.length) : 0;
+      return chosenTimings.length > 0 ? Math.round(spread / chosenTimings.length) : 0;
     }
-    return Math.round((computedPayout * t.totalFees) / chosenRevenue);
+    return Math.round((spread * t.totalFees) / chosenRevenue);
   };
+
+  /** Ce que la séance rapporte en tout : les présences + les séances libres à
+   *  taux dédié. */
+  const totalForTiming = (t: UnpaidTiming) => shareForTiming(t) + t.freeShare;
 
   /** L'instantané figé que le règlement emporte : une ligne par séance réglée,
    *  avec le créneau dont elle vient. C'est lui que le bon de paiement imprime,
@@ -871,13 +993,31 @@ export function TeachersPage() {
       title: t.title,
       moduleName: t.moduleName,
       groupName: t.groupName,
+      className: t.className,
       startTime: t.startTime,
       endTime: t.endTime,
       presents: t.students.filter((st) => st.billable).length,
       passagers: t.passagers,
-      gross: t.totalFees,
+      gross: t.totalFees + t.freeFees,
       share: shareForTiming(t),
+      // Ce qu'il faut pour que le tableau se réimprime à l'identique dans six
+      // mois : le tarif et le taux qui ont servi, et les séances libres soldées.
+      unitPrice: unitPriceOf(t.sessionId),
+      percentage: payMethod === "percent" ? payPercentage : 0,
+      kind: t.isOpen ? ("libre" as const) : ("cours" as const),
+      freeShare: t.freeShare,
+      freeCount: t.freeSeances.length,
+      independentIds: t.independentIds,
     }));
+
+  /** Le tableau Niveau × dates de l'étape 2 — construit par le MÊME code que
+   *  le bon imprimé, à partir du MÊME instantané. Les deux ne peuvent donc pas
+   *  annoncer deux totaux différents. */
+  const payMatrix = useMemo(
+    () => buildPayMatrix(buildPayDetails()),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chosenTimings, payMethod, payPercentage, payFixedAmount, subscriptions, sessions],
+  );
 
   /** Imprimer le détail AVANT de valider : l'enseignant signe ce qu'il a sous
    *  les yeux, pas un total qu'on lui annonce. */
@@ -887,7 +1027,7 @@ export function TeachersPage() {
       return;
     }
     printHtmlDocument(
-      buildTeacherSettlementReceipt({
+      buildTeacherPaymentMatrixReceipt({
         teacher: selectedTeacher,
         school,
         lang: language,
@@ -897,6 +1037,8 @@ export function TeachersPage() {
         details: buildPayDetails(),
         paidAt: new Date().toISOString(),
         receiptNo: "PROJET — NON VALIDÉ",
+        acomptes: appliedAcomptes,
+        retenues: appliedAbsences,
       }),
     );
   };
@@ -1043,14 +1185,16 @@ export function TeachersPage() {
   const openTimingPay = (t: Teacher) => {
     setSelectedTeacher(t);
     const timings = buildUnpaidTimings(t.id);
-    setSelectedTimingKeys(timings.map((x) => x.key));
+    // Étape 1, tous les emplois du temps cochés : c'est le cas courant (on
+    // règle le mois entier), et décocher est plus rapide que cocher.
+    setPayStep(1);
+    setPaySessionIds([...new Set(timings.map((x) => x.sessionId))]);
     setPayMethod(t.isPassager ? "fixed" : "percent");
     setPayFixedAmount(0);
     setPayPercentage(t.percentage ?? 50);
     setExpandedTimingKey(null);
     setTimingGroupFilter("all");
     setTimingSearch("");
-    setPayCreneauId("all");
     // Un passager n'a ni acompte ni retenue : les deux cases n'ont de sens que
     // pour un enseignant de l'école.
     setDeductAcomptes(!t.isPassager);
@@ -1061,8 +1205,8 @@ export function TeachersPage() {
 
   const handleTimingPayment = async () => {
     if (!selectedTeacher) return;
-    if (selectedTimingKeys.length === 0) {
-      alert("Sélectionnez au moins un créneau à régler.");
+    if (chosenTimings.length === 0) {
+      alert("Sélectionnez au moins un emploi du temps à régler.");
       return;
     }
     if (netPayout <= 0) {
@@ -1079,7 +1223,8 @@ export function TeachersPage() {
     try {
       const res = await payTeacherSessions({
         teacherId: selectedTeacher.id,
-        keys: selectedTimingKeys,
+        keys: chosenTimings.map((t) => t.key),
+        independentIds: chosenTimings.flatMap((t) => t.independentIds),
         amount: netPayout,
         method: payMethod,
         percentage: payMethod === "percent" ? payPercentage : undefined,
@@ -1102,7 +1247,7 @@ export function TeachersPage() {
 
       if (confirm(`Paiement de ${netPayout} DA enregistré. Imprimer le bon de paiement ?`)) {
         printHtmlDocument(
-          buildTeacherSettlementReceipt({
+          buildTeacherPaymentMatrixReceipt({
             teacher: selectedTeacher,
             school,
             lang: language,
@@ -1111,6 +1256,8 @@ export function TeachersPage() {
             percentage: payMethod === "percent" ? payPercentage : undefined,
             details,
             paidAt: new Date().toISOString(),
+            acomptes: appliedAcomptes,
+            retenues: appliedAbsences,
           }),
         );
       }
@@ -1119,22 +1266,38 @@ export function TeachersPage() {
     }
   };
 
+  /**
+   * Réimprimer un règlement de l'historique — le MÊME tableau qu'au guichet.
+   *
+   * Le bon en liste plate (`buildTeacherSettlementReceipt`) reste utilisé par
+   * les règlements écrits AVANT le tableau : leur instantané ne porte ni le
+   * tarif ni le pourcentage par créneau, et un tableau privé de ces deux
+   * colonnes ne s'expliquerait pas. Dès que l'instantané les porte, c'est le
+   * tableau qui sort.
+   */
   const reprintSettlement = (paymentId: string) => {
     const pay = teacherPayments.find((p) => p.id === paymentId);
     const t = pay ? teachers.find((x) => x.id === pay.teacherId) : undefined;
     if (!pay || !t) return;
+    const details = Array.isArray(pay.details) ? pay.details : [];
+    const hasMatrixSnapshot = details.some(
+      (d) => (d.unitPrice ?? 0) > 0 || (d.percentage ?? 0) > 0 || !!d.className,
+    );
+    const common = {
+      teacher: t,
+      school,
+      lang: language,
+      amount: pay.amount,
+      method: pay.method,
+      percentage: pay.percentage,
+      details,
+      paidAt: pay.paidAt,
+      receiptNo: `PAY-${pay.id.slice(0, 8).toUpperCase()}`,
+    };
     printHtmlDocument(
-      buildTeacherSettlementReceipt({
-        teacher: t,
-        school,
-        lang: language,
-        amount: pay.amount,
-        method: pay.method,
-        percentage: pay.percentage,
-        details: Array.isArray(pay.details) ? pay.details : [],
-        paidAt: pay.paidAt,
-        receiptNo: `PAY-${pay.id.slice(0, 8).toUpperCase()}`,
-      }),
+      hasMatrixSnapshot
+        ? buildTeacherPaymentMatrixReceipt(common)
+        : buildTeacherSettlementReceipt(common),
     );
   };
 
@@ -3084,49 +3247,40 @@ export function TeachersPage() {
         </div>
       </Modal>
       {/* ------------------------------------------------------------------ */}
-      {/* NOUVEAU RÈGLEMENT — l'écran de travail complet :                     */}
-      {/*   colonne gauche  : les créneaux à régler, dépliables élève par élève */}
-      {/*   colonne droite  : le mode de calcul, les retenues, le net à verser  */}
-      {/* Une SÉANCE OFFERTE n'apparaît jamais ici : personne n'est payé dessus.*/}
+      {/* NOUVEAU RÈGLEMENT — deux étapes.                                    */}
+      {/*                                                                     */}
+      {/* 1. EMPLOI DU TEMPS : ses cours, ses groupes, ce que chacun doit.     */}
+      {/*    Tout est coché d'entrée ; décocher un cours laisse ses séances    */}
+      {/*    dues pour le prochain règlement.                                  */}
+      {/* 2. DÉTAIL & VERSEMENT : le tableau Niveau × dates — un cours par     */}
+      {/*    ligne, une date de séance par colonne, le nombre d'élèves dans    */}
+      {/*    chaque case, le total et le montant calculé.                      */}
+      {/*                                                                     */}
+      {/* Une SÉANCE OFFERTE n'apparaît jamais ici : personne n'est payé       */}
+      {/* dessus. Une séance déjà réglée non plus — elle a disparu des dues.   */}
       {/* ------------------------------------------------------------------ */}
       <Modal
         open={isTimingPayOpen}
         onClose={() => setIsTimingPayOpen(false)}
-        title="Nouveau règlement"
+        title={payStep === 1 ? "Règlement — 1/2 · Emploi du temps" : "Règlement — 2/2 · Détail & versement"}
         subtitle={
           selectedTeacher
-            ? `${selectedTeacher.firstName} ${selectedTeacher.lastName} — choisissez les créneaux, le mode de calcul, puis validez le versement.`
+            ? payStep === 1
+              ? `${selectedTeacher.firstName} ${selectedTeacher.lastName} — cochez les emplois du temps à régler. Les cours décochés restent dus.`
+              : `${selectedTeacher.firstName} ${selectedTeacher.lastName} — élèves présents par séance, montant calculé, puis versement.`
             : undefined
         }
-        size="xl"
+        size="full"
       >
         {selectedTeacher && (() => {
-          const query = timingSearch.trim().toLowerCase();
-          const visibleTimings = query
-            ? creneauTimings.filter((t) =>
-                `${t.title} ${t.moduleName} ${t.className} ${t.groupName} ${t.dateKey} ${t.students
-                  .map((s) => s.name)
-                  .join(" ")}`
-                  .toLowerCase()
-                  .includes(query),
-              )
-            : creneauTimings;
-          const activeCreneau = payCreneaux.find((c) => c.sessionId === payCreneauId);
-          const visibleKeys = visibleTimings.map((t) => t.key);
-          const allVisibleChosen =
-            visibleKeys.length > 0 && visibleKeys.every((k) => selectedTimingKeys.includes(k));
-          const totalDue = payTimings.reduce((s, t) => s + t.totalShare, 0);
-          const dateSpan = chosenTimings.length
-            ? [...chosenTimings]
-                .map((t) => t.dateKey)
-                .sort()
-                .filter((_, i, arr) => i === 0 || i === arr.length - 1)
-            : [];
+          const totalDue = payTimings.reduce((s, t) => s + t.totalShare + t.freeShare, 0);
+          /** Toutes les séances libres à pourcentage dédié encore dues. */
+          const allFreeSeances = payTimings.flatMap((t) => t.freeSeances);
 
           return (
             <div className="space-y-5">
-              {/* ---- Bandeau enseignant ---------------------------------- */}
-              <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-primary/25 bg-gradient-to-r from-primary-50/70 to-transparent p-4">
+              {/* ---- Bandeau enseignant + fil des étapes ------------------ */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-canvas/50 p-4">
                 <div className="flex items-center gap-3">
                   <div className="flex h-12 w-12 items-center justify-center rounded-full border border-primary/25 bg-primary/10 text-sm font-bold tracking-wider text-primary">
                     {selectedTeacher.firstName.charAt(0).toUpperCase()}
@@ -3147,9 +3301,25 @@ export function TeachersPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge tone="warning" className="font-bold">
-                    {payTimings.length} créneau(x) à régler
-                  </Badge>
+                  {([1, 2] as const).map((n) => (
+                    <span
+                      key={n}
+                      className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-[10px] font-bold ${
+                        payStep === n
+                          ? "border-primary bg-primary text-white"
+                          : "border-line bg-surface text-muted"
+                      }`}
+                    >
+                      <span
+                        className={`flex h-4 w-4 items-center justify-center rounded-full text-[9px] ${
+                          payStep === n ? "bg-white/25" : "bg-muted/20"
+                        }`}
+                      >
+                        {n}
+                      </span>
+                      {n === 1 ? "Emploi du temps" : "Détail & versement"}
+                    </span>
+                  ))}
                   <Badge tone="primary" className="font-mono font-bold">
                     {totalDue} DA dus
                   </Badge>
@@ -3160,70 +3330,72 @@ export function TeachersPage() {
                 <div className="rounded-2xl border border-dashed border-success/40 bg-success/5 py-12 text-center">
                   <strong className="block text-sm text-success">Rien à régler.</strong>
                   <span className="mt-1 block text-[11px] text-muted">
-                    Tous les créneaux de cet enseignant ont déjà été payés — et les séances
-                    offertes ne se paient jamais.
+                    Tous les emplois du temps de cet enseignant ont déjà été payés — et les
+                    séances offertes ne se paient jamais.
                   </span>
                 </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_22rem]">
-                  {/* =========== COLONNE GAUCHE : les créneaux =========== */}
-                  <div className="space-y-3">
-                    {/* ---- L'EMPLOI DU TEMPS À RÉGLER -------------------- */}
-                    {/* Ce que cet écran ne savait pas dire : de QUEL cours on
-                        règle les séances. On liste ici tous les emplois du
-                        temps de l'enseignant qui ont quelque chose à payer,
-                        avec leurs groupes et leurs jours. En choisir un ne
-                        coche QUE ses séances — celles des autres créneaux
-                        restent dues, et c'est exactement ce qu'on veut. */}
-                    <div className="rounded-2xl border border-line bg-canvas/40 p-3">
-                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                        <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">
-                          <CalendarDays className="h-3.5 w-3.5 text-primary" />
-                          Emploi du temps à régler
-                        </span>
-                        <span className="text-[10px] text-muted">
-                          {payCreneaux.length} cours avec des séances dues
-                        </span>
-                      </div>
+              ) : payStep === 1 ? (
+                /* ==================================================== */
+                /* ÉTAPE 1 — LES EMPLOIS DU TEMPS                        */
+                /* ==================================================== */
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-muted">
+                      <CalendarDays className="h-4 w-4 text-primary" />
+                      Ses emplois du temps ({payCreneaux.length}) — {paySessionIds.length} coché(s)
+                    </span>
+                    <Button size="sm" variant="outline" onClick={toggleAllCreneaux}>
+                      {allCreneauxChosen ? (
+                        <>
+                          <Square className="h-3.5 w-3.5" /> Tout décocher
+                        </>
+                      ) : (
+                        <>
+                          <CheckSquare className="h-3.5 w-3.5" /> Tout sélectionner
+                        </>
+                      )}
+                    </Button>
+                  </div>
 
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {payCreneaux.map((c) => {
+                      const checked = paySessionIds.includes(c.sessionId);
+                      const freeOnCreneau = c.timings.reduce((s, t) => s + t.freeSeances.length, 0);
+                      const freeShareOnCreneau = c.timings.reduce((s, t) => s + t.freeShare, 0);
+                      const dates = [...new Set(c.timings.map((t) => t.dateKey))].sort();
+                      const presents = c.timings.reduce(
+                        (s, t) => s + t.students.filter((st) => st.billable).length,
+                        0,
+                      );
+                      return (
                         <button
+                          key={c.sessionId}
                           type="button"
-                          onClick={() => selectCreneau("all")}
-                          className={`rounded-xl border p-2.5 text-left transition-all ${
-                            payCreneauId === "all"
+                          onClick={() => toggleCreneau(c.sessionId)}
+                          className={`rounded-2xl border p-3.5 text-left transition-all ${
+                            checked
                               ? "border-primary bg-primary/10 ring-2 ring-primary/25"
                               : "border-line bg-surface hover:border-primary/40"
                           }`}
                         >
-                          <strong className="block text-[11px] text-ink">
-                            Tous ses emplois du temps
-                          </strong>
-                          <span className="mt-0.5 block text-[10px] text-muted">
-                            {payTimings.length} séance(s) ·{" "}
-                            <span className="font-mono font-bold text-primary">{totalDue} DA</span>
-                          </span>
-                        </button>
-
-                        {payCreneaux.map((c) => {
-                          const active = payCreneauId === c.sessionId;
-                          return (
-                            <button
-                              key={c.sessionId}
-                              type="button"
-                              onClick={() => selectCreneau(c.sessionId)}
-                              className={`rounded-xl border p-2.5 text-left transition-all ${
-                                active
-                                  ? "border-primary bg-primary/10 ring-2 ring-primary/25"
-                                  : "border-line bg-surface hover:border-primary/40"
-                              }`}
-                            >
-                              <strong className="flex items-center gap-1.5 text-[11px] text-ink">
+                          <span className="flex items-start gap-2.5">
+                            {checked ? (
+                              <CheckSquare className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                            ) : (
+                              <Square className="mt-0.5 h-4 w-4 shrink-0 text-muted" />
+                            )}
+                            <span className="min-w-0 flex-1">
+                              <strong className="flex items-center gap-1.5 text-xs text-ink">
                                 {c.isOpen && <span>🎯</span>}
                                 <span className="truncate">{c.title}</span>
                               </strong>
+                              {/* La colonne « Niveau » du tableau de l'étape 2 :
+                                  la classe, puis les groupes du cours. */}
+                              <span className="mt-0.5 block truncate text-[10px] font-semibold text-primary">
+                                {c.className}
+                              </span>
                               <span className="mt-0.5 block truncate text-[10px] text-muted">
-                                {c.className} · Gr: {c.groupNames.join(" · ")}
+                                Groupe(s) : {c.groupNames.join(" · ")}
                               </span>
                               <span className="mt-0.5 block text-[10px] text-muted">
                                 <span className="font-mono">
@@ -3231,243 +3403,507 @@ export function TeachersPage() {
                                 </span>
                                 {c.days.length > 0 && ` · ${formatDays(c.days)}`}
                               </span>
-                              <span className="mt-1 flex flex-wrap items-center gap-1">
-                                <Badge tone="warning" className="text-[9px] font-bold">
-                                  {c.seances} séance(s)
-                                </Badge>
-                                <Badge tone="success" className="font-mono text-[9px] font-bold">
-                                  {c.due} DA dus
-                                </Badge>
+                              <span className="mt-1 block text-[10px] text-muted">
+                                Tarif séance :{" "}
+                                <strong className="font-mono text-ink">
+                                  {unitPriceOf(c.sessionId)} DA
+                                </strong>
                               </span>
-                            </button>
-                          );
-                        })}
-                      </div>
+                            </span>
+                          </span>
 
-                      {activeCreneau && (
-                        <p className="mt-2 rounded-xl border border-primary/20 bg-primary-50/40 p-2 text-[10px] leading-relaxed text-muted">
-                          Ce règlement ne couvrira que{" "}
-                          <strong className="text-ink">{activeCreneau.title}</strong> (
-                          {activeCreneau.groupNames.join(" · ")}).{" "}
-                          {payTimings.length - activeCreneau.seances > 0 ? (
-                            <>
-                              Les{" "}
-                              <strong className="text-warning">
-                                {payTimings.length - activeCreneau.seances} séance(s)
-                              </strong>{" "}
-                              des autres emplois du temps restent dues et seront proposées au
-                              prochain règlement.
-                            </>
-                          ) : (
-                            "C'est le seul cours de cet enseignant à avoir des séances dues."
+                          <span className="mt-2 flex flex-wrap items-center gap-1 border-t border-line/60 pt-2">
+                            <Badge tone="warning" className="text-[9px] font-bold">
+                              {dates.length} séance(s) non payée(s)
+                            </Badge>
+                            <Badge tone="primary" className="text-[9px] font-bold">
+                              <Users className="mr-0.5 inline h-2.5 w-2.5" />
+                              {presents} présence(s)
+                            </Badge>
+                            {freeOnCreneau > 0 && (
+                              <Badge tone="neutral" className="text-[9px] font-bold">
+                                🎯 {freeOnCreneau} séance(s) libre(s) à % dédié
+                              </Badge>
+                            )}
+                            <Badge tone="success" className="font-mono text-[9px] font-bold">
+                              {c.due + freeShareOnCreneau} DA dus
+                            </Badge>
+                          </span>
+
+                          {dates.length > 0 && (
+                            <span className="mt-1.5 block truncate text-[9px] text-muted">
+                              {dates.slice(0, 8).map(shortDate).join(" · ")}
+                              {dates.length > 8 && ` … +${dates.length - 8}`}
+                            </span>
                           )}
-                        </p>
-                      )}
-                    </div>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="relative min-w-[12rem] flex-1">
-                        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-                        <Input
-                          value={timingSearch}
-                          onChange={(e) => setTimingSearch(e.target.value)}
-                          placeholder="Filtrer par date, module, classe, élève..."
-                          className="pl-9"
-                        />
-                      </div>
+                  {allFreeSeances.length > 0 && (
+                    <p className="rounded-2xl border border-primary/20 bg-primary-50/40 p-3 text-[11px] leading-relaxed text-muted">
+                      <strong className="text-ink">
+                        {allFreeSeances.length} séance(s) libre(s) à pourcentage dédié
+                      </strong>{" "}
+                      sont encore dues à cet enseignant. Elles ne se calculent pas à son taux
+                      habituel : chacune porte le sien, posé au guichet. Elles apparaîtront dans
+                      leur propre colonne à l&apos;étape suivante.
+                    </p>
+                  )}
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-4">
+                    <span className="text-[11px] text-muted">
+                      {paySessionIds.length === 0
+                        ? "Cochez au moins un emploi du temps."
+                        : `${creneauTimings.length} séance(s) sur ${payTimings.length} seront réglées.`}
+                    </span>
+                    <div className="flex gap-2">
+                      <Button variant="outline" onClick={() => setIsTimingPayOpen(false)}>
+                        Annuler
+                      </Button>
                       <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() =>
-                          setSelectedTimingKeys(
-                            allVisibleChosen
-                              ? selectedTimingKeys.filter((k) => !visibleKeys.includes(k))
-                              : [...new Set([...selectedTimingKeys, ...visibleKeys])],
-                          )
-                        }
+                        onClick={() => setPayStep(2)}
+                        disabled={paySessionIds.length === 0}
                       >
-                        {allVisibleChosen ? <Square className="h-3.5 w-3.5" /> : <CheckSquare className="h-3.5 w-3.5" />}
-                        {allVisibleChosen ? "Tout décocher" : "Tout cocher"}
+                        Détail & versement <ArrowRight className="h-4 w-4" />
                       </Button>
                     </div>
+                  </div>
+                </div>
+              ) : (
+                /* ==================================================== */
+                /* ÉTAPE 2 — LE TABLEAU ET LE VERSEMENT                  */
+                /* ==================================================== */
+                <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_23rem]">
+                  <div className="space-y-4">
+                    {/* ---- LE TABLEAU : Niveau × dates ---------------- */}
+                    <div className="rounded-2xl border border-line bg-surface p-3">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">
+                          <TableIcon className="h-3.5 w-3.5 text-primary" />
+                          Élèves présents par séance
+                        </span>
+                        <span className="text-[10px] text-muted">
+                          {payMatrix.rows.length} emploi(s) du temps · {payMatrix.dates.length}{" "}
+                          date(s) · {payMatrix.totalStudents} présence(s)
+                        </span>
+                      </div>
 
-                    <div className="max-h-[52vh] space-y-2 overflow-y-auto pr-1">
-                      {visibleTimings.length === 0 && (
-                        <p className="rounded-2xl border border-dashed border-line py-8 text-center text-xs italic text-muted">
-                          Aucun créneau ne correspond à ce filtre.
+                      {/* Le tableau est large : il défile horizontalement
+                          plutôt que d'écraser la colonne « Niveau ». */}
+                      <div className="overflow-x-auto">
+                        <table className="w-full min-w-max border-collapse text-xs">
+                          <thead>
+                            <tr className="text-[10px] uppercase tracking-wide text-muted">
+                              <th className="sticky start-0 z-10 border-b border-line bg-surface p-2 text-start font-bold">
+                                Niveau (emploi du temps)
+                              </th>
+                              <th className="border-b border-line p-2 text-end font-bold">
+                                Tarif séance
+                              </th>
+                              <th className="border-b border-line p-2 text-end font-bold">%</th>
+                              {payMatrix.dates.map((d) => (
+                                <th
+                                  key={d}
+                                  className="border-b border-line p-2 text-center font-mono font-bold"
+                                  title={formatDateFr(d)}
+                                >
+                                  {shortDate(d)}
+                                </th>
+                              ))}
+                              <th className="border-b border-line bg-primary-50/50 p-2 text-end font-bold">
+                                Total élèves
+                              </th>
+                              {payMatrix.hasFreeColumn && (
+                                <th className="border-b border-line p-2 text-end font-bold">
+                                  Séances libres
+                                  <span className="block text-[8px] font-normal normal-case">
+                                    part dédiée
+                                  </span>
+                                </th>
+                              )}
+                              <th className="border-b border-line bg-success/10 p-2 text-end font-bold">
+                                Montant calculé
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {payMatrix.rows.length === 0 && (
+                              <tr>
+                                <td
+                                  colSpan={6 + payMatrix.dates.length}
+                                  className="p-8 text-center text-xs italic text-muted"
+                                >
+                                  Aucun emploi du temps coché — revenez à l&apos;étape 1.
+                                </td>
+                              </tr>
+                            )}
+                            {payMatrix.rows.map((r) => (
+                              <tr key={r.sessionId} className="border-b border-line/60">
+                                <td className="sticky start-0 z-10 bg-surface p-2 align-top">
+                                  <strong className="block text-ink">{r.title}</strong>
+                                  <span className="block text-[10px] text-primary">
+                                    {r.className}
+                                  </span>
+                                  <span className="block text-[10px] text-muted">
+                                    Gr: {r.groupName} · {r.seances} séance(s)
+                                  </span>
+                                  {r.unitPrice > 0 && r.percentage > 0 && r.totalStudents > 0 && (
+                                    <span className="mt-0.5 block font-mono text-[9px] text-muted">
+                                      {r.unitPrice} × {r.percentage}% × {r.totalStudents} ={" "}
+                                      <strong className="text-primary">{r.totalShare} DA</strong>
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-2 text-end font-mono">
+                                  {r.unitPrice > 0 ? `${r.unitPrice} DA` : "—"}
+                                </td>
+                                <td className="p-2 text-end font-mono">
+                                  {r.percentage > 0 ? `${r.percentage} %` : "—"}
+                                </td>
+                                {payMatrix.dates.map((d) => {
+                                  const cell = r.cells.get(d);
+                                  return (
+                                    <td
+                                      key={d}
+                                      className={`p-2 text-center font-mono ${
+                                        cell
+                                          ? cell.students > 0
+                                            ? "font-bold text-ink"
+                                            : "text-muted"
+                                          : "text-muted/40"
+                                      }`}
+                                      title={
+                                        cell
+                                          ? `${formatDateFr(d)} · ${cell.startTime}-${cell.endTime} · ${cell.students} élève(s) · ${cell.gross} DA encaissés`
+                                          : "Pas de séance ce jour-là sur ce créneau"
+                                      }
+                                    >
+                                      {cell ? cell.students : "—"}
+                                    </td>
+                                  );
+                                })}
+                                <td className="bg-primary-50/40 p-2 text-end font-mono text-sm font-black text-ink">
+                                  {r.totalStudents}
+                                </td>
+                                {payMatrix.hasFreeColumn && (
+                                  <td className="p-2 text-end font-mono">
+                                    {r.freeCount > 0 ? (
+                                      <>
+                                        <strong className="text-warning">{r.freeShare} DA</strong>
+                                        <span className="block text-[9px] text-muted">
+                                          {r.freeCount} séance(s)
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <span className="text-muted/50">—</span>
+                                    )}
+                                  </td>
+                                )}
+                                <td className="bg-success/5 p-2 text-end font-mono text-sm font-black text-success">
+                                  {r.amount} DA
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                          {payMatrix.rows.length > 0 && (
+                            <tfoot>
+                              <tr className="border-t-2 border-primary/50 bg-canvas/60 text-[11px] font-bold">
+                                <td className="sticky start-0 z-10 bg-canvas/60 p-2 uppercase">
+                                  Total général
+                                </td>
+                                <td />
+                                <td />
+                                {payMatrix.dates.map((d) => (
+                                  <td key={d} className="p-2 text-center font-mono">
+                                    {payMatrix.rows.reduce(
+                                      (s, r) => s + (r.cells.get(d)?.students ?? 0),
+                                      0,
+                                    )}
+                                  </td>
+                                ))}
+                                <td className="bg-primary-50/60 p-2 text-end font-mono text-sm font-black text-primary">
+                                  {payMatrix.totalStudents}
+                                </td>
+                                {payMatrix.hasFreeColumn && (
+                                  <td className="p-2 text-end font-mono text-warning">
+                                    {payMatrix.freeShare} DA
+                                  </td>
+                                )}
+                                <td className="bg-success/10 p-2 text-end font-mono text-base font-black text-success">
+                                  {payMatrix.amount} DA
+                                </td>
+                              </tr>
+                            </tfoot>
+                          )}
+                        </table>
+                      </div>
+
+                      {payMatrix.dates.length > 0 && (
+                        <p className="mt-2 text-[10px] text-muted">
+                          Dates des séances : du{" "}
+                          <strong className="text-ink">{formatDateFr(payMatrix.dates[0])}</strong> au{" "}
+                          <strong className="text-ink">
+                            {formatDateFr(payMatrix.dates[payMatrix.dates.length - 1])}
+                          </strong>
+                          . Une case vide signifie qu&apos;aucune séance de ce cours n&apos;a eu
+                          lieu ce jour-là.
                         </p>
                       )}
-                      {visibleTimings.map((t) => {
-                        const checked = selectedTimingKeys.includes(t.key);
-                        const expanded = expandedTimingKey === t.key;
-                        const groupsInTiming = [...new Set(t.students.map((s) => s.groupName))];
-                        const visibleStudents =
-                          timingGroupFilter === "all"
-                            ? t.students
-                            : t.students.filter((s) => s.groupName === timingGroupFilter);
-                        return (
-                          <div
-                            key={t.key}
-                            className={`overflow-hidden rounded-2xl border transition-colors ${
-                              checked ? "border-primary/40 bg-primary-50/30" : "border-line bg-canvas/20"
-                            }`}
-                          >
-                            <div className="flex flex-wrap items-center justify-between gap-2 p-3">
-                              <label className="flex min-w-0 cursor-pointer items-start gap-2.5">
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={() =>
-                                    setSelectedTimingKeys(
-                                      checked
-                                        ? selectedTimingKeys.filter((k) => k !== t.key)
-                                        : [...selectedTimingKeys, t.key],
-                                    )
-                                  }
-                                  className="mt-0.5 h-4 w-4 shrink-0"
-                                />
-                                <span className="min-w-0">
-                                  <strong className="flex items-center gap-1.5 text-xs text-ink">
-                                    <CalendarDays className="h-3.5 w-3.5 text-primary" />
-                                    {formatDateFr(t.dateKey)} — {t.title}
-                                    {t.isOpen && (
-                                      <Badge tone="success" className="text-[9px]">Séance libre</Badge>
-                                    )}
-                                  </strong>
-                                  <span className="mt-0.5 block text-[10px] text-muted">
-                                    {t.className} · Gr: {t.groupName} ·{" "}
-                                    <span className="font-mono">
-                                      {t.startTime} - {t.endTime}
+                      {payMatrix.hasFreeColumn && (
+                        <p className="mt-1 text-[10px] leading-relaxed text-muted">
+                          <strong className="text-warning">Séances libres (part dédiée)</strong> :
+                          séances libres encaissées au guichet avec LEUR propre pourcentage — elles
+                          ne passent donc pas par le taux habituel de l&apos;enseignant. Les
+                          séances libres sans pourcentage propre sont comptées avec les autres
+                          présences, dans les colonnes de dates.
+                        </p>
+                      )}
+                    </div>
+
+                    {/* ---- Détail séance par séance (dépliable) -------- */}
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                          Détail des séances ({chosenTimings.length})
+                        </span>
+                        <div className="relative min-w-[12rem] flex-1">
+                          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                          <Input
+                            value={timingSearch}
+                            onChange={(e) => setTimingSearch(e.target.value)}
+                            placeholder="Filtrer par date, module, classe, élève..."
+                            className="pl-9"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="max-h-[38vh] space-y-2 overflow-y-auto pr-1">
+                        {(() => {
+                          const query = timingSearch.trim().toLowerCase();
+                          const visibleTimings = query
+                            ? chosenTimings.filter((t) =>
+                                `${t.title} ${t.moduleName} ${t.className} ${t.groupName} ${t.dateKey} ${t.students
+                                  .map((x) => x.name)
+                                  .join(" ")} ${t.freeSeances.map((x) => x.name).join(" ")}`
+                                  .toLowerCase()
+                                  .includes(query),
+                              )
+                            : chosenTimings;
+
+                          if (visibleTimings.length === 0) {
+                            return (
+                              <p className="rounded-2xl border border-dashed border-line py-8 text-center text-xs italic text-muted">
+                                Aucune séance ne correspond à ce filtre.
+                              </p>
+                            );
+                          }
+
+                          return visibleTimings.map((t) => {
+                            const expanded = expandedTimingKey === t.key;
+                            const groupsInTiming = [...new Set(t.students.map((x) => x.groupName))];
+                            const visibleStudents =
+                              timingGroupFilter === "all"
+                                ? t.students
+                                : t.students.filter((x) => x.groupName === timingGroupFilter);
+                            const billable = t.students.filter((x) => x.billable).length;
+                            return (
+                              <div
+                                key={t.key}
+                                className="overflow-hidden rounded-2xl border border-line bg-canvas/20"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2 p-3">
+                                  <span className="min-w-0">
+                                    <strong className="flex items-center gap-1.5 text-xs text-ink">
+                                      <CalendarDays className="h-3.5 w-3.5 text-primary" />
+                                      {formatDateFr(t.dateKey)} — {t.title}
+                                      {t.isOpen && (
+                                        <Badge tone="success" className="text-[9px]">
+                                          Séance libre
+                                        </Badge>
+                                      )}
+                                    </strong>
+                                    <span className="mt-0.5 block text-[10px] text-muted">
+                                      {t.className} · Gr: {t.groupName} ·{" "}
+                                      <span className="font-mono">
+                                        {t.startTime} - {t.endTime}
+                                      </span>
                                     </span>
                                   </span>
-                                </span>
-                              </label>
-                              <div className="flex shrink-0 items-center gap-2">
-                                <Badge tone="primary" className="font-mono text-[10px] font-bold">
-                                  <Users className="mr-1 inline h-3 w-3" />
-                                  {t.students.length} présent{t.students.length > 1 ? "s" : ""}
-                                  {t.passagers > 0 && ` (${t.passagers} pass.)`}
-                                </Badge>
-                                {t.students.some((st) => !st.billable) && (
-                                  <Badge tone="warning" className="font-mono text-[10px] font-bold">
-                                    🎁 {t.students.filter((st) => !st.billable).length} offerte(s)
-                                  </Badge>
-                                )}
-                                <Badge tone="neutral" className="font-mono text-[10px] font-bold">
-                                  {t.totalFees} DA encaissés
-                                </Badge>
-                                {checked && (
-                                  <Badge tone="success" className="font-mono text-[10px] font-bold">
-                                    → {shareForTiming(t)} DA
-                                  </Badge>
-                                )}
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  onClick={() => setExpandedTimingKey(expanded ? null : t.key)}
-                                >
-                                  {expanded ? "Masquer" : "Détails"}
-                                </Button>
-                              </div>
-                            </div>
-
-                            {expanded && (
-                              <div className="space-y-2 border-t border-line bg-surface p-3">
-                                <div className="flex flex-wrap items-center gap-1.5">
-                                  <span className="mr-1 text-[10px] font-bold uppercase text-muted">Filtrer :</span>
-                                  {["all", ...groupsInTiming].map((g) => (
-                                    <button
-                                      key={g}
-                                      onClick={() => setTimingGroupFilter(g)}
-                                      className={`rounded-lg px-2 py-1 text-[10px] font-bold transition-all ${
-                                        timingGroupFilter === g
-                                          ? "bg-primary text-white"
-                                          : "bg-canvas text-muted hover:text-ink"
-                                      }`}
+                                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                                    <Badge tone="primary" className="font-mono text-[10px] font-bold">
+                                      <Users className="mr-1 inline h-3 w-3" />
+                                      {billable} élève(s)
+                                      {t.passagers > 0 && ` (${t.passagers} pass.)`}
+                                    </Badge>
+                                    {t.students.some((st) => !st.billable) && (
+                                      <Badge tone="warning" className="font-mono text-[10px] font-bold">
+                                        🎁 {t.students.filter((st) => !st.billable).length} offerte(s)
+                                      </Badge>
+                                    )}
+                                    {t.freeSeances.length > 0 && (
+                                      <Badge tone="neutral" className="font-mono text-[10px] font-bold">
+                                        🎯 {t.freeSeances.length} · {t.freeShare} DA
+                                      </Badge>
+                                    )}
+                                    <Badge tone="success" className="font-mono text-[10px] font-bold">
+                                      → {totalForTiming(t)} DA
+                                    </Badge>
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => setExpandedTimingKey(expanded ? null : t.key)}
                                     >
-                                      {g === "all"
-                                        ? `Tous (${t.students.length})`
-                                        : `${g} (${t.students.filter((s) => s.groupName === g).length})`}
-                                    </button>
-                                  ))}
+                                      {expanded ? "Masquer" : "Détails"}
+                                    </Button>
+                                  </div>
                                 </div>
-                                <table className="w-full text-xs">
-                                  <thead>
-                                    <tr className="text-left text-[10px] font-bold uppercase text-muted">
-                                      <th className="py-1">Élève</th>
-                                      <th className="py-1">Groupe</th>
-                                      <th className="py-1">Heure</th>
-                                      <th className="py-1">Statut</th>
-                                      <th className="py-1 text-right">Tarif élève</th>
-                                      <th className="py-1 text-right">
-                                        Part prof {payMethod === "percent" ? `(${payPercentage} %)` : ""}
-                                      </th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {visibleStudents.map((st, i) => (
-                                      <tr
-                                        key={i}
-                                        className={`border-t border-line/50 ${
-                                          st.billable ? "" : "bg-warning/5 text-muted"
-                                        }`}
-                                      >
-                                        <td className="py-1.5 font-semibold text-ink">
-                                          {st.name}
-                                          {st.isPassager && (
-                                            <Badge tone="warning" className="ml-1.5 text-[8px]">Passager</Badge>
-                                          )}
-                                          {!st.billable && (
-                                            <span className="ml-1.5 text-[9px] font-normal text-warning">
-                                              🎁 {st.note}
-                                            </span>
-                                          )}
-                                        </td>
-                                        <td className="py-1.5 text-muted">{st.groupName}</td>
-                                        <td className="py-1.5 font-mono">{st.time}</td>
-                                        <td className="py-1.5">
-                                          <Badge
-                                            tone={st.status === "En Retard" ? "warning" : "success"}
-                                            className="text-[9px]"
+
+                                {expanded && (
+                                  <div className="space-y-2 border-t border-line bg-surface p-3">
+                                    {groupsInTiming.length > 1 && (
+                                      <div className="flex flex-wrap items-center gap-1.5">
+                                        <span className="mr-1 text-[10px] font-bold uppercase text-muted">
+                                          Filtrer :
+                                        </span>
+                                        {["all", ...groupsInTiming].map((g) => (
+                                          <button
+                                            key={g}
+                                            onClick={() => setTimingGroupFilter(g)}
+                                            className={`rounded-lg px-2 py-1 text-[10px] font-bold transition-all ${
+                                              timingGroupFilter === g
+                                                ? "bg-primary text-white"
+                                                : "bg-canvas text-muted hover:text-ink"
+                                            }`}
                                           >
-                                            {st.status}
-                                          </Badge>
-                                        </td>
-                                        <td className="py-1.5 text-right font-mono">{st.fee} DA</td>
-                                        <td
-                                          className={`py-1.5 text-right font-mono font-bold ${
-                                            st.billable ? "text-primary" : "text-muted"
-                                          }`}
-                                        >
-                                          {!st.billable
-                                            ? "0 DA"
-                                            : payMethod === "percent"
-                                              ? `${Math.round((st.fee * payPercentage) / 100)} DA`
-                                              : "—"}
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
+                                            {g === "all"
+                                              ? `Tous (${t.students.length})`
+                                              : `${g} (${t.students.filter((x) => x.groupName === g).length})`}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    )}
+                                    <table className="w-full text-xs">
+                                      <thead>
+                                        <tr className="text-left text-[10px] font-bold uppercase text-muted">
+                                          <th className="py-1">Élève</th>
+                                          <th className="py-1">Groupe</th>
+                                          <th className="py-1">Heure</th>
+                                          <th className="py-1">Statut</th>
+                                          <th className="py-1 text-right">Tarif élève</th>
+                                          <th className="py-1 text-right">
+                                            Part prof{" "}
+                                            {payMethod === "percent" ? `(${payPercentage} %)` : ""}
+                                          </th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {visibleStudents.map((st, i) => (
+                                          <tr
+                                            key={`s${i}`}
+                                            className={`border-t border-line/50 ${
+                                              st.billable ? "" : "bg-warning/5 text-muted"
+                                            }`}
+                                          >
+                                            <td className="py-1.5 font-semibold text-ink">
+                                              {st.name}
+                                              {st.isPassager && (
+                                                <Badge tone="warning" className="ml-1.5 text-[8px]">
+                                                  Passager
+                                                </Badge>
+                                              )}
+                                              {!st.billable && (
+                                                <span className="ml-1.5 text-[9px] font-normal text-warning">
+                                                  🎁 {st.note}
+                                                </span>
+                                              )}
+                                            </td>
+                                            <td className="py-1.5 text-muted">{st.groupName}</td>
+                                            <td className="py-1.5 font-mono">{st.time}</td>
+                                            <td className="py-1.5">
+                                              <Badge
+                                                tone={st.status === "En Retard" ? "warning" : "success"}
+                                                className="text-[9px]"
+                                              >
+                                                {st.status}
+                                              </Badge>
+                                            </td>
+                                            <td className="py-1.5 text-right font-mono">{st.fee} DA</td>
+                                            <td
+                                              className={`py-1.5 text-right font-mono font-bold ${
+                                                st.billable ? "text-primary" : "text-muted"
+                                              }`}
+                                            >
+                                              {!st.billable
+                                                ? "0 DA"
+                                                : payMethod === "percent"
+                                                  ? `${Math.round((st.fee * payPercentage) / 100)} DA`
+                                                  : "—"}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                        {/* Les séances libres à taux dédié : à
+                                            part, avec LEUR pourcentage. */}
+                                        {t.freeSeances.map((f) => (
+                                          <tr
+                                            key={f.id}
+                                            className="border-t border-line/50 bg-primary-50/30"
+                                          >
+                                            <td className="py-1.5 font-semibold text-ink">
+                                              {f.name}
+                                              <Badge tone="primary" className="ml-1.5 text-[8px]">
+                                                Séance libre · % dédié
+                                              </Badge>
+                                            </td>
+                                            <td className="py-1.5 text-muted">Séance libre</td>
+                                            <td className="py-1.5 font-mono">{f.time}</td>
+                                            <td className="py-1.5">
+                                              <Badge tone="success" className="text-[9px]">
+                                                Présent
+                                              </Badge>
+                                            </td>
+                                            <td className="py-1.5 text-right font-mono">
+                                              {f.price} DA
+                                            </td>
+                                            <td className="py-1.5 text-right font-mono font-bold text-primary">
+                                              {f.share} DA
+                                              <span className="block text-[9px] font-normal text-muted">
+                                                {f.percentage} %
+                                              </span>
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
                               </div>
-                            )}
-                          </div>
-                        );
-                      })}
+                            );
+                          });
+                        })()}
+                      </div>
                     </div>
                   </div>
 
-                  {/* =========== COLONNE DROITE : le calcul =========== */}
-                  <div className="space-y-3 lg:sticky lg:top-2 lg:self-start">
-                    {/* Ce qui est sélectionné */}
+                  {/* =========== COLONNE DROITE : le versement =========== */}
+                  <div className="space-y-3 xl:sticky xl:top-2 xl:self-start">
                     <div className="rounded-2xl border border-line bg-canvas p-4">
                       <span className="mb-2 block text-[10px] font-bold uppercase tracking-wider text-muted">
                         Ce que couvre ce règlement
                       </span>
                       <div className="grid grid-cols-2 gap-2 text-center">
                         <div className="rounded-xl border border-line bg-surface p-2">
-                          <span className="block text-[9px] uppercase text-muted">Créneaux</span>
-                          <strong className="font-mono text-base text-ink">{chosenTimings.length}</strong>
+                          <span className="block text-[9px] uppercase text-muted">Cours</span>
+                          <strong className="font-mono text-base text-ink">
+                            {payMatrix.rows.length}
+                          </strong>
+                        </div>
+                        <div className="rounded-xl border border-line bg-surface p-2">
+                          <span className="block text-[9px] uppercase text-muted">Séances</span>
+                          <strong className="font-mono text-base text-ink">
+                            {chosenTimings.length}
+                          </strong>
                         </div>
                         <div className="rounded-xl border border-line bg-surface p-2">
                           <span className="block text-[9px] uppercase text-muted">Présences</span>
@@ -3477,37 +3913,36 @@ export function TeachersPage() {
                           </span>
                         </div>
                         <div className="rounded-xl border border-line bg-surface p-2">
-                          <span className="block text-[9px] uppercase text-muted">Passagers</span>
-                          <strong className="font-mono text-base text-warning">{chosenPassagers}</strong>
-                        </div>
-                        <div className="rounded-xl border border-line bg-surface p-2">
                           <span className="block text-[9px] uppercase text-muted">Encaissé</span>
-                          <strong className="font-mono text-base text-success">{chosenRevenue} DA</strong>
+                          <strong className="font-mono text-base text-success">
+                            {chosenRevenue} DA
+                          </strong>
                         </div>
                       </div>
-                      {dateSpan.length > 0 && (
-                        <p className="mt-2 text-center text-[10px] text-muted">
-                          Période : {formatDateFr(dateSpan[0])}
-                          {dateSpan.length > 1 && ` → ${formatDateFr(dateSpan[1])}`}
-                        </p>
-                      )}
-                      {chosenCreneaux.length > 0 && (
-                        <div className="mt-2 border-t border-line/60 pt-2">
-                          <span className="mb-1 block text-[9px] font-bold uppercase text-muted">
-                            Emploi(s) du temps couvert(s)
-                          </span>
-                          <div className="flex flex-wrap gap-1">
-                            {chosenCreneaux.map((sid) => {
-                              const c = payCreneaux.find((x) => x.sessionId === sid);
-                              if (!c) return null;
-                              return (
-                                <Badge key={sid} tone="primary" className="text-[9px] font-bold">
-                                  {c.title} · {c.groupNames.join("/")}
-                                </Badge>
-                              );
-                            })}
-                          </div>
+                      <div className="mt-2 border-t border-line/60 pt-2">
+                        <span className="mb-1 block text-[9px] font-bold uppercase text-muted">
+                          Emploi(s) du temps couvert(s)
+                        </span>
+                        <div className="flex flex-wrap gap-1">
+                          {chosenCreneaux.map((sid) => {
+                            const c = payCreneaux.find((x) => x.sessionId === sid);
+                            if (!c) return null;
+                            return (
+                              <Badge key={sid} tone="primary" className="text-[9px] font-bold">
+                                {c.title} · {c.groupNames.join("/")}
+                              </Badge>
+                            );
+                          })}
                         </div>
+                      </div>
+                      {payTimings.length > chosenTimings.length && (
+                        <p className="mt-2 rounded-xl border border-warning/25 bg-warning/5 p-2 text-[10px] leading-relaxed text-muted">
+                          <strong className="text-warning">
+                            {payTimings.length - chosenTimings.length} séance(s)
+                          </strong>{" "}
+                          des emplois du temps décochés restent <strong>dues</strong> et seront
+                          proposées au prochain règlement.
+                        </p>
                       )}
                     </div>
 
@@ -3527,7 +3962,9 @@ export function TeachersPage() {
                           }`}
                         >
                           <span className="mb-1 flex items-center gap-1.5">
-                            <DollarSign className={`h-4 w-4 ${payMethod === "fixed" ? "text-primary" : "text-muted"}`} />
+                            <DollarSign
+                              className={`h-4 w-4 ${payMethod === "fixed" ? "text-primary" : "text-muted"}`}
+                            />
                             <span className="text-xs font-bold text-ink">Montant fixe</span>
                           </span>
                           <span className="block text-[10px] leading-normal text-muted">
@@ -3544,7 +3981,9 @@ export function TeachersPage() {
                           }`}
                         >
                           <span className="mb-1 flex items-center gap-1.5">
-                            <Percent className={`h-4 w-4 ${payMethod === "percent" ? "text-primary" : "text-muted"}`} />
+                            <Percent
+                              className={`h-4 w-4 ${payMethod === "percent" ? "text-primary" : "text-muted"}`}
+                            />
                             <span className="text-xs font-bold text-ink">Pourcentage</span>
                           </span>
                           <span className="block text-[10px] leading-normal text-muted">
@@ -3565,6 +4004,13 @@ export function TeachersPage() {
                             onChange={(e) => setPayFixedAmount(Number(e.target.value))}
                             placeholder="Ex: 4000"
                           />
+                          {chosenFreeShare > 0 && (
+                            <p className="mt-1.5 text-[10px] text-muted">
+                              Dont{" "}
+                              <strong className="text-warning">{chosenFreeShare} DA</strong> de
+                              séances libres à pourcentage dédié, gardées à leur montant propre.
+                            </p>
+                          )}
                         </div>
                       ) : (
                         <div>
@@ -3578,9 +4024,19 @@ export function TeachersPage() {
                             value={payPercentage || ""}
                             onChange={(e) => setPayPercentage(Number(e.target.value))}
                           />
-                          <p className="mt-1.5 text-[10px] text-muted">
+                          <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
                             {chosenRevenue} DA encaissés × {payPercentage} % ={" "}
-                            <strong className="text-primary">{computedPayout} DA</strong>
+                            <strong className="text-primary">
+                              {computedPayout - chosenFreeShare} DA
+                            </strong>
+                            {chosenFreeShare > 0 && (
+                              <>
+                                {" "}
+                                + <strong className="text-warning">{chosenFreeShare} DA</strong> de
+                                séances libres à taux dédié ={" "}
+                                <strong className="text-primary">{computedPayout} DA</strong>
+                              </>
+                            )}
                           </p>
                         </div>
                       )}
@@ -3656,15 +4112,19 @@ export function TeachersPage() {
                         </div>
                       )}
                       <div className="flex items-end justify-between border-t border-success/30 pt-2">
-                        <span className="text-[10px] font-bold uppercase text-muted">Net à verser</span>
-                        <strong className="font-mono text-2xl font-black text-success">{netPayout} DA</strong>
+                        <span className="text-[10px] font-bold uppercase text-muted">
+                          Net à verser
+                        </span>
+                        <strong className="font-mono text-2xl font-black text-success">
+                          {netPayout} DA
+                        </strong>
                       </div>
                       <p className="text-[10px] text-muted">
-                        {chosenTimings.length} créneau(x) · {chosenBillable} présence(s) rémunérée(s)
-                        {chosenPresents > chosenBillable
-                          ? ` sur ${chosenPresents} présente(s)`
-                          : ""}
+                        {chosenTimings.length} séance(s) · {payMatrix.totalStudents} présence(s)
+                        rémunérée(s)
                         {chosenPassagers > 0 && ` · ${chosenPassagers} passager(s)`}
+                        {payMatrix.freeCount > 0 &&
+                          ` · ${payMatrix.freeCount} séance(s) libre(s) à % dédié`}
                       </p>
                     </div>
 
@@ -3672,35 +4132,36 @@ export function TeachersPage() {
                       <div className="flex items-start gap-2 rounded-2xl border border-warning/30 bg-warning/5 p-3 text-[11px] text-muted">
                         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
                         <span>
-                          Rien à verser en l&apos;état : les retenues couvrent (ou dépassent) la part
-                          due. Décochez une retenue, ou sélectionnez d&apos;autres créneaux.
+                          Rien à verser en l&apos;état : les retenues couvrent (ou dépassent) la
+                          part due. Décochez une retenue, ou choisissez d&apos;autres emplois du
+                          temps.
                         </span>
                       </div>
                     )}
 
                     {/* Imprimer AVANT de valider : l'enseignant signe le
-                        détail qu'il a sous les yeux. Le bon porte « PROJET —
+                        tableau qu'il a sous les yeux. Le bon porte « PROJET —
                         NON VALIDÉ » tant que le règlement n'est pas
-                        enregistré, pour qu'aucun brouillon ne puisse passer
-                        pour une preuve de paiement. */}
+                        enregistré, pour qu'aucun brouillon ne passe pour une
+                        preuve de paiement. */}
                     <Button
                       variant="outline"
                       className="w-full"
                       onClick={printPaymentPreview}
                       disabled={chosenTimings.length === 0}
                     >
-                      <Printer className="h-4 w-4" /> Imprimer le détail
+                      <Printer className="h-4 w-4" /> Imprimer le tableau (projet)
                     </Button>
 
                     <div className="flex gap-2">
-                      <Button variant="outline" className="flex-1" onClick={() => setIsTimingPayOpen(false)}>
-                        Annuler
+                      <Button variant="outline" onClick={() => setPayStep(1)}>
+                        <ArrowLeft className="h-4 w-4" /> Emploi du temps
                       </Button>
                       <Button
                         variant="success"
                         className="flex-1"
                         onClick={handleTimingPayment}
-                        disabled={savingPayment || netPayout <= 0 || selectedTimingKeys.length === 0}
+                        disabled={savingPayment || netPayout <= 0 || chosenTimings.length === 0}
                       >
                         {savingPayment ? "Enregistrement..." : `Payer ${netPayout} DA`}
                       </Button>

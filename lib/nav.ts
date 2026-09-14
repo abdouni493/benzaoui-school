@@ -66,7 +66,9 @@ export const NAV_BY_ROLE: Record<Role, NavItem[]> = {
     { key: "particulier", emoji: "🎓", href: "/particulier" },
     { key: "parents", emoji: "👨‍👩‍👧", href: "/parents" },
     { key: "announcements", emoji: "📢", href: "/announcements" },
-    { key: "expenses", emoji: "🧾", href: "/expenses" },
+    // Les dépenses de l'école ne sont pas l'affaire du guichet : l'entrée est
+    // réservée à la direction, et l'écran lui-même la refuse désormais
+    // (ModuleDispatcher) — retirer l'entrée ne ferme pas l'URL.
     { key: "settings", emoji: "⚙️", href: "/settings" },
     logout,
   ],

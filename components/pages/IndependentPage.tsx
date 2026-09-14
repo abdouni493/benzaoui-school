@@ -27,12 +27,30 @@ import {
   MapPin,
   Users,
 } from "lucide-react";
-import type { IndependentSession, Student } from "@/lib/types";
+import type { Day, IndependentSession, SchoolClass, Student } from "@/lib/types";
+import {
+  cascadeOfClass,
+  filiereOptionsOf,
+  levelOptionsOf,
+  matchedClassesOf,
+  yearOptionsOf,
+  type LevelKey,
+} from "@/lib/classCascade";
 import { printHtmlDocument } from "@/lib/print";
 import { checkOpenSeanceAudience } from "@/lib/seanceAudience";
-import { TICKET_PAGE_CSS, fmtDate, fmtDateTime, printDocument } from "@/lib/printTemplates";
-import { formatDateFr, freePeriodCovering, isExpiredOpenSeance } from "@/lib/helpers";
+import {
+  DAY_LABELS_FR,
+  classCascadeLabel,
+  dayOfIsoDate,
+  formatDateFr,
+  freePeriodCovering,
+  isExpiredOpenSeance,
+  matchesAllWords,
+  todayIso,
+} from "@/lib/helpers";
+import { buildFreeSeanceTicket } from "@/lib/reports/freeSeanceTicket";
 import { useSettings } from "@/lib/store/settings";
+import { useCanSeeGains, useSession } from "@/lib/store/session";
 
 /** Everything the séance libre receipt needs, captured at creation time. */
 interface CasualReceiptData {
@@ -41,8 +59,10 @@ interface CasualReceiptData {
   /** neither a known student nor a typed name: an anonymous passager */
   isAnonymous?: boolean;
   itemLabel: string;
+  moduleName?: string;
   teacherName?: string;
   classLabel?: string;
+  salleLabel?: string;
   timeLabel?: string;
   daysLabel?: string;
   price: number;
@@ -51,6 +71,18 @@ interface CasualReceiptData {
   waived?: number;
   date: string;
   createdAt: string;
+  // ---- Ce que le bon de séance libre imprime en plus ---------------------
+  /** téléphone saisi au guichet (passager) ou lu sur la fiche (élève) */
+  phone?: string;
+  rfid?: string;
+  /** scolarité déclarée, en clair : « Lycée · 3eme Année · Sciences » */
+  schooling?: string;
+  balanceBefore?: number;
+  balanceAfter?: number;
+  studentIsFree?: boolean;
+  /** part de l'enseignant posée sur CETTE séance (undefined = taux habituel) */
+  teacherPercentage?: number;
+  teacherAmount?: number;
 }
 
 /** One searchable item the reception can attach a séance libre to: either a
@@ -70,92 +102,19 @@ interface SeanceOption {
   daysLabel: string;
   timeLabel: string;
   periodLabel?: string;
+  /** jours de la semaine du créneau — sert à ne proposer que ceux du JOUR
+   *  de la séance, ce que le guichet demande d'abord */
+  days: Day[];
+  /** module du créneau : le filtre « matière » porte sur lui */
+  moduleId: string;
+  teacherId: string;
+  startTime: string;
+  endTime: string;
   /** the whole séance libre timing is offered — every présence on it is free */
   sessionIsFree: boolean;
   /** classes the timing covers — a séance libre spans several of them. A
    *  période gratuite applies as soon as it covers ONE of them. */
   classIds: string[];
-}
-
-const RECEIPT_LABELS = {
-  fr: {
-    docTitle: "REÇU — SÉANCE LIBRE",
-    receiptNo: "N°",
-    person: "Élève / Passager",
-    registered: "Élève inscrit",
-    passenger: "Passager",
-    anonymous: "Passager (anonyme)",
-    item: "Séance",
-    teacher: "Enseignant",
-    classLevel: "Classe",
-    days: "Jours",
-    time: "Horaire",
-    date: "Date",
-    method: "Règlement",
-    cash: "Espèces",
-    paidOn: "Encaissé le",
-    total: "TOTAL PAYÉ",
-    offeredTotal: "SÉANCE OFFERTE",
-    offeredNote: (v: string) => `Valeur offerte par l'école : ${v}`,
-    signCashier: "La Caisse",
-    thanks: "Merci de conserver ce reçu.",
-    da: "DA",
-  },
-  ar: {
-    docTitle: "وصل — حصة حرة",
-    receiptNo: "رقم",
-    person: "التلميذ / الزائر",
-    registered: "تلميذ مسجل",
-    passenger: "زائر",
-    anonymous: "زائر (بدون اسم)",
-    item: "الحصة",
-    teacher: "الأستاذ",
-    classLevel: "القسم",
-    days: "الأيام",
-    time: "التوقيت",
-    date: "التاريخ",
-    method: "الدفع",
-    cash: "نقدًا",
-    paidOn: "تم التحصيل في",
-    total: "المبلغ المدفوع",
-    offeredTotal: "حصة مجانية",
-    offeredNote: (v: string) => `قيمة الحصة المقدمة من المدرسة : ${v}`,
-    signCashier: "الصندوق",
-    thanks: "يرجى الاحتفاظ بهذا الوصل.",
-    da: "دج",
-  },
-} as const;
-
-/** 80 mm cash-drawer ticket: the séance libre receipt is handed over at the
- *  desk in a second, so it prints as a narrow slip instead of a full A4 page.
- *  Document autonome (`baseCss: false`) : le bon n'hérite plus du
- *  `@page { size: A4 }` commun, qui faisait composer le ticket sur 210 mm de
- *  large avant de le réduire au tiers de sa taille sur le rouleau. */
-const TICKET_CSS = `
-  ${TICKET_PAGE_CSS}
-  /* Noir franc et gras partout : une tête thermique trame les gris en points
-     et les sort délavés, la hiérarchie se joue sur la graisse et la taille. */
-  body { padding: 1mm 0; font-size: 12px; font-weight: 600; }
-  .ticket { width: 100%; }
-  .ticket .school { display: block; font-size: 1.25em; font-weight: 800; letter-spacing: .3px; }
-  .ticket .head { text-align: center; line-height: 1.35; padding-bottom: 6px; border-bottom: 1px dashed #000; }
-  .ticket .head span { display: block; font-size: .85em; font-weight: 700; }
-  .ticket .title { margin: 7px 0 2px; text-align: center; font-weight: 800; font-size: 1.02em; letter-spacing: .5px; }
-  .ticket .num { text-align: center; font-family: monospace; font-size: .85em; font-weight: 700; margin-bottom: 7px; }
-  .ticket table { width: 100%; border-collapse: collapse; font-size: .92em; margin: 0; }
-  .ticket th, .ticket td { padding: 2.5px 0; border: 0; background: none; text-transform: none; letter-spacing: 0; font-size: 1em; color: #000; }
-  .ticket th { width: 38%; text-align: start; font-weight: 700; }
-  .ticket td { text-align: end; font-weight: 800; }
-  .ticket .total { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding: 6px 8px; border: 1.8px solid #000; border-radius: 4px; font-weight: 800; font-size: 1.1em; }
-  .ticket .total.free { border-style: dashed; }
-  .ticket .note { margin: 5px 0 0; text-align: center; font-size: .82em; font-weight: 700; font-style: italic; }
-  .ticket .sign { margin-top: 14px; padding-top: 4px; border-top: 1px dashed #000; text-align: center; font-size: .8em; font-weight: 700; }
-  .ticket .foot { margin-top: 8px; text-align: center; font-size: .75em; font-weight: 700; line-height: 1.4; }
-`;
-
-/** Receipt number, generated at print time (module scope: never during render). */
-function makeReceiptNumber(): string {
-  return `SL-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
 const DAY_LABELS: Record<string, string> = {
@@ -178,6 +137,7 @@ export function IndependentPage() {
     sessions,
     modules,
     classes,
+    filieres,
     groups,
     salles,
     freePeriods,
@@ -187,6 +147,10 @@ export function IndependentPage() {
     chargeStudent,
   } = useData();
   const { language } = useSettings();
+  /** Un compte de réception encaisse ; il ne voit pas ce que l'école gagne. */
+  const canSeeGains = useCanSeeGains();
+  /** Qui tient le guichet : la caisse doit pouvoir nommer qui a encaissé. */
+  const sessionUser = useSession((st) => st.user);
 
   // Modals
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -207,11 +171,49 @@ export function IndependentPage() {
   const [studentSearchQuery, setStudentSearchQuery] = useState("");
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [itemSearchQuery, setItemSearchQuery] = useState("");
-  const [itemKindTab, setItemKindTab] = useState<"all" | "cours" | "timing">("all");
   /** Restrict the list to the emplois du temps the picked student follows. */
   const [onlyStudentSeances, setOnlyStudentSeances] = useState(false);
   const [selectedItem, setSelectedItem] = useState<SeanceOption | null>(null);
-  const [casualDate, setCasualDate] = useState(new Date().toISOString().split("T")[0]);
+  const [casualDate, setCasualDate] = useState(todayIso());
+
+  /**
+   * LE GUICHET SAISIT UNE SÉANCE LIBRE DANS CET ORDRE.
+   *
+   * 1. Qui ? — un élève inscrit qu'on cherche, ou un passager dont on tape le
+   *    nom (et, si on l'a, le téléphone).
+   * 2. Sa scolarité — classe, année, filière. Pour un élève inscrit, les trois
+   *    se remplissent tout seuls depuis son emploi du temps, et restent
+   *    modifiables : un élève peut venir suivre la séance d'un autre niveau.
+   * 3. La matière — FACULTATIVE : sans elle, tous les créneaux du jour sont
+   *    proposés.
+   * 4. Le créneau du JOUR de la séance qui correspond à tout ça.
+   * 5. Le prix.
+   * 6. Éventuellement, la part de l'enseignant sur CETTE séance.
+   *
+   * L'écran précédent posait la question 4 en premier, sur la liste entière des
+   * créneaux de l'école, tous jours confondus — il fallait connaître le nom du
+   * créneau par cœur pour trouver celui de l'après-midi.
+   */
+  const [passagerPhone, setPassagerPhone] = useState("");
+  const [formLevel, setFormLevel] = useState<LevelKey>("");
+  const [formYear, setFormYear] = useState("");
+  const [formFiliereId, setFormFiliereId] = useState("");
+  /** Matière choisie — vide = toutes. */
+  const [formModuleId, setFormModuleId] = useState("");
+  /** Ne proposer que les créneaux du jour de la séance (le cas courant). On
+   *  peut l'élargir : une séance de rattrapage se saisit parfois le lendemain. */
+  const [onlyThatDay, setOnlyThatDay] = useState(true);
+
+  /**
+   * « Cette séance-là rémunère l'enseignant à TEL taux. »
+   *
+   * Désactivé (le cas courant) : la séance rejoint les présences du créneau et
+   * l'enseignant en touche son pourcentage habituel — l'élève compte comme un
+   * présent de plus. Activé : la séance sort du lot, se chiffre à son propre
+   * taux, et apparaît dans une colonne à part de l'écran de règlement.
+   */
+  const [teacherShareOn, setTeacherShareOn] = useState(false);
+  const [teacherSharePct, setTeacherSharePct] = useState<number>(50);
   const [customPrice, setCustomPrice] = useState<number | null>(null);
   // "Séance offerte": the cours is followed as usual but nobody is paid on it —
   // the school cashes nothing and the teacher earns no share for it.
@@ -283,6 +285,11 @@ export function IndependentPage() {
         teacherIsPassager: !!t?.isPassager,
         daysLabel: s.days.map((d) => DAY_LABELS[d] ?? d).join(" · "),
         timeLabel: `${s.startTime} - ${s.endTime}`,
+        days: s.days,
+        moduleId: s.moduleId,
+        teacherId: s.teacherId,
+        startTime: s.startTime,
+        endTime: s.endTime,
         periodLabel:
           isOpen && s.periodStart && s.periodEnd
             ? `${formatDateFr(s.periodStart)} → ${formatDateFr(s.periodEnd)}`
@@ -310,6 +317,140 @@ export function IndependentPage() {
 
   const isStudentSeance = (o: SeanceOption) => studentSessionIds.has(o.sessionId);
 
+  // ---- Scolarité déclarée : niveau → année → filière -------------------------
+  const filiereLabelOf = (id: string) => filieres.find((f) => f.id === id)?.name ?? "";
+
+  const levelOptions = useMemo(() => levelOptionsOf(classes), [classes]);
+  const yearOptions = useMemo(
+    () => yearOptionsOf(classes, formLevel),
+    [classes, formLevel],
+  );
+  const filiereOptions = useMemo(
+    () => filiereOptionsOf(classes, formLevel, formYear, filiereLabelOf),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [classes, formLevel, formYear, filieres],
+  );
+
+  /** Les classes que la cascade désigne — plusieurs lignes peuvent partager la
+   *  même combinaison niveau/année/filière. */
+  const matchedClasses = useMemo(
+    () => matchedClassesOf(classes, formLevel, formYear, formFiliereId),
+    [classes, formLevel, formYear, formFiliereId],
+  );
+  const matchedClassIds = useMemo(
+    () => new Set(matchedClasses.map((c) => c.id)),
+    [matchedClasses],
+  );
+  /** La cascade est-elle conclue ? (La branche formations n'a pas de filière.) */
+  const cascadeComplete =
+    !!formLevel && !!formYear && (formLevel === "formation" || !!formFiliereId);
+
+  /** La scolarité en clair, telle que le bon l'imprime. */
+  const schoolingLabel = useMemo(() => {
+    if (matchedClasses.length === 0) return "";
+    const cls = matchedClasses[0];
+    return classCascadeLabel(cls, filiereLabelOf(cls.filiereId ?? ""));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchedClasses, filieres]);
+
+  /** Remonter la cascade efface toutes les marches du dessous : garder une
+   *  filière d'un autre niveau désignerait une classe qui n'existe pas. */
+  const pickLevel = (level: LevelKey) => {
+    setFormLevel(level);
+    setFormYear("");
+    setFormFiliereId("");
+    setSelectedItem(null);
+  };
+  const pickYear = (year: string) => {
+    setFormYear(year);
+    setFormFiliereId("");
+    setSelectedItem(null);
+  };
+  const pickFiliere = (id: string) => {
+    setFormFiliereId(id);
+    setSelectedItem(null);
+  };
+
+  /** La scolarité d'un élève inscrit, lue sur la classe de son premier
+   *  créneau. C'est ce qui pré-remplit la cascade quand on le sélectionne. */
+  const cascadeOfStudent = (stu: Student): SchoolClass | undefined => {
+    for (const subId of stu.subscriptionIds) {
+      const sub = subscriptions.find((su) => su.id === subId);
+      const sess = sub ? sessions.find((se) => se.id === sub.sessionId) : undefined;
+      const cls = sess ? classes.find((c) => c.id === sess.classId) : undefined;
+      if (cls) return cls;
+    }
+    return undefined;
+  };
+
+  /** Sélectionner un élève : son nom, son téléphone et sa scolarité sont déjà
+   *  connus — les retaper serait du travail inutile, et une occasion de se
+   *  tromper. Les trois listes restent modifiables. */
+  const chooseStudent = (st: Student) => {
+    setSelectedStudent(st);
+    setStudentSearchQuery(`${st.firstName} ${st.lastName}`);
+    setPassagerPhone(st.phone ?? "");
+    const cls = cascadeOfStudent(st);
+    const pos = cascadeOfClass(cls);
+    setFormLevel(pos.level);
+    setFormYear(pos.year);
+    setFormFiliereId(pos.filiereId);
+    setSelectedItem(null);
+  };
+
+  /**
+   * Les créneaux proposables : ceux du JOUR de la séance, sur la scolarité
+   * déclarée, et sur la matière choisie quand il y en a une.
+   *
+   * Tant que la cascade n'est pas conclue, aucune classe n'est désignée — on
+   * ne filtre alors pas par classe, sinon l'écran serait vide et on ne saurait
+   * pas pourquoi.
+   */
+  const dayOfSeance: Day = useMemo(() => dayOfIsoDate(casualDate), [casualDate]);
+
+  const dayOptions = useMemo(() => {
+    return seanceOptions.filter((o) => {
+      if (onlyThatDay && !o.days.includes(dayOfSeance)) return false;
+      if (formModuleId && o.moduleId !== formModuleId) return false;
+      if (cascadeComplete && matchedClassIds.size > 0) {
+        if (!o.classIds.some((id) => matchedClassIds.has(id))) return false;
+      }
+      if (onlyStudentSeances && !isStudentSeance(o)) return false;
+      if (itemSearchQuery.trim()) {
+        const haystack = `${o.label} ${o.moduleName} ${o.classLabel} ${o.groupLabel} ${o.salleLabel} ${o.teacherName}`;
+        if (!matchesAllWords(haystack, itemSearchQuery)) return false;
+      }
+      return true;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    seanceOptions,
+    onlyThatDay,
+    dayOfSeance,
+    formModuleId,
+    cascadeComplete,
+    matchedClassIds,
+    onlyStudentSeances,
+    studentSessionIds,
+    itemSearchQuery,
+  ]);
+
+  /** Les matières réellement enseignées ce jour-là sur cette scolarité : le
+   *  filtre ne propose que ce qui existe, jamais une liste de modules morts. */
+  const dayModules = useMemo(() => {
+    const ids = new Set<string>();
+    seanceOptions.forEach((o) => {
+      if (onlyThatDay && !o.days.includes(dayOfSeance)) return;
+      if (cascadeComplete && matchedClassIds.size > 0) {
+        if (!o.classIds.some((id) => matchedClassIds.has(id))) return;
+      }
+      ids.add(o.moduleId);
+    });
+    return modules
+      .filter((m) => ids.has(m.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [seanceOptions, onlyThatDay, dayOfSeance, cascadeComplete, matchedClassIds, modules]);
+
   /**
    * Le public du créneau, tel que l'Emploi du Temps l'a réglé : cet élève-là
    * a-t-il le droit d'être encaissé dessus ? Rien à contrôler tant qu'aucun
@@ -329,20 +470,6 @@ export function IndependentPage() {
     });
     return verdict.allowed ? undefined : verdict;
   };
-
-  const filteredOptions = seanceOptions
-    .filter((o) => {
-      if (itemKindTab !== "all" && o.kind !== itemKindTab) return false;
-      if (onlyStudentSeances && !isStudentSeance(o)) return false;
-      if (!itemSearchQuery.trim()) return true;
-      const q = itemSearchQuery.toLowerCase();
-      return `${o.label} ${o.moduleName} ${o.classLabel} ${o.groupLabel} ${o.salleLabel} ${o.teacherName}`
-        .toLowerCase()
-        .includes(q);
-    })
-    // Stable sort: his own créneaux float to the top, everything else keeps
-    // the alphabetical order `seanceOptions` already established.
-    .sort((a, b) => Number(isStudentSeance(b)) - Number(isStudentSeance(a)));
 
   /** Student lookup by name OR card number (RFID) — an empty selection means
    *  the attendee is recorded as a "passager". */
@@ -386,6 +513,19 @@ export function IndependentPage() {
   const effectivePrice = seanceIsOffered ? 0 : listedPrice;
   /** What the school gives away when the séance is offered. */
   const waivedPrice = seanceIsOffered ? listedPrice : 0;
+
+  /**
+   * Part de l'enseignant sur CETTE séance, quand le guichet a posé un taux.
+   *
+   * Une séance OFFERTE ne rémunère personne — l'enseignant compris : on ne
+   * peut pas verser un pourcentage de zéro encaissé. Le taux reste saisissable
+   * (l'agent peut décocher « offerte » ensuite) mais la part vaut 0.
+   */
+  const teacherSharePctValue = Math.min(Math.max(teacherSharePct || 0, 0), 100);
+  const teacherShareAmount =
+    teacherShareOn && !seanceIsOffered
+      ? Math.round((effectivePrice * teacherSharePctValue) / 100)
+      : 0;
 
   /** Reverse lookup used by the list/cards to describe a stored séance. */
   const optionForSession = (sessionId?: string) =>
@@ -434,15 +574,22 @@ export function IndependentPage() {
   const resetForm = () => {
     setSelectedStudent(null);
     setStudentSearchQuery("");
+    setPassagerPhone("");
     setItemSearchQuery("");
-    setItemKindTab("all");
     setOnlyStudentSeances(false);
     setSelectedItem(null);
-    setCasualDate(new Date().toISOString().split("T")[0]);
+    setCasualDate(todayIso());
     setCustomPrice(null);
     setIsFreeSeance(false);
     setPaymentValidated(false);
     setSelectedCasual(null);
+    setFormLevel("");
+    setFormYear("");
+    setFormFiliereId("");
+    setFormModuleId("");
+    setOnlyThatDay(true);
+    setTeacherShareOn(false);
+    setTeacherSharePct(50);
   };
 
   const openCreate = () => {
@@ -461,10 +608,27 @@ export function IndependentPage() {
     const student = ind.studentId ? students.find((s) => s.id === ind.studentId) : undefined;
     setSelectedStudent(student ?? null);
     setStudentSearchQuery(student ? `${student.firstName} ${student.lastName}` : ind.passagerName ?? "");
+    setPassagerPhone(ind.passagerPhone ?? student?.phone ?? "");
 
-    setSelectedItem(optionForSession(ind.sessionId) ?? null);
+    // La scolarité telle qu'elle a été enregistrée ; à défaut (séances écrites
+    // avant ces colonnes), celle de la classe du créneau suivi.
+    const opt = optionForSession(ind.sessionId);
+    const storedClass = ind.classId ? classes.find((c) => c.id === ind.classId) : undefined;
+    const fallbackClass = opt ? classes.find((c) => c.id === opt.classIds[0]) : undefined;
+    const pos = cascadeOfClass(storedClass ?? fallbackClass);
+    setFormLevel(pos.level);
+    setFormYear(ind.year || pos.year);
+    setFormFiliereId(ind.filiereId || pos.filiereId);
+    setFormModuleId(ind.moduleId ?? "");
+    // On modifie une séance déjà posée : ne pas restreindre au jour, sinon son
+    // propre créneau disparaîtrait de la liste dès que la date change.
+    setOnlyThatDay(false);
+
+    setTeacherShareOn(ind.teacherPercentage !== undefined && ind.teacherPercentage !== null);
+    setTeacherSharePct(ind.teacherPercentage ?? 50);
+
+    setSelectedItem(opt ?? null);
     setItemSearchQuery("");
-    setItemKindTab("all");
     setOnlyStudentSeances(false);
     setIsFormOpen(true);
     setActiveMenuId(null);
@@ -509,6 +673,25 @@ ${refused.reason}
     const price = effectivePrice;
     const waived = waivedPrice;
 
+    /** La scolarité et la matière déclarées, plus la part de l'enseignant :
+     *  tout ce que la saisie a ajouté, écrit sur la séance elle-même pour que le
+     *  bon réimprimé six mois plus tard dise encore de quoi il s'agissait. */
+    const declared = {
+      passagerPhone: selectedStudent ? undefined : passagerPhone.trim() || undefined,
+      classId: matchedClasses[0]?.id,
+      year: formYear || undefined,
+      filiereId: formFiliereId && formFiliereId !== "none" ? formFiliereId : undefined,
+      moduleId: formModuleId || selectedItem.moduleId,
+      // `undefined` — et non 0 — quand l'option est désactivée : 0 % serait un
+      // taux délibérément nul, qui sortirait la séance du lot pour ne rien
+      // verser. L'absence de valeur, elle, veut dire « taux habituel du prof ».
+      teacherPercentage: teacherShareOn ? teacherSharePctValue : undefined,
+      teacherAmount: teacherShareOn ? teacherShareAmount : undefined,
+      // Quel guichet a encaissé : c'est ce que la caisse et les rapports
+      // demandent quand on veut savoir « combien CE compte a-t-il encaissé ».
+      createdBy: sessionUser?.id,
+    };
+
     if (selectedCasual) {
       updateItem("independent", selectedCasual.id, {
         studentId: selectedStudent ? selectedStudent.id : undefined,
@@ -519,8 +702,9 @@ ${refused.reason}
         waivedAmount: waived,
         date: casualDate,
         sessionId: selectedItem.sessionId,
-        startTime: selectedItem.timeLabel.split(" - ")[0],
-        endTime: selectedItem.timeLabel.split(" - ")[1],
+        startTime: selectedItem.startTime,
+        endTime: selectedItem.endTime,
+        ...declared,
       });
       setIsFormOpen(false);
       resetForm();
@@ -538,9 +722,10 @@ ${refused.reason}
       waivedAmount: waived,
       date: casualDate,
       sessionId: selectedItem.sessionId,
-      startTime: selectedItem.timeLabel.split(" - ")[0],
-      endTime: selectedItem.timeLabel.split(" - ")[1],
+      startTime: selectedItem.startTime,
+      endTime: selectedItem.endTime,
       createdAt: nowIso,
+      ...declared,
     };
 
     push("independent", newCasual);
@@ -566,7 +751,9 @@ ${refused.reason}
         }
       }
 
-      // Cash inflow for the school
+      // L'entrée en caisse. Le libellé nomme la prestation ET la personne : la
+      // caisse et les rapports s'en servent pour distinguer une séance libre
+      // d'une recharge de solde, et pour retrouver la séance concernée.
       push("cash", {
         id: uid("csh"),
         type: "student_payment",
@@ -577,11 +764,13 @@ ${refused.reason}
             ? `${selectedStudent.firstName} ${selectedStudent.lastName}`
             : passagerName || "passager"
         })`,
+        createdBy: sessionUser?.id,
       });
     }
 
     setIsFormOpen(false);
 
+    const balanceBefore = selectedStudent?.balance;
     setReceiptData({
       personName: selectedStudent
         ? `${selectedStudent.firstName} ${selectedStudent.lastName}`
@@ -589,8 +778,10 @@ ${refused.reason}
       isRegisteredStudent: !!selectedStudent,
       isAnonymous,
       itemLabel: selectedItem.label,
+      moduleName: selectedItem.moduleName,
       teacherName: selectedItem.teacherName,
       classLabel: selectedItem.classLabel,
+      salleLabel: selectedItem.salleLabel,
       timeLabel: selectedItem.timeLabel,
       daysLabel: selectedItem.daysLabel,
       price,
@@ -598,6 +789,21 @@ ${refused.reason}
       waived,
       date: casualDate,
       createdAt: nowIso,
+      phone: selectedStudent ? selectedStudent.phone : passagerPhone.trim() || undefined,
+      rfid: selectedStudent?.rfid || undefined,
+      schooling: schoolingLabel || selectedItem.classLabel,
+      balanceBefore,
+      // Le solde APRÈS, tel que la séance le laisse : un élève gratuit ou une
+      // séance offerte ne débitent rien.
+      balanceAfter:
+        balanceBefore === undefined
+          ? undefined
+          : selectedStudent?.isFree || seanceIsOffered
+            ? balanceBefore
+            : balanceBefore - price,
+      studentIsFree: selectedStudent?.isFree,
+      teacherPercentage: teacherShareOn ? teacherSharePctValue : undefined,
+      teacherAmount: teacherShareOn ? teacherShareAmount : undefined,
     });
 
     resetForm();
@@ -610,94 +816,83 @@ ${refused.reason}
     }
   };
 
-  // ---- Receipt --------------------------------------------------------------
-  // A séance libre is a 30-second transaction at the desk, so its proof of
-  // payment is a narrow cash-drawer ticket (TICKET_CSS), not an A4 invoice:
-  // school, séance, jours/horaire, montant, and that is all.
-
-  const escapeHtml = (value: string) =>
-    value
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+  // ---- Le bon de séance libre ----------------------------------------------
+  //
+  // MÊME PAPIER QUE LE BON DE CHARGEMENT DE SOLDE.
+  //
+  // Le ticket était composé ici, à la main, avec sa propre feuille de style :
+  // deux bons sortis du même guichet ne se ressemblaient pas, et tout
+  // réglage d'imprimante fait d'un côté manquait de l'autre. Le gabarit vit
+  // désormais dans `lib/reports/freeSeanceTicket.ts`, calqué sur celui du
+  // chargement de solde — mêmes largeurs, même graisse, même cadre — avec le
+  // contenu d'une séance libre : qui, quel créneau, quel enseignant, combien,
+  // et la part du prof quand le guichet l'a posée.
 
   const handlePrintReceipt = (data: CasualReceiptData) => {
-    const L = RECEIPT_LABELS[language];
-    const receiptNum = makeReceiptNumber();
-
-    const row = (label: string, value?: string) =>
-      value ? `<tr><th>${label}</th><td>${escapeHtml(value)}</td></tr>` : "";
-
-    const who = data.isRegisteredStudent
-      ? L.registered
-      : data.isAnonymous
-        ? L.anonymous
-        : L.passenger;
-
-    const bodyHtml = `
-      <div class="ticket">
-        <div class="head">
-          <strong class="school">${escapeHtml(school.name || "")}</strong>
-          ${school.phone ? `<span>${escapeHtml(school.phone)}</span>` : ""}
-          ${school.address ? `<span>${escapeHtml(school.address)}</span>` : ""}
-        </div>
-
-        <div class="title">${L.docTitle}</div>
-        <div class="num">${L.receiptNo} ${receiptNum}</div>
-
-        <table>
-          ${row(L.person, data.personName)}
-          <tr><th></th><td>${who}</td></tr>
-          ${row(L.item, data.itemLabel)}
-          ${row(L.teacher, data.teacherName)}
-          ${row(L.classLevel, data.classLabel)}
-          ${row(L.days, data.daysLabel)}
-          ${row(L.time, data.timeLabel)}
-          ${row(L.date, fmtDate(data.date, language))}
-          ${data.isFree ? "" : row(L.method, L.cash)}
-          ${row(L.paidOn, fmtDateTime(data.createdAt, language))}
-        </table>
-
-        <div class="total${data.isFree ? " free" : ""}">
-          <span>${data.isFree ? L.offeredTotal : L.total}</span>
-          <span>${data.price} ${L.da}</span>
-        </div>
-        ${data.isFree ? `<p class="note">${L.offeredNote(`${data.waived ?? 0} ${L.da}`)}</p>` : ""}
-
-        <div class="sign">${L.signCashier}</div>
-        <div class="foot">${L.thanks}</div>
-      </div>
-    `;
-
     printHtmlDocument(
-      printDocument({
-        title: `${L.docTitle} - ${data.personName}`,
-        lang: language,
-        bodyHtml,
-        extraCss: TICKET_CSS,
-        baseCss: false,
+      buildFreeSeanceTicket({
+        school,
+        language,
+        personName: data.personName,
+        isRegisteredStudent: data.isRegisteredStudent,
+        isAnonymous: !!data.isAnonymous,
+        phone: data.phone,
+        rfid: data.rfid,
+        schooling: data.schooling || data.classLabel,
+        seanceLabel: data.itemLabel,
+        moduleName: data.moduleName,
+        teacherName: data.teacherName,
+        salleName: data.salleLabel,
+        timeLabel: data.timeLabel,
+        date: data.date,
+        createdAt: data.createdAt,
+        price: data.price,
+        isFree: data.isFree,
+        waived: data.waived,
+        balanceBefore: data.balanceBefore,
+        balanceAfter: data.balanceAfter,
+        studentIsFree: data.studentIsFree,
+        teacherPercentage: data.teacherPercentage,
+        teacherAmount: data.teacherAmount,
       }),
     );
   };
 
+  /** Réimprimer le bon d'une séance déjà enregistrée. On relit ce qu'elle porte
+   *  (scolarité, téléphone, part du prof) plutôt que de le re-deviner. */
   const reprint = (ind: IndependentSession) => {
     const opt = optionForSession(ind.sessionId);
-    const person = ind.studentId ? getStudentName(ind.studentId) : ind.passagerName;
+    const stu = ind.studentId ? students.find((x) => x.id === ind.studentId) : undefined;
+    const cls = ind.classId ? classes.find((c) => c.id === ind.classId) : undefined;
     handlePrintReceipt({
-      personName: person || "Passager occasionnel",
+      personName: stu
+        ? `${stu.firstName} ${stu.lastName}`
+        : ind.passagerName || "Passager occasionnel",
       isRegisteredStudent: !!ind.studentId,
       isAnonymous: !ind.studentId && !ind.passagerName,
       itemLabel: ind.itemLabel,
+      moduleName: ind.moduleId
+        ? modules.find((m) => m.id === ind.moduleId)?.name
+        : opt?.moduleName,
       teacherName: opt?.teacherName,
       classLabel: opt?.classLabel,
-      timeLabel: ind.startTime && ind.endTime ? `${ind.startTime} - ${ind.endTime}` : opt?.timeLabel,
+      salleLabel: opt?.salleLabel,
+      timeLabel:
+        ind.startTime && ind.endTime ? `${ind.startTime} - ${ind.endTime}` : opt?.timeLabel,
       daysLabel: opt?.daysLabel,
       price: ind.price,
       isFree: ind.isFree,
       waived: ind.waivedAmount,
       date: ind.date,
       createdAt: ind.createdAt ?? `${ind.date}T12:00:00.000Z`,
+      phone: ind.passagerPhone ?? stu?.phone,
+      rfid: stu?.rfid,
+      schooling: cls
+        ? classCascadeLabel(cls, filiereLabelOf(cls.filiereId ?? ""))
+        : opt?.classLabel,
+      studentIsFree: stu?.isFree,
+      teacherPercentage: ind.teacherPercentage,
+      teacherAmount: ind.teacherAmount,
     });
   };
 
@@ -810,14 +1005,20 @@ ${refused.reason}
             </div>
           </div>
 
+          {/* Le CUMUL encaissé par l'écran est une recette : direction seulement.
+              Le montant d'UNE séance reste partout visible — c'est ce que le
+              guichet encaisse, il ne peut pas travailler sans. */}
           <div className="flex flex-wrap items-center gap-3 border-t border-line pt-2.5 text-[11px]">
             <Badge tone="primary" className="font-bold">{filteredList.length} séance(s)</Badge>
-            <Badge tone="success" className="font-bold">{totalCollected} DA encaissés</Badge>
+            {canSeeGains && (
+              <Badge tone="success" className="font-bold">{totalCollected} DA encaissés</Badge>
+            )}
             <Badge tone="neutral" className="font-bold">
               {filteredList.filter((i) => !i.studentId).length} passager(s)
             </Badge>
             <Badge tone="warning" className="font-bold">
-              {offeredList.length} offerte(s) · {totalOffered} DA non encaissés
+              {offeredList.length} offerte(s)
+              {canSeeGains && ` · ${totalOffered} DA non encaissés`}
             </Badge>
           </div>
         </CardBody>
@@ -1064,158 +1265,308 @@ ${refused.reason}
       {/* ------------------------------------------------------------------ */}
       {/* Create / edit a séance libre                                        */}
       {/* ------------------------------------------------------------------ */}
+      {/* ------------------------------------------------------------------ */}
+      {/* ENREGISTRER UNE SÉANCE LIBRE — la saisie suit l'ordre du guichet :   */}
+      {/*   1. qui suit la séance (élève inscrit, ou passager nommé)           */}
+      {/*   2. sa scolarité : classe → année → filière                        */}
+      {/*   3. la matière (facultative)                                        */}
+      {/*   4. le créneau du JOUR qui correspond                              */}
+      {/*   5. le prix                                                         */}
+      {/*   6. la part de l'enseignant sur cette séance (facultative)          */}
+      {/* ------------------------------------------------------------------ */}
       <Modal
         open={isFormOpen}
         onClose={() => setIsFormOpen(false)}
         title={selectedCasual ? "Modifier la séance libre" : "Enregistrer une séance libre"}
-        wide
+        subtitle="Qui suit la séance, sa scolarité, la matière, puis le créneau du jour."
+        size="xl"
       >
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* ---- Who ---- */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          {/* ================= COLONNE GAUCHE : QUI, ET QUOI ================ */}
           <div className="space-y-4">
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="block text-xs font-semibold text-muted font-sans">
-                  1. Qui suit la séance ? <span className="font-normal">(facultatif)</span>
+            {/* ---- 1. Qui suit la séance ? ---- */}
+            <div className="rounded-2xl border border-line bg-canvas/30 p-3.5">
+              <div className="mb-1.5 flex items-center justify-between">
+                <label className="block text-xs font-bold text-ink">
+                  1. Qui suit la séance ?
                 </label>
-                {(selectedStudent || studentSearchQuery) && (
+                {(selectedStudent || studentSearchQuery || passagerPhone) && (
                   <button
-                    onClick={() => { setSelectedStudent(null); setStudentSearchQuery(""); }}
+                    onClick={() => {
+                      setSelectedStudent(null);
+                      setStudentSearchQuery("");
+                      setPassagerPhone("");
+                    }}
                     className="text-[10px] font-bold text-primary hover:underline"
                   >
                     Vider
                   </button>
                 )}
               </div>
+
               <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                 <Input
                   value={studentSearchQuery}
                   onChange={(e) => {
                     setStudentSearchQuery(e.target.value);
                     if (selectedStudent) setSelectedStudent(null);
                   }}
-                  placeholder="Élève inscrit (nom, n° de carte) ou nom du passager..."
+                  placeholder="Nom complet, ou cherchez un élève inscrit (nom, carte, téléphone)"
                   className="pl-9"
                 />
               </div>
-              {/* The desk has three ways of naming the attendee, and all three
-                  are valid — a walk-in who gives no name is still a séance. */}
-              <div className="mt-1.5 rounded-xl border border-line bg-canvas/30 p-2 space-y-1 text-[10px] leading-relaxed text-muted">
+
+              {/* Le téléphone : facultatif pour un passager, repris de la fiche
+                  pour un élève inscrit (et non modifiable ici — c'est la fiche
+                  élève qui en est la source). */}
+              <div className="mt-2">
+                <label className="mb-1 block text-[10px] font-semibold text-muted">
+                  Téléphone <span className="font-normal">(facultatif)</span>
+                </label>
+                <Input
+                  value={passagerPhone}
+                  onChange={(e) => setPassagerPhone(e.target.value)}
+                  disabled={!!selectedStudent}
+                  placeholder="+213 5XX XX XX XX"
+                  className="font-mono"
+                />
+                {selectedStudent && (
+                  <p className="mt-1 text-[10px] text-muted">
+                    Repris de la fiche de l&apos;élève — modifiable depuis l&apos;écran Étudiants.
+                  </p>
+                )}
+              </div>
+
+              {/* Les trois façons de nommer la personne, toutes valides. */}
+              <div className="mt-2 space-y-1 rounded-xl border border-line bg-surface p-2 text-[10px] leading-relaxed text-muted">
                 <p className={selectedStudent ? "font-bold text-primary" : ""}>
-                  • <strong>Élève inscrit</strong> : cherchez-le puis sélectionnez-le dans les résultats.
+                  • <strong>Élève inscrit</strong> : cherchez-le, puis choisissez-le dans les
+                  résultats — sa scolarité se remplit toute seule.
                 </p>
                 <p className={!selectedStudent && studentSearchQuery.trim() ? "font-bold text-primary" : ""}>
-                  • <strong>Passager nommé</strong> : tapez simplement son nom complet, sans le sélectionner.
+                  • <strong>Passager nommé</strong> : tapez son nom complet sans le sélectionner.
                 </p>
                 <p className={!selectedStudent && !studentSearchQuery.trim() ? "font-bold text-primary" : ""}>
-                  • <strong>Passager anonyme</strong> : laissez le champ vide — la séance est enregistrée
-                  sans nom.
+                  • <strong>Passager anonyme</strong> : laissez le champ vide.
                 </p>
               </div>
-            </div>
 
-            {studentSearchQuery.trim() !== "" && (
-              <div className="space-y-1.5">
-                <span className="text-[10px] text-muted font-bold block uppercase font-sans">
-                  Résultats ({matchedStudents.length}) :
-                </span>
-                <div className="border border-line rounded-xl max-h-44 overflow-y-auto p-1.5 bg-canvas/30 space-y-1">
-                  {matchedStudents.map((st) => {
-                    const isSelected = selectedStudent?.id === st.id;
-                    return (
+              {studentSearchQuery.trim() !== "" && !selectedStudent && (
+                <div className="mt-2 space-y-1.5">
+                  <span className="block text-[10px] font-bold uppercase text-muted">
+                    Élèves inscrits trouvés ({matchedStudents.length})
+                  </span>
+                  <div className="max-h-40 space-y-1 overflow-y-auto rounded-xl border border-line bg-surface p-1.5">
+                    {matchedStudents.map((st) => (
                       <button
                         key={st.id}
                         type="button"
-                        onClick={() => { setSelectedStudent(st); setStudentSearchQuery(`${st.firstName} ${st.lastName}`); }}
-                        className={`w-full text-start p-2.5 rounded-xl text-xs flex justify-between items-center transition-all ${
-                          isSelected
-                            ? "bg-primary/15 border border-primary/30 text-ink font-bold"
-                            : "hover:bg-primary-50 text-ink border border-transparent"
-                        }`}
+                        onClick={() => chooseStudent(st)}
+                        className="flex w-full items-center justify-between rounded-xl border border-transparent p-2.5 text-start text-xs text-ink transition-all hover:bg-primary-50"
                       >
-                        <div className="min-w-0">
-                          <span className="font-semibold block truncate">{st.firstName} {st.lastName}</span>
-                          <span className="text-[9px] text-muted block mt-0.5 font-mono">
-                            🎫 {st.rfid || "sans carte"} · 📞 {st.phone} · Solde: {st.balance} DA
+                        <span className="min-w-0">
+                          <span className="block truncate font-semibold">
+                            {st.firstName} {st.lastName}
                           </span>
-                        </div>
-                        {isSelected && <Check className="h-4 w-4 text-primary shrink-0" />}
+                          <span className="mt-0.5 block font-mono text-[9px] text-muted">
+                            🎫 {st.rfid || "sans carte"} · 📞 {st.phone || "—"} · Solde: {st.balance} DA
+                          </span>
+                        </span>
                       </button>
-                    );
-                  })}
-                  {matchedStudents.length === 0 && (
-                    <div className="p-3 text-center text-xs text-muted bg-surface rounded-xl border border-line">
-                      ⚠️ Aucun élève trouvé. Sera enregistré comme passager :{" "}
-                      <strong>&laquo;&nbsp;{studentSearchQuery}&nbsp;&raquo;</strong>
-                    </div>
-                  )}
+                    ))}
+                    {matchedStudents.length === 0 && (
+                      <div className="rounded-xl border border-line bg-canvas/40 p-3 text-center text-xs text-muted">
+                        Aucun élève inscrit sous ce nom — il sera enregistré comme{" "}
+                        <strong>passager</strong> : «&nbsp;{studentSearchQuery.trim()}&nbsp;».
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            <div>
-              <label className="block text-xs font-semibold text-muted mb-1 font-sans">Date de la séance</label>
-              <Input type="date" value={casualDate} onChange={(e) => setCasualDate(e.target.value)} />
+              {selectedStudent && (
+                <div className="mt-2 rounded-xl border border-primary/25 bg-primary-50/50 p-2.5 text-xs">
+                  <span className="block text-[10px] font-bold uppercase text-muted">
+                    Élève sélectionné
+                  </span>
+                  <strong className="mt-0.5 block text-ink">
+                    {selectedStudent.firstName} {selectedStudent.lastName}
+                  </strong>
+                  <span className="text-[10px] text-muted">
+                    Solde : {selectedStudent.balance} DA → après séance :{" "}
+                    <strong
+                      className={
+                        !selectedStudent.isFree &&
+                        !seanceIsOffered &&
+                        selectedStudent.balance - effectivePrice < 0
+                          ? "text-danger"
+                          : "text-success"
+                      }
+                    >
+                      {selectedStudent.isFree || seanceIsOffered
+                        ? selectedStudent.balance
+                        : selectedStudent.balance - effectivePrice}{" "}
+                      DA
+                    </strong>
+                    {selectedStudent.isFree && " · élève gratuit, aucun débit"}
+                    {seanceIsOffered && " · séance offerte, aucun débit"}
+                  </span>
+                </div>
+              )}
             </div>
 
-            {selectedStudent ? (
-              <div className="bg-primary-50/50 border border-line rounded-xl p-3 text-xs">
-                <span className="text-[10px] text-muted block uppercase font-bold">Élève sélectionné</span>
-                <strong className="text-ink block mt-0.5">{selectedStudent.firstName} {selectedStudent.lastName}</strong>
-                <span className="text-muted">
-                  Solde actuel : {selectedStudent.balance} DA → après séance :{" "}
-                  <strong className={selectedStudent.balance - effectivePrice < 0 ? "text-danger" : "text-success"}>
-                    {selectedStudent.isFree ? selectedStudent.balance : selectedStudent.balance - effectivePrice} DA
-                  </strong>
-                  {selectedStudent.isFree && " (élève gratuit — aucun débit)"}
-                  {seanceIsOffered && " — séance offerte, aucun débit"}
-                </span>
+            {/* ---- 2. Scolarité : classe → année → filière ---- */}
+            <div className="rounded-2xl border border-line bg-canvas/30 p-3.5">
+              <label className="mb-1.5 block text-xs font-bold text-ink">
+                2. Scolarité de l&apos;élève
+              </label>
+              <p className="mb-2 text-[10px] leading-relaxed text-muted">
+                Classe, puis année, puis filière. Pour un élève inscrit, les trois sont
+                pré-remplies depuis son emploi du temps — et restent modifiables (il peut venir
+                suivre la séance d&apos;un autre niveau).
+              </p>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <div>
+                  <label className="mb-1 block text-[10px] font-semibold text-muted">Classe</label>
+                  <Select
+                    className="w-full"
+                    value={formLevel}
+                    onChange={(e) => pickLevel(e.target.value as LevelKey)}
+                  >
+                    <option value="">— Choisir —</option>
+                    {levelOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] font-semibold text-muted">Année</label>
+                  <Select
+                    className="w-full"
+                    value={formYear}
+                    disabled={!formLevel}
+                    onChange={(e) => pickYear(e.target.value)}
+                  >
+                    <option value="">— Choisir —</option>
+                    {yearOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] font-semibold text-muted">Filière</label>
+                  <Select
+                    className="w-full"
+                    value={formFiliereId}
+                    disabled={!formYear || formLevel === "formation"}
+                    onChange={(e) => pickFiliere(e.target.value)}
+                  >
+                    <option value="">
+                      {formLevel === "formation" ? "— sans objet —" : "— Choisir —"}
+                    </option>
+                    {filiereOptions.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
               </div>
-            ) : (
-              <div className="bg-warning/5 border border-warning/25 rounded-xl p-3 text-xs">
-                <span className="text-[10px] text-muted block uppercase font-bold">Enregistrée au nom de</span>
-                <strong className="text-ink block mt-0.5">
-                  {studentSearchQuery.trim() || "Passager occasionnel (sans nom)"}
-                </strong>
+
+              {cascadeComplete ? (
+                <p className="mt-2 rounded-xl border border-success/25 bg-success/5 p-2 text-[10px] text-muted">
+                  Scolarité : <strong className="text-ink">{schoolingLabel}</strong>
+                  {matchedClasses.length > 1 &&
+                    ` · ${matchedClasses.length} classes partagent cette combinaison`}
+                </p>
+              ) : (
+                <p className="mt-2 text-[10px] italic text-muted">
+                  Sans scolarité, tous les créneaux du jour sont proposés.
+                </p>
+              )}
+            </div>
+
+            {/* ---- 3. Matière (facultative) ---- */}
+            <div className="rounded-2xl border border-line bg-canvas/30 p-3.5">
+              <label className="mb-1.5 block text-xs font-bold text-ink">
+                3. Matière <span className="font-normal text-muted">(facultatif)</span>
+              </label>
+              <Select
+                className="w-full"
+                value={formModuleId}
+                onChange={(e) => {
+                  setFormModuleId(e.target.value);
+                  setSelectedItem(null);
+                }}
+              >
+                <option value="">Toutes les matières du jour</option>
+                {dayModules.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </Select>
+              <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
+                Ne sont listées que les matières réellement enseignées ce jour-là sur cette
+                scolarité. Laissez vide pour voir tous les créneaux.
+              </p>
+            </div>
+
+            {/* ---- Date de la séance ---- */}
+            <div className="rounded-2xl border border-line bg-canvas/30 p-3.5">
+              <label className="mb-1.5 block text-xs font-bold text-ink">Date de la séance</label>
+              <Input
+                type="date"
+                value={casualDate}
+                onChange={(e) => {
+                  setCasualDate(e.target.value);
+                  setSelectedItem(null);
+                }}
+              />
+              <label className="mt-2 flex cursor-pointer items-start gap-2 text-[11px]">
+                <input
+                  type="checkbox"
+                  checked={onlyThatDay}
+                  onChange={(e) => {
+                    setOnlyThatDay(e.target.checked);
+                    setSelectedItem(null);
+                  }}
+                  className="mt-0.5 h-4 w-4 shrink-0"
+                />
                 <span className="text-muted">
-                  Passager : aucun solde n&apos;est débité, l&apos;encaissement va directement en caisse.
+                  N&apos;afficher que les créneaux du{" "}
+                  <strong className="text-ink">{DAY_LABELS_FR[dayOfSeance]}</strong>
+                  {casualDate === todayIso() && " (aujourd'hui)"} — décochez pour voir toute la
+                  semaine.
                 </span>
-              </div>
-            )}
+              </label>
+            </div>
           </div>
 
-          {/* ---- What ---- */}
+          {/* ============ COLONNE DROITE : LE CRÉNEAU ET L'ARGENT =========== */}
           <div className="space-y-4">
-            <div>
-              <label className="block text-xs font-semibold text-muted mb-1 font-sans">
-                2. Sur quel emploi du temps ? *
-              </label>
-              <p className="text-[10px] text-muted mb-2 leading-relaxed">
-                Cherchez l&apos;emploi du temps par son <strong>nom</strong> (module ou intitulé du créneau),
-                sa classe, son groupe, sa salle ou son enseignant. Le tarif d&apos;une séance est chargé
-                automatiquement.
-              </p>
-              <div className="flex gap-1.5 mb-2">
-                {([
-                  { key: "all", label: "Tout" },
-                  { key: "timing", label: "Créneaux séance libre" },
-                  { key: "cours", label: "Cours normaux" },
-                ] as const).map((tab) => (
-                  <button
-                    key={tab.key}
-                    onClick={() => setItemKindTab(tab.key)}
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
-                      itemKindTab === tab.key ? "bg-primary text-white" : "bg-canvas text-muted hover:text-ink"
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
+            {/* ---- 4. Le créneau du jour ---- */}
+            <div className="rounded-2xl border border-line bg-canvas/30 p-3.5">
+              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                <label className="block text-xs font-bold text-ink">
+                  4. Emploi du temps suivi *
+                </label>
+                <span className="text-[10px] text-muted">
+                  {dayOptions.length} créneau(x) disponible(s)
+                </span>
+              </div>
+
+              <div className="mb-2 flex flex-wrap gap-1.5">
                 {selectedStudent && studentSessionIds.size > 0 && (
                   <button
                     onClick={() => setOnlyStudentSeances(!onlyStudentSeances)}
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all ${
+                    className={`rounded-lg px-2.5 py-1 text-[10px] font-bold transition-all ${
                       onlyStudentSeances ? "bg-success text-white" : "bg-canvas text-muted hover:text-ink"
                     }`}
                   >
@@ -1223,65 +1574,92 @@ ${refused.reason}
                   </button>
                 )}
               </div>
+
               <div className="relative mb-2">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
                 <Input
                   value={itemSearchQuery}
                   onChange={(e) => setItemSearchQuery(e.target.value)}
-                  placeholder="Nom de l'emploi du temps, classe, groupe, salle, enseignant..."
+                  placeholder="Affiner : nom du créneau, groupe, salle, enseignant..."
                   className="pl-9"
                 />
               </div>
-              <div className="border border-line rounded-xl max-h-64 overflow-y-auto p-1.5 bg-canvas/30 space-y-1">
-                {filteredOptions.length === 0 ? (
-                  <p className="text-[10px] text-muted italic p-3 text-center">Aucun résultat.</p>
+
+              <div className="max-h-72 space-y-1 overflow-y-auto rounded-xl border border-line bg-surface p-1.5">
+                {dayOptions.length === 0 ? (
+                  <p className="p-4 text-center text-[11px] leading-relaxed text-muted">
+                    Aucun créneau {onlyThatDay ? `le ${DAY_LABELS_FR[dayOfSeance].toLowerCase()}` : ""}
+                    {cascadeComplete ? ` pour ${schoolingLabel}` : ""}
+                    {formModuleId
+                      ? ` en ${modules.find((m) => m.id === formModuleId)?.name ?? "cette matière"}`
+                      : ""}
+                    .
+                    <br />
+                    Élargissez à la semaine, retirez la matière, ou changez la scolarité.
+                  </p>
                 ) : (
-                  filteredOptions.map((opt) => {
+                  dayOptions.map((opt) => {
                     const isSel = selectedItem?.key === opt.key;
-                    // Créneau dont le public exclut l'élève choisi : il reste
-                    // visible et cliquable — la réception doit pouvoir lire
-                    // POURQUOI il ne convient pas — mais il part grisé.
+                    // Un créneau dont le public exclut l'élève reste visible et
+                    // cliquable — la réception doit lire POURQUOI il ne convient
+                    // pas — mais il part grisé.
                     const outOfAudience = audienceVerdictFor(opt);
                     return (
                       <button
                         key={opt.key}
-                        onClick={() => { setSelectedItem(opt); setCustomPrice(opt.price); setPaymentValidated(false); setIsFreeSeance(!!opt.sessionIsFree); }}
-                        className={`w-full text-start p-2.5 rounded-lg text-xs transition-colors border ${
+                        onClick={() => {
+                          setSelectedItem(opt);
+                          setCustomPrice(opt.price);
+                          setPaymentValidated(false);
+                          setIsFreeSeance(!!opt.sessionIsFree);
+                        }}
+                        className={`w-full rounded-lg border p-2.5 text-start text-xs transition-colors ${
                           isSel
-                            ? "bg-primary/10 border-primary/40 text-ink"
-                            : "hover:bg-primary-50 text-ink border-transparent"
+                            ? "border-primary/40 bg-primary/10 text-ink"
+                            : "border-transparent text-ink hover:bg-primary-50"
                         } ${outOfAudience ? "opacity-60" : ""}`}
                       >
-                        <div className="flex justify-between items-start gap-2">
-                          <strong className="font-bold block min-w-0 truncate">
+                        <div className="flex items-start justify-between gap-2">
+                          <strong className="block min-w-0 truncate font-bold">
                             {opt.kind === "timing" && <span className="mr-1">🎯</span>}
                             {opt.label}
                             {isStudentSeance(opt) && (
-                              <Badge tone="success" className="ml-1.5 text-[8px] px-1 py-0 align-middle">
+                              <Badge tone="success" className="ml-1.5 px-1 py-0 align-middle text-[8px]">
                                 Son cours
                               </Badge>
                             )}
                             {opt.sessionIsFree && (
-                              <Badge tone="warning" className="ml-1.5 text-[8px] px-1 py-0 align-middle">
+                              <Badge tone="warning" className="ml-1.5 px-1 py-0 align-middle text-[8px]">
                                 🎁 Offerte
                               </Badge>
                             )}
                             {outOfAudience && (
-                              <Badge tone="danger" className="ml-1.5 text-[8px] px-1 py-0 align-middle">
+                              <Badge tone="danger" className="ml-1.5 px-1 py-0 align-middle text-[8px]">
                                 Hors public
                               </Badge>
                             )}
                           </strong>
-                          <strong className="text-primary shrink-0">{opt.price} DA</strong>
+                          <strong className="shrink-0 text-primary">{opt.price} DA</strong>
                         </div>
-                        {/* Full context so two identical module names stay distinguishable */}
                         <div className="mt-1 space-y-0.5 text-[10px] text-muted">
-                          <div className="flex items-center gap-1"><User className="h-3 w-3 shrink-0" /> {opt.teacherName}{opt.teacherIsPassager ? " (passager)" : ""}</div>
-                          <div className="flex items-center gap-1"><Users className="h-3 w-3 shrink-0" /> {opt.classLabel} · Gr: {opt.groupLabel}</div>
-                          <div className="flex items-center gap-1"><MapPin className="h-3 w-3 shrink-0" /> {opt.salleLabel}</div>
-                          <div className="flex items-center gap-1 font-mono"><Clock className="h-3 w-3 shrink-0" /> {opt.daysLabel} · {opt.timeLabel}</div>
+                          <div className="flex items-center gap-1">
+                            <User className="h-3 w-3 shrink-0" /> {opt.teacherName}
+                            {opt.teacherIsPassager ? " (passager)" : ""}
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Users className="h-3 w-3 shrink-0" /> {opt.classLabel} · Gr:{" "}
+                            {opt.groupLabel}
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <MapPin className="h-3 w-3 shrink-0" /> {opt.salleLabel}
+                          </div>
+                          <div className="flex items-center gap-1 font-mono">
+                            <Clock className="h-3 w-3 shrink-0" /> {opt.daysLabel} · {opt.timeLabel}
+                          </div>
                           {opt.periodLabel && (
-                            <div className="flex items-center gap-1 font-mono"><Calendar className="h-3 w-3 shrink-0" /> {opt.periodLabel}</div>
+                            <div className="flex items-center gap-1 font-mono">
+                              <Calendar className="h-3 w-3 shrink-0" /> {opt.periodLabel}
+                            </div>
                           )}
                         </div>
                       </button>
@@ -1292,46 +1670,24 @@ ${refused.reason}
             </div>
 
             {selectedItem && (
-              <div className="space-y-3">
-                {/* Recap of the chosen emploi du temps */}
-                <div className="rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs space-y-1">
-                  <span className="text-[10px] text-muted block uppercase font-bold">Emploi du temps choisi</span>
-                  <strong className="text-ink block">
-                    {selectedItem.kind === "timing" && <span className="mr-1">🎯</span>}
-                    {selectedItem.label}
-                  </strong>
-                  <span className="text-[10px] text-muted block font-mono">
-                    {selectedItem.daysLabel} · {selectedItem.timeLabel} · {selectedItem.salleLabel}
-                  </span>
-                  <span className="text-[10px] text-muted block">
-                    Enseignant : <strong className="text-ink">{selectedItem.teacherName}</strong>
-                    {selectedItem.teacherIsPassager ? " (passager)" : ""}
-                  </span>
-                  <span className="text-[10px] text-muted block">
-                    Prix d&apos;une séance :{" "}
-                    <strong className="text-primary">{selectedItem.price} DA</strong>
-                  </span>
-                </div>
-
-                {/* Public du créneau : le motif se lit AVANT l'encaissement,
-                    pas dans une alerte au moment d'enregistrer. */}
+              <>
+                {/* Public du créneau : le motif se lit AVANT l'encaissement. */}
                 {selectedOutOfAudience && (
                   <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-xs">
                     <strong className="block text-danger">
                       Cet élève n&apos;est pas dans le public de ce créneau
                     </strong>
                     <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
-                      {selectedOutOfAudience.reason} Choisissez un autre créneau, ou
-                      élargissez son public depuis l&apos;<strong>Emploi du Temps</strong>. Un
-                      passager occasionnel, lui, reste encaissable dessus.
+                      {selectedOutOfAudience.reason} Choisissez un autre créneau, ou élargissez son
+                      public depuis l&apos;<strong>Emploi du Temps</strong>. Un passager
+                      occasionnel, lui, reste encaissable dessus.
                     </span>
                   </div>
                 )}
 
-                {/* Séance offerte: nobody is paid on it — neither the school,
-                    nor the teacher who animates it. Two settings force it on and
-                    lock it: a créneau flagged « offert » on the planning, and a
-                    période gratuite covering the student's class that day. */}
+                {/* Séance offerte : personne n'est payé dessus — ni l'école, ni
+                    l'enseignant. Deux réglages la forcent et la verrouillent :
+                    un créneau coché « offert », et une période gratuite. */}
                 <label
                   className={`flex items-start gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
                     selectedItem.sessionIsFree || freePeriodForSelected
@@ -1347,48 +1703,118 @@ ${refused.reason}
                     type="checkbox"
                     checked={seanceIsOffered}
                     disabled={selectedItem.sessionIsFree || !!freePeriodForSelected}
-                    onChange={(e) => { setIsFreeSeance(e.target.checked); setPaymentValidated(false); }}
+                    onChange={(e) => {
+                      setIsFreeSeance(e.target.checked);
+                      setPaymentValidated(false);
+                    }}
                     className="mt-0.5 h-4 w-4 shrink-0"
                   />
                   <span>
                     <strong className="block text-ink">Séance offerte (gratuite)</strong>
                     <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
-                      Rien n&apos;est encaissé par l&apos;école, aucun solde n&apos;est débité, et{" "}
-                      <strong>l&apos;enseignant n&apos;est pas rémunéré</strong> sur cette séance. Sa valeur
-                      ({listedPrice} DA) reste comptabilisée dans les rapports généraux.
+                      Rien n&apos;est encaissé, aucun solde n&apos;est débité, et{" "}
+                      <strong>l&apos;enseignant n&apos;est pas rémunéré</strong> dessus. Sa valeur (
+                      {listedPrice} DA) reste comptabilisée dans les rapports.
                     </span>
                     {selectedItem.sessionIsFree && (
                       <span className="mt-1 block text-[10px] font-bold text-warning">
-                        🎁 Ce créneau est configuré comme « offert » dans le planning — toute présence y est gratuite.
+                        🎁 Ce créneau est configuré « offert » dans le planning — toute présence y
+                        est gratuite.
                       </span>
                     )}
                     {freePeriodForSelected && (
                       <span className="mt-1 block text-[10px] font-bold text-warning">
-                        🎁 Période gratuite « {freePeriodForSelected.name} » en cours du{" "}
+                        🎁 Période gratuite «&nbsp;{freePeriodForSelected.name}&nbsp;» du{" "}
                         {formatDateFr(freePeriodForSelected.startDate)} au{" "}
-                        {formatDateFr(freePeriodForSelected.endDate)} : cet élève ne peut pas être
-                        encaissé sur cette date, sa séance est offerte comme au badge.
+                        {formatDateFr(freePeriodForSelected.endDate)} : cette séance est offerte,
+                        comme au badge.
                       </span>
                     )}
                   </span>
                 </label>
 
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1 font-sans">
-                    {seanceIsOffered ? "Valeur de la séance offerte (DA)" : "3. Montant à encaisser (DA)"}
+                {/* ---- 5. Le prix ---- */}
+                <div className="rounded-2xl border border-line bg-canvas/30 p-3.5">
+                  <label className="mb-1.5 block text-xs font-bold text-ink">
+                    5. {seanceIsOffered ? "Valeur de la séance offerte (DA)" : "Prix de la séance (DA)"}
                   </label>
                   <Input
                     type="number"
                     min={0}
                     value={customPrice ?? selectedItem.price}
-                    onChange={(e) => { setCustomPrice(Number(e.target.value)); setPaymentValidated(false); }}
+                    onChange={(e) => {
+                      setCustomPrice(Number(e.target.value));
+                      setPaymentValidated(false);
+                    }}
                   />
-                  <p className="text-[10px] text-muted mt-1">
-                    Tarif chargé depuis {selectedItem.kind === "timing" ? "le créneau" : "l'abonnement"} :{" "}
-                    <strong>{selectedItem.price} DA</strong>. Modifiable pour cette séance uniquement.
+                  <p className="mt-1 text-[10px] text-muted">
+                    Tarif chargé depuis{" "}
+                    {selectedItem.kind === "timing" ? "le créneau" : "l'abonnement"} :{" "}
+                    <strong>{selectedItem.price} DA</strong>. Modifiable pour cette séance
+                    uniquement.
                   </p>
                 </div>
 
+                {/* ---- 6. Part de l'enseignant sur CETTE séance ---- */}
+                <div
+                  className={`rounded-2xl border p-3.5 transition-colors ${
+                    teacherShareOn ? "border-primary/40 bg-primary-50/40" : "border-line bg-canvas/30"
+                  }`}
+                >
+                  <label className="flex cursor-pointer items-start gap-2.5 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={teacherShareOn}
+                      onChange={(e) => setTeacherShareOn(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0"
+                    />
+                    <span>
+                      <strong className="block text-ink">
+                        6. Fixer la part de l&apos;enseignant sur cette séance
+                      </strong>
+                      <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                        <strong>Décoché</strong> (le cas courant) : cet élève compte comme un
+                        présent de plus sur le créneau, et l&apos;enseignant en touche son{" "}
+                        <strong>pourcentage habituel</strong>.
+                        <br />
+                        <strong>Coché</strong> : la séance sort du lot, se calcule au taux
+                        ci-dessous, et apparaît dans une{" "}
+                        <strong>colonne à part</strong> de l&apos;écran de règlement de
+                        l&apos;enseignant.
+                      </span>
+                    </span>
+                  </label>
+
+                  {teacherShareOn && (
+                    <div className="mt-3 border-t border-primary/20 pt-3">
+                      <label className="mb-1 block text-[10px] font-semibold text-muted">
+                        Pourcentage de l&apos;enseignant sur cette séance (%)
+                      </label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={teacherSharePct || ""}
+                        onChange={(e) => setTeacherSharePct(Number(e.target.value))}
+                      />
+                      <p className="mt-1.5 text-[10px] text-muted">
+                        {effectivePrice} DA × {teacherSharePctValue} % ={" "}
+                        <strong className="text-primary">{teacherShareAmount} DA</strong> pour{" "}
+                        <strong className="text-ink">{selectedItem.teacherName}</strong>.
+                        {seanceIsOffered && (
+                          <>
+                            {" "}
+                            <strong className="text-warning">
+                              Séance offerte : rien ne sera versé.
+                            </strong>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* ---- L'encaissement ---- */}
                 {seanceIsOffered ? (
                   <div className="rounded-xl border border-warning/30 bg-warning/10 p-3.5 text-xs">
                     <div className="flex items-center justify-between">
@@ -1401,11 +1827,12 @@ ${refused.reason}
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <div className="bg-success/10 border border-success/20 rounded-xl p-3.5 flex justify-between items-center text-xs">
-                      <span className="text-success font-semibold">Total à encaisser :</span>
-                      <strong className="text-success text-sm font-extrabold">{effectivePrice} DA</strong>
+                    <div className="flex items-center justify-between rounded-xl border border-success/20 bg-success/10 p-3.5 text-xs">
+                      <span className="font-semibold text-success">Total à encaisser :</span>
+                      <strong className="text-sm font-extrabold text-success">
+                        {effectivePrice} DA
+                      </strong>
                     </div>
-                    {/* Explicit cash-in confirmation before the séance is written */}
                     <label
                       className={`flex cursor-pointer items-center gap-2.5 rounded-xl border p-3 text-xs transition-colors ${
                         paymentValidated
@@ -1430,15 +1857,15 @@ ${refused.reason}
                     </label>
                   </div>
                 )}
-              </div>
+              </>
             )}
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-4 mt-6 border-t border-line">
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-4">
           <span className="text-[10px] text-muted">
             {!selectedItem
-              ? "Sélectionnez d'abord un emploi du temps."
+              ? "Sélectionnez l'emploi du temps suivi."
               : seanceIsOffered
                 ? `Séance offerte — 0 DA encaissé (valeur ${waivedPrice} DA).`
                 : paymentValidated
@@ -1446,7 +1873,9 @@ ${refused.reason}
                   : "Validez l'encaissement pour pouvoir enregistrer."}
           </span>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={() => setIsFormOpen(false)}>Annuler</Button>
+            <Button variant="outline" onClick={() => setIsFormOpen(false)}>
+              Annuler
+            </Button>
             <Button
               onClick={handleSubmit}
               disabled={!selectedItem || (!seanceIsOffered && !paymentValidated)}

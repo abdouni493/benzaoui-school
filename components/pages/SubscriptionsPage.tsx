@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/SearchInput";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Tabs } from "@/components/ui/Tabs";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { useCanSeeGains } from "@/lib/store/session";
 import {
   Trash2,
   Edit,
@@ -62,6 +63,8 @@ export function SubscriptionsPage() {
     repriceSession,
     updateSchool,
   } = useData();
+  /** Un compte de réception encaisse ; il ne voit pas ce que l'école gagne. */
+  const canSeeGains = useCanSeeGains();
 
   // Modals
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -727,12 +730,17 @@ export function SubscriptionsPage() {
                   )}
                 </div>
 
-                <div className="border-t border-line pt-3 mt-3 flex items-center justify-between text-xs">
-                  <span className="text-muted">Gains générés</span>
-                  <strong className="text-success font-bold text-sm bg-success/10 px-2 py-1 rounded-lg">
-                    {totalGains} DA
-                  </strong>
-                </div>
+                {/* Les recettes de l'abonnement : direction seulement. Un
+                    compte de réception encaisse, il n'a pas à savoir ce que le
+                    cours a rapporté à l'école. */}
+                {canSeeGains && (
+                  <div className="border-t border-line pt-3 mt-3 flex items-center justify-between text-xs">
+                    <span className="text-muted">Gains générés</span>
+                    <strong className="text-success font-bold text-sm bg-success/10 px-2 py-1 rounded-lg">
+                      {totalGains} DA
+                    </strong>
+                  </div>
+                )}
               </CardBody>
             </Card>
           );
@@ -1057,10 +1065,12 @@ export function SubscriptionsPage() {
                       <strong className="text-primary font-bold">{selectedSub.pricePerSession} DA</strong>
                     </div>
                   )}
-                  <div className="flex justify-between items-center text-sm">
-                    <span className="text-muted font-semibold">Total des gains encaissés:</span>
-                    <strong className="text-success font-extrabold text-lg">{calculateSubscriptionGains(selectedSub)} DA</strong>
-                  </div>
+                  {canSeeGains && (
+                    <div className="flex justify-between items-center text-sm">
+                      <span className="text-muted font-semibold">Total des gains encaissés:</span>
+                      <strong className="text-success font-extrabold text-lg">{calculateSubscriptionGains(selectedSub)} DA</strong>
+                    </div>
+                  )}
                 </div>
               </div>
 

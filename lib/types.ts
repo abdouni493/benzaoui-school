@@ -149,6 +149,28 @@ export interface TeacherPaymentDetail {
   passagers: number;
   gross: number;
   share: number;
+  /** Prix d'UNE séance du créneau, tel qu'il a servi au calcul. Le bon de
+   *  paiement en tableau (Niveau × dates) le réimprime à l'identique : sans
+   *  lui, la colonne « Montant calculé » ne s'expliquerait plus six mois
+   *  après. Absent des règlements écrits avant le tableau. */
+  unitPrice?: number;
+  /** Pourcentage appliqué à CE créneau — celui de l'enseignant en général, ou
+   *  celui posé sur la séance libre quand elle porte le sien. */
+  percentage?: number;
+  /** Classe / niveau du créneau, colonne « Niveau » du tableau. */
+  className?: string;
+  /** La ligne vient-elle d'un cours de l'emploi du temps ou d'une séance libre
+   *  à pourcentage dédié ? La seconde se calcule à part et s'affiche dans sa
+   *  propre colonne. */
+  kind?: "cours" | "libre";
+  /** Part due au titre des séances libres à pourcentage dédié tenues ce
+   *  jour-là sur ce créneau (0 quand il n'y en a aucune). */
+  freeShare?: number;
+  /** Nombre de ces séances libres à pourcentage dédié. */
+  freeCount?: number;
+  /** Les séances libres (independent_sessions.id) que ce règlement solde sur
+   *  cette ligne : c'est par elles que l'annulation les rend à nouveau dues. */
+  independentIds?: string[];
 }
 
 export type ReceptionPaymentType = "daily" | "monthly" | "half_day" | "hourly";
@@ -178,6 +200,19 @@ export interface ReceptionStaff {
   jobTitle?: string;
   /** how many days before the due date the payment alert starts */
   payAlertDays?: number;
+  /**
+   * « Payé à partir du » (YYYY-MM-DD) — travailleurs au MOIS.
+   *
+   * Un salaire mensuel se compte depuis le jour où l'employé commence à être
+   * payé, pas depuis le 1er du mois : embauché le 10 septembre, il est payé le
+   * 10 octobre. Sans cette date, l'écran découpait la paie en mois civils et
+   * annonçait le salaire dû le 30 septembre — dix jours avant qu'il soit gagné,
+   * puis « en retard » pendant ces dix jours-là.
+   *
+   * Absente : on retombe sur `startDate` (la date d'embauche), qui est ce que
+   * la réception avait toujours saisi.
+   */
+  payStartDate?: string;
 }
 
 /** How a worked day got into the register. */
@@ -204,6 +239,24 @@ export interface WorkerShift {
   source?: WorkerShiftSource;
   /** motif d'une absence, correction d'un pointage… */
   notes?: string;
+  /**
+   * ABSENCE : la retenue a-t-elle été tranchée ?
+   *
+   * Une absence constatée ne dit pas encore ce qu'elle coûte : la direction
+   * peut retenir une journée, une partie, ou rien du tout (un arrêt justifié).
+   * Tant que personne n'a tranché, l'absence reste EN ATTENTE — elle s'affiche
+   * en alerte sur l'écran Travailleurs et sur le tableau de bord, et le
+   * règlement de la période la fait trancher avant de se conclure.
+   *
+   * Tranchée à 0 DA est une décision comme une autre : `absenceResolved` vaut
+   * alors `true` et `absenceCost` 0. C'est ce qui distingue « on a décidé de ne
+   * rien retenir » de « personne n'a encore regardé ».
+   */
+  absenceResolved?: boolean;
+  /** ce que l'absence retient sur la paie (0 = aucune retenue) */
+  absenceCost?: number;
+  /** la retenue écrite dans `teacher_absences` pour cette absence */
+  absenceId?: string;
 }
 
 /** One settlement written for a worker — the register the old screen lacked.
@@ -617,6 +670,35 @@ export interface IndependentSession {
   isFree?: boolean;
   /** tariff that was NOT charged (0 on every ordinary séance libre) */
   waivedAmount?: number;
+
+  // ---- Ce que le guichet a noté du passager -------------------------------
+  /** téléphone du passager (l'élève inscrit a le sien sur sa fiche) */
+  passagerPhone?: string;
+  /** scolarité déclarée : elle sert à proposer les bons créneaux du jour, et
+   *  reste sur la séance pour que le bon imprimé dise de qui il s'agit */
+  classId?: string;
+  year?: string;
+  filiereId?: string;
+  /** module choisi au guichet (facultatif : sans lui, tous les créneaux du
+   *  jour sont proposés) */
+  moduleId?: string;
+
+  /**
+   * « Part de l'enseignant sur CETTE séance libre », en pourcentage.
+   *
+   * Absent (le cas courant) : la séance rejoint les autres présences du
+   * créneau et l'enseignant en touche son pourcentage habituel, comme s'il
+   * s'agissait d'un élève inscrit de plus.
+   *
+   * Posé ici : la séance sort du lot. Elle se calcule à son propre taux et
+   * s'affiche dans une colonne à part de l'écran de règlement — celle qui
+   * n'apparaît QUE s'il reste de telles séances à payer.
+   */
+  teacherPercentage?: number;
+  /** part figée à la création, quand `teacherPercentage` est posé */
+  teacherAmount?: number;
+  /** le compte qui a encaissé la séance (profiles.id) */
+  createdBy?: string;
 }
 
 // =============================================================================
@@ -630,8 +712,15 @@ export interface IndependentSession {
 // l'élève : ce qu'il verse entre en caisse, ce qu'il ne verse pas reste une
 // dette attachée à CETTE séance.
 
-/** Où en est le rendez-vous. */
-export type PrivateSessionStatus = "planned" | "done" | "cancelled";
+/**
+ * Où en est le rendez-vous.
+ *
+ * « requested » est l'état qui manquait : la demande est prise — on sait qui,
+ * quand il a demandé, qui l'a reçu, ce qu'il veut — mais RIEN n'est encore
+ * programmé. C'est le moment où une demande se perd, et c'est donc une alerte
+ * tant qu'elle dure.
+ */
+export type PrivateSessionStatus = "requested" | "planned" | "done" | "cancelled";
 
 export interface PrivateSession {
   id: string;
@@ -645,8 +734,9 @@ export interface PrivateSession {
   classId?: string;
   year?: string;
   filiereId?: string;
-  /** date ET heure du rendez-vous */
-  scheduledAt: string;
+  /** date ET heure du rendez-vous — absente tant que la demande n'est pas
+   *  programmée (statut « requested ») */
+  scheduledAt?: string;
   /** somme des durées des modules, en minutes */
   durationMinutes: number;
   /** ce que la séance coûte à la famille, tous modules confondus */
@@ -657,6 +747,57 @@ export interface PrivateSession {
   notes?: string;
   createdAt?: string;
   createdBy?: string;
+
+  // ---- ÉTAPE 1 : le dossier de demande (« renseignement ») ----------------
+  /** le jour où la famille a demandé le cours */
+  requestDate?: string;
+  /** le compte qui a reçu la demande — celui qui saisit par défaut ; un
+   *  administrateur peut désigner un autre travailleur */
+  receptionistId?: string;
+  /** son nom en clair, pour que la facture reste lisible quand le compte
+   *  disparaît */
+  receptionistName?: string;
+  /** ce que le guichet a noté de la demande */
+  observation?: string;
+  /** versement pris À LA DEMANDE, avant toute programmation. Il entre en
+   *  caisse tout de suite : c'est de l'argent reçu. */
+  depositAmount?: number;
+
+  // ---- ÉTAPE 3 : la répartition décidée à la conclusion -------------------
+  /** part de l'école, en pourcentage (le complément de celle du prof) */
+  schoolPercentage?: number;
+  /** ce qui revient aux enseignants, en dinars */
+  teacherShare?: number;
+  /** ce qui reste à l'école — le total MOINS la part des enseignants, jamais
+   *  un second calcul de pourcentage : deux arrondis séparés finissaient par
+   *  ne plus faire le total */
+  schoolShare?: number;
+  completedAt?: string;
+}
+
+/**
+ * Un élève d'une séance particulière.
+ *
+ * Deux cousins qui prennent le même cours particulier sont UNE séance et DEUX
+ * élèves. Les entasser dans `guestName` rendait impossible de dire qui avait
+ * payé quoi — et c'est précisément ce que la conclusion de la séance doit
+ * répartir.
+ */
+export interface PrivateSessionStudent {
+  id: string;
+  privateSessionId: string;
+  /** élève déjà inscrit à l'école — absent pour un élève de passage */
+  studentId?: string;
+  guestName?: string;
+  guestPhone?: string;
+  /** scolarité déclarée (facultative) */
+  classId?: string;
+  year?: string;
+  filiereId?: string;
+  /** ce que CET élève doit, et ce qu'il a versé */
+  totalPrice: number;
+  paidAmount: number;
+  createdAt?: string;
 }
 
 /** Un module d'une séance particulière : sa durée, son tarif horaire, et
@@ -677,4 +818,20 @@ export interface PrivateSessionModule {
   teacherAmount: number;
   teacherPaid: boolean;
   teacherPaidAt?: string;
+
+  /** Le module se tient à SON heure : deux matières le même jour, à deux
+   *  heures différentes, sont deux lignes et non une moyenne. */
+  scheduledAt?: string;
+  /**
+   * Prix forfaitaire du module.
+   *
+   * > 0 : c'est LUI le prix, et la durée n'est plus qu'une information. 0 : on
+   * garde le calcul minutes × tarif horaire. Le guichet annonce souvent un
+   * prix rond (« la séance, 2 500 ») que le calcul horaire ne sait pas
+   * reproduire exactement.
+   */
+  flatPrice?: number;
+  /** enseignant qui n'est pas (encore) dans la base : un nom, un téléphone */
+  teacherName?: string;
+  teacherPhone?: string;
 }

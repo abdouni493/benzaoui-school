@@ -32,6 +32,8 @@ import type {
   WorkerPayment,
   WorkerPaymentDetail,
   WorkerShift,
+  WorkerShiftSource,
+  WorkerShiftStatus,
 } from "@/lib/types";
 
 /** Ordre de `Date.getDay()` : 0 = dimanche. */
@@ -115,7 +117,20 @@ export interface WorkerPeriod {
   end: string;
   /** rémunération avant acomptes, retenues et déduction d'absences */
   amount: number;
-  /** ce que les absences de la période coûteraient si on les déduisait */
+  /**
+   * Ce que les absences de la période retiennent DÉJÀ, d'après les décisions
+   * prises dessus — pour AFFICHAGE seulement.
+   *
+   * Ce champ portait une heuristique : le salaire divisé par les jours ouvrés,
+   * multiplié par le nombre d'absences, que l'écran déduisait sur une case à
+   * cocher. Depuis qu'une absence se TRANCHE (elle écrit sa retenue dans
+   * `teacher_absences`), la même absence était comptée DEUX FOIS : une fois par
+   * l'heuristique, une fois par la retenue. Le travailleur perdait deux
+   * journées pour une.
+   *
+   * La retenue ne vit donc plus qu'à UN endroit — la décision écrite — et ce
+   * champ ne fait que la résumer à l'écran.
+   */
   absenceDeduction: number;
   shiftIds: string[];
   minutes: number;
@@ -127,6 +142,33 @@ export interface WorkerPeriod {
   dueDate: string;
   /** la période n'est pas encore terminée (mois en cours) */
   running: boolean;
+  /** Les journées de la période, arrivée et sortie comprises.
+   *
+   *  Sur un travailleur payé À LA JOURNÉE, l'écran de règlement doit montrer
+   *  à quelle heure il est arrivé et à quelle heure il est parti : c'est ce
+   *  qui fait qu'une journée se paie, et la seule chose qu'on puisse lui
+   *  opposer s'il la contexte. */
+  days: WorkerPeriodDay[];
+  /** Absences de la période dont la retenue n'a jamais été tranchée. Le
+   *  règlement doit les faire trancher avant de se conclure : une absence
+   *  oubliée est un mois payé en trop. */
+  pendingAbsences: WorkerPeriodDay[];
+}
+
+/** Une journée de la période, telle que le bulletin la montre. */
+export interface WorkerPeriodDay {
+  shiftId: string;
+  workDate: string;
+  startAt?: string;
+  endAt?: string;
+  minutes: number;
+  status: WorkerShiftStatus;
+  source: WorkerShiftSource;
+  /** la journée est commencée mais jamais clôturée */
+  frozen: boolean;
+  /** absence : la retenue a-t-elle été tranchée (même à 0 DA) ? */
+  absenceResolved: boolean;
+  absenceCost: number;
 }
 
 /** L'urgence d'une période due. */
@@ -151,12 +193,138 @@ function endOfMonth(year: number, month: number): string {
   return dayKey(new Date(year, month + 1, 0));
 }
 
+/** La journée telle que le bulletin la montre. */
+function dayOf(shift: WorkerShift): WorkerPeriodDay {
+  return {
+    shiftId: shift.id,
+    workDate: shift.workDate,
+    startAt: shift.startAt,
+    endAt: shift.endAt,
+    minutes: shift.minutes,
+    status: shift.status ?? "present",
+    source: shift.source ?? "scan",
+    frozen: !!shift.frozen,
+    absenceResolved: !!shift.absenceResolved,
+    absenceCost: shift.absenceCost ?? 0,
+  };
+}
+
+/**
+ * Le jour du mois d'où part la paie d'un travailleur mensuel.
+ *
+ * `payStartDate` est la date que la réception pose à la création (« il est payé
+ * à partir du 10 ») ; à défaut, c'est sa date d'embauche.
+ */
+export function payAnchorOf(
+  worker: Partial<Pick<ReceptionStaff, "payStartDate" | "startDate">>,
+): string {
+  return worker.payStartDate || worker.startDate || "";
+}
+
+/** `date` + `months` mois, en gardant le même jour du mois — ramené au dernier
+ *  jour quand le mois d'arrivée est plus court (31 janvier + 1 mois = 28/29
+ *  février, jamais le 3 mars). */
+export function addMonthsKeepingDay(date: string, months: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const lastDay = new Date(y, m - 1 + months + 1, 0).getDate();
+  return dayKey(new Date(y, m - 1 + months, Math.min(d, lastDay)));
+}
+
+/** Un jour avant `date`. */
+function dayBefore(date: string): string {
+  const d = new Date(`${date}T12:00:00`);
+  d.setDate(d.getDate() - 1);
+  return dayKey(d);
+}
+
+/**
+ * Les périodes MENSUELLES d'un travailleur, de la première à celle en cours.
+ *
+ * POURQUOI CE N'EST PAS « LE MOIS CIVIL »
+ * ---------------------------------------
+ * Un salaire se compte à partir du jour où l'employé a commencé à être payé,
+ * pas à partir du 1er. Embauché le 10 septembre, il est payé le 10 octobre :
+ * l'écran annonçait pourtant le salaire « dû » le 30 septembre, et le déclarait
+ * en retard pendant dix jours où il n'était pas encore gagné.
+ *
+ * Chaque période court donc de l'anniversaire au jour qui précède le suivant
+ * (10/09 → 09/10), et l'argent est dû à l'anniversaire d'après (10/10).
+ *
+ * LA CLÉ RESTE « MM/YYYY », celle du mois où la période COMMENCE. Deux périodes
+ * consécutives commencent forcément dans deux mois différents, la clé reste
+ * donc unique — et tous les mois déjà réglés avant ce changement le restent,
+ * ce qui évite de repayer un salaire.
+ */
+function monthlyPeriods(
+  worker: ReceptionStaff,
+  shifts: WorkerShift[],
+  isPaid: (key: string) => boolean,
+  today: string,
+): WorkerPeriod[] {
+  const anchor = payAnchorOf(worker);
+  if (!anchor) return [];
+
+  const out: WorkerPeriod[] = [];
+  const anchorDay = Number(anchor.split("-")[2]);
+  // Une paie calée sur le 1er EST le mois civil : on garde alors exactement
+  // l'ancien découpage, bornes comprises.
+  const alignedOnFirst = anchorDay === 1;
+
+  for (let i = 0; i < 240; i++) {
+    const start = addMonthsKeepingDay(anchor, i);
+    if (start > today) break;
+    const nextStart = addMonthsKeepingDay(anchor, i + 1);
+    const [sy, sm] = start.split("-").map(Number);
+    const end = alignedOnFirst ? endOfMonth(sy, sm - 1) : dayBefore(nextStart);
+    // Le salaire est dû le jour de l'anniversaire suivant ; sur un mois civil,
+    // c'est le dernier jour du mois, comme avant.
+    const dueDate = alignedOnFirst ? end : nextStart;
+    const key = `${String(sm).padStart(2, "0")}/${sy}`;
+
+    if (isPaid(key)) continue;
+
+    const rows = shiftsIn(shifts, worker.id, start, end);
+    const days = rows.map(dayOf).sort((a, b) => a.workDate.localeCompare(b.workDate));
+    const present = days.filter((r) => r.status !== "absent");
+    const absent = days.filter((r) => r.status === "absent");
+    const expected = workDaysBetween(worker, start, end > today ? today : end);
+    out.push({
+      key,
+      label: alignedOnFirst
+        ? new Date(`${start}T12:00:00`).toLocaleDateString("fr-FR", {
+            month: "long",
+            year: "numeric",
+          })
+        : `${frDate(start)} → ${frDate(end)}`,
+      start,
+      end,
+      amount: worker.salary,
+      // La somme des décisions prises sur les absences de la période. Elle est
+      // déjà portée par les retenues (`teacher_absences`) que le règlement
+      // déduit : on ne la soustrait pas une seconde fois ici.
+      absenceDeduction: absent.reduce((sum, r) => sum + r.absenceCost, 0),
+      shiftIds: rows.filter((r) => !r.paid).map((r) => r.id),
+      minutes: days.reduce((sum, r) => sum + r.minutes, 0),
+      present: present.length,
+      absent: absent.length,
+      expected,
+      dueDate,
+      running: end > today,
+      days,
+      // Une absence dont la retenue n'a jamais été tranchée : le règlement doit
+      // la faire trancher, sinon le mois se paie plein alors qu'il ne l'était pas.
+      pendingAbsences: absent.filter((r) => !r.absenceResolved),
+    });
+  }
+  return out;
+}
+
 /**
  * Les périodes que ce travailleur n'a pas encore été payé, de la plus ancienne
  * à la plus récente.
  *
  * Aucune ne remonte avant son embauche, et aucune ne dépasse aujourd'hui : on
- * ne réclame pas le salaire d'un mois qui n'a pas commencé.
+ * ne réclame pas le salaire d'une période qui n'a pas commencé.
  */
 export function unpaidPeriodsOf(
   worker: ReceptionStaff,
@@ -164,7 +332,7 @@ export function unpaidPeriodsOf(
   payments: WorkerPayment[],
   today = todayKey(),
 ): WorkerPeriod[] {
-  if (!worker.startDate) return [];
+  if (!worker.startDate && !worker.payStartDate) return [];
   const mine = payments.filter((p) => p.workerId === worker.id);
   const isPaid = (key: string) => key !== "" && mine.some((p) => p.periodKey === key);
 
@@ -208,65 +376,39 @@ export function unpaidPeriodsOf(
         expected: workDaysBetween(worker, start, end),
         dueDate: end,
         running: false,
+        days: payable.map(dayOf),
+        pendingAbsences: [],
       },
     ];
   }
 
-  // ---- Mensuel : un mois = une période ---------------------------------------
+  // ---- Mensuel : de l'anniversaire de paie au suivant -------------------------
   if (worker.paymentType === "monthly") {
-    const out: WorkerPeriod[] = [];
-    const first = new Date(`${worker.startDate}T12:00:00`);
-    const cursor = new Date(first.getFullYear(), first.getMonth(), 1);
-    const now = new Date(`${today}T12:00:00`);
-    // 24 mois en arrière au plus : au-delà, la liste devient illisible et ne
-    // correspond plus à une paie qu'on va réellement régler.
-    let guard = 0;
-    while (cursor <= now && guard < 240) {
-      guard += 1;
-      const y = cursor.getFullYear();
-      const m = cursor.getMonth();
-      const key = `${String(m + 1).padStart(2, "0")}/${y}`;
-      const start = dayKey(new Date(y, m, 1));
-      const end = endOfMonth(y, m);
-
-      if (!isPaid(key)) {
-        // Le mois d'embauche est proratisé sur les jours réellement attendus.
-        const from = start < worker.startDate ? worker.startDate : start;
-        const rows = shiftsIn(shifts, worker.id, from, end);
-        const present = rows.filter((r) => r.status !== "absent").length;
-        const absent = rows.filter((r) => r.status === "absent").length;
-        const expected = workDaysBetween(worker, from, end > today ? today : end);
-        // Ce qu'une journée d'absence coûterait, si l'école choisit de la
-        // déduire : le salaire réparti sur les jours ouvrés du mois entier.
-        const monthDays = workDaysBetween(worker, from, end) || 1;
-        out.push({
-          key,
-          label: cursor.toLocaleDateString("fr-FR", { month: "long", year: "numeric" }),
-          start: from,
-          end,
-          amount: worker.salary,
-          absenceDeduction: Math.round((worker.salary / monthDays) * absent),
-          shiftIds: rows.filter((r) => !r.paid).map((r) => r.id),
-          minutes: rows.reduce((sum, r) => sum + r.minutes, 0),
-          present,
-          absent,
-          expected,
-          dueDate: end,
-          running: end > today,
-        });
-      }
-      cursor.setMonth(cursor.getMonth() + 1);
-    }
-    return out;
+    return monthlyPeriods(worker, shifts, isPaid, today);
   }
 
-  // ---- Journalier / demi-journée : un jour travaillé = une période ----------
+  // ---- Journalier / demi-journée : une journée TERMINÉE = une période -------
+  //
+  // UNE JOURNÉE NE SE PAIE QU'UNE FOIS TERMINÉE.
+  //
+  // L'écran proposait de régler la journée dès le badge d'arrivée : un
+  // travailleur pointé à 8 h était « dû » à 8 h 01, avant d'avoir travaillé.
+  // Il faut désormais la SORTIE — second badge, ou fin de service saisie à la
+  // main — pour que la journée devienne payable. Une journée commencée et
+  // jamais clôturée (`frozen`) attend qu'on la corrige : la réception la voit
+  // dans l'onglet Pointage, elle n'entre pas dans la paie.
+  //
   // Une ABSENCE n'est jamais une période due : on ne paie pas un jour qui n'a
-  // pas été travaillé. Elle reste visible dans l'onglet Pointage.
+  // pas été travaillé.
   const out: WorkerPeriod[] = [];
   const worked = shifts
     .filter(
-      (s) => s.workerId === worker.id && s.status !== "absent" && s.workDate <= today,
+      (s) =>
+        s.workerId === worker.id &&
+        s.status !== "absent" &&
+        s.workDate <= today &&
+        !!s.endAt &&
+        !s.frozen,
     )
     .sort((a, b) => a.workDate.localeCompare(b.workDate));
 
@@ -291,6 +433,8 @@ export function unpaidPeriodsOf(
       expected: 1,
       dueDate: s.workDate,
       running: false,
+      days: [dayOf(s)],
+      pendingAbsences: [],
     });
   }
   return out;
@@ -344,6 +488,46 @@ export function payAlertsOf(
     }
   }
   return out.sort((a, b) => a.daysLeft - b.daysLeft);
+}
+
+/**
+ * Les absences qu'il reste à trancher.
+ *
+ * POURQUOI SEULEMENT LES MENSUELS
+ * -------------------------------
+ * Une absence n'a de sens que là où elle COÛTE quelque chose. Un travailleur
+ * au mois touche son salaire qu'il vienne ou non : c'est le seul cas où il faut
+ * décider si l'on retient une journée. Un journalier, lui, est payé aux
+ * journées travaillées — ne pas venir se solde tout seul, il n'y a rien à
+ * retenir, et une alerte quotidienne « il est absent » ne servirait qu'à noyer
+ * les vraies.
+ *
+ * Une absence est « tranchée » dès que quelqu'un a décidé de son coût — même
+ * à 0 DA. C'est la décision qui compte, pas le montant.
+ */
+export interface WorkerAbsenceAlert {
+  worker: ReceptionStaff;
+  shift: WorkerShift;
+  /** négatif = il y a N jours */
+  daysAgo: number;
+}
+
+export function pendingAbsencesOf(
+  workers: ReceptionStaff[],
+  shifts: WorkerShift[],
+  today = todayKey(),
+): WorkerAbsenceAlert[] {
+  const monthly = new Map(
+    workers.filter((w) => w.paymentType === "monthly").map((w) => [w.id, w]),
+  );
+  return shifts
+    .filter((s) => s.status === "absent" && !s.absenceResolved && monthly.has(s.workerId))
+    .map((s) => ({
+      worker: monthly.get(s.workerId)!,
+      shift: s,
+      daysAgo: daysBetween(s.workDate, today),
+    }))
+    .sort((a, b) => b.daysAgo - a.daysAgo || a.shift.workDate.localeCompare(b.shift.workDate));
 }
 
 /** L'instantané figé qu'un règlement emporte, pour que le bulletin puisse être

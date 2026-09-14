@@ -48,6 +48,23 @@ async function loadSessionUser(userId: string, email: string | null): Promise<Se
   };
 }
 
+/**
+ * Ce compte a-t-il le droit de voir CE QUE L'ÉCOLE GAGNE ?
+ *
+ * Un compte de réception encaisse : il doit voir le tarif d'une séance, le
+ * solde d'un élève, ce qu'il reste à payer — tout ce sans quoi il ne peut pas
+ * tenir le guichet. Il n'a en revanche rien à faire des RECETTES : le total
+ * encaissé sur un abonnement, le cumul d'un écran, la rémunération d'un
+ * enseignant. Ces chiffres-là sont ceux de la direction.
+ *
+ * Un seul prédicat, appelé par tous les écrans concernés : sans lui, chaque
+ * page redécidait dans son coin, et il en restait toujours une qui montrait
+ * le total.
+ */
+export function useCanSeeGains(): boolean {
+  return useSession((s) => s.user?.role) === "admin";
+}
+
 export const useSession = create<SessionState>((set, get) => ({
   user: null,
   hydrated: false,
