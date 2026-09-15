@@ -181,6 +181,19 @@ function makeMapper<T>(fields: readonly FieldSpec<T>[]) {
 interface TableConfig {
   table: string;
   select: string;
+  /**
+   * Colonne de tri de la pagination — la CLÉ PRIMAIRE de la table, et rien
+   * d'autre : c'est elle qui rend deux pages successives disjointes.
+   *
+   * Toutes les tables ne s'appellent pas `id`. `student_credentials` est
+   * classée par `student_id`, `module_absence_rules` par `module_id` : leur
+   * clé primaire EST la référence. Trier sur un `id` qui n'existe pas faisait
+   * répondre 400 à PostgREST (« column student_credentials.id does not
+   * exist »), donc échouer la lecture de la table ENTIÈRE — et, comme un
+   * échec de page conserve volontairement les lignes déjà chargées, l'écran
+   * restait vide sans jamais se réparer.
+   */
+  orderBy?: string;
   fromRow: (row: any) => any; // eslint-disable-line @typescript-eslint/no-explicit-any
   toRow: (item: any) => any; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
@@ -593,8 +606,20 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
   workerShifts: { table: "worker_shifts", select: "*", ...workerShiftsMapper },
   workerPayments: { table: "worker_payments", select: "*", ...workerPaymentsMapper },
   profiles: { table: "profiles", select: "*", ...profilesMapper },
-  studentCredentials: { table: "student_credentials", select: "*", ...studentCredentialsMapper },
-  moduleAbsenceRules: { table: "module_absence_rules", select: "*", ...moduleAbsenceRulesMapper },
+  // Ces deux tables n'ont pas de colonne `id` : leur clé primaire est la
+  // référence qu'elles portent. Trier sur `id` leur valait un 400.
+  studentCredentials: {
+    table: "student_credentials",
+    select: "*",
+    orderBy: "student_id",
+    ...studentCredentialsMapper,
+  },
+  moduleAbsenceRules: {
+    table: "module_absence_rules",
+    select: "*",
+    orderBy: "module_id",
+    ...moduleAbsenceRulesMapper,
+  },
   sessions: { table: "sessions", select: "*", ...sessionsMapper },
   subscriptions: { table: "subscriptions", select: "*", ...subscriptionsMapper },
   freePeriods: { table: "free_periods", select: "*", ...freePeriodsMapper },
@@ -727,17 +752,20 @@ export interface PagedSource {
  */
 export async function fetchWholeTable(
   supabase: PagedSource,
-  cfg: Pick<TableConfig, "table" | "select">,
+  cfg: Pick<TableConfig, "table" | "select" | "orderBy">,
 ): Promise<FetchOutcome> {
   const rows: Record<string, unknown>[] = [];
+  // Tri sur la clé primaire — `id` pour la plupart des tables, sa vraie clé
+  // pour celles qui n'en ont pas (voir `TableConfig.orderBy`).
+  const orderColumn = cfg.orderBy ?? "id";
 
   for (let from = 0; from < MAX_ROWS; from += PAGE_SIZE) {
     const { data, error } = await supabase
       .from(cfg.table)
       .select(cfg.select)
-      // Tri sur la clé primaire : sans lui, deux pages peuvent se recouvrir ou
-      // s'ignorer, et la table lue n'est plus la table stockée.
-      .order("id", { ascending: true })
+      // Sans ce tri, deux pages peuvent se recouvrir ou s'ignorer, et la table
+      // lue n'est plus la table stockée.
+      .order(orderColumn, { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
 
     if (error || !data) return { ok: false, error: error?.message ?? "no data" };
@@ -1557,6 +1585,15 @@ export const useData = create<DataStore>((set, get) => ({
     const { data, error } = await supabase.rpc("process_weekly_absences", {});
     if (error || !data) {
       // Table/RPC missing (migration not applied yet) or not authorized — no-op.
+      // Le message EST dit : un 400 muet ici a déjà coûté des jours de
+      // recherche, alors que PostgREST nomme précisément la colonne ou la
+      // fonction qui manque à la base en ligne.
+      if (error) {
+        console.warn(
+          `process_weekly_absences: ${error.message} — la facturation hebdomadaire des absences ` +
+            "n'a pas tourné (migration à repasser ?). Le reste de l'écran n'est pas affecté.",
+        );
+      }
       return { ok: false };
     }
     const res = data as { ok: boolean; charged?: number; students?: number };

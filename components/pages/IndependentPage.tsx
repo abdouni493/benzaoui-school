@@ -1756,6 +1756,13 @@ ${refused.reason}
                 </div>
 
                 {/* ---- 6. Part de l'enseignant sur CETTE séance ---- */}
+                {/* Ce que l'enseignant touche n'est pas une donnée de guichet.
+                    Masqué, le réglage garde sa valeur : « décoché » sur une
+                    nouvelle séance — le cas courant, l'enseignant touche son
+                    pourcentage habituel — et la valeur déjà enregistrée sur une
+                    séance qu'on modifie. Rien n'est effacé en passant par un
+                    compte de réception. */}
+                {canSeeGains && (
                 <div
                   className={`rounded-2xl border p-3.5 transition-colors ${
                     teacherShareOn ? "border-primary/40 bg-primary-50/40" : "border-line bg-canvas/30"
@@ -1813,6 +1820,7 @@ ${refused.reason}
                     </div>
                   )}
                 </div>
+                )}
 
                 {/* ---- L'encaissement ---- */}
                 {seanceIsOffered ? (
@@ -1988,10 +1996,12 @@ ${refused.reason}
                         <span className="text-muted">Valeur offerte :</span>
                         <strong className="text-warning">{selectedCasual.waivedAmount ?? 0} DA</strong>
                       </div>
-                      <div className="flex justify-between border-b border-line/50 pb-1.5">
-                        <span className="text-muted">Enseignant rémunéré :</span>
-                        <strong className="text-ink">Non — séance offerte</strong>
-                      </div>
+                      {canSeeGains && (
+                        <div className="flex justify-between border-b border-line/50 pb-1.5">
+                          <span className="text-muted">Enseignant rémunéré :</span>
+                          <strong className="text-ink">Non — séance offerte</strong>
+                        </div>
+                      )}
                     </>
                   )}
                   {student && (

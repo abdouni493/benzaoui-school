@@ -22,18 +22,31 @@ function fakeSource(opts: {
   total: number;
   maxRows?: number;
   failAtOffset?: number;
-}): PagedSource & { calls: [number, number][] } {
+  /** La table n'a QUE ces colonnes : trier sur une autre la fait répondre 400,
+   *  exactement comme PostgREST le fait pour `student_credentials.id`. */
+  columns?: string[];
+}): PagedSource & { calls: [number, number][]; orderedBy: string[] } {
   const calls: [number, number][] = [];
+  const orderedBy: string[] = [];
   return {
     calls,
+    orderedBy,
     from() {
       return {
         select() {
           return {
-            order() {
+            order(column: string) {
+              orderedBy.push(column);
+              const unknownColumn = opts.columns && !opts.columns.includes(column);
               return {
                 range(from: number, to: number) {
                   calls.push([from, to]);
+                  if (unknownColumn) {
+                    return Promise.resolve({
+                      data: null,
+                      error: { message: `column ${column} does not exist` },
+                    });
+                  }
                   if (opts.failAtOffset === from) {
                     return Promise.resolve({ data: null, error: { message: "boom" } });
                   }
@@ -106,6 +119,42 @@ describe("fetchWholeTable", () => {
     expect(out.ok).toBe(false);
     if (out.ok) return;
     expect(out.error).toBe("boom");
+  });
+
+  /**
+   * LA PANNE QUE CES TROIS TESTS INTERDISENT DE REVIVRE
+   * ---------------------------------------------------
+   * Toutes les tables ne s'appellent pas `id`. `student_credentials` a pour
+   * clé primaire `student_id`, `module_absence_rules` a `module_id`. Trier
+   * leur pagination sur `id` faisait répondre 400 à PostgREST (« column
+   * student_credentials.id does not exist »), donc échouer la lecture de la
+   * table entière — et l'écran restait vide sans jamais se réparer.
+   */
+  it("trie sur `id` par défaut", async () => {
+    const src = fakeSource({ total: 3 });
+    await fetchWholeTable(src, cfg);
+    expect(src.orderedBy).toEqual(["id"]);
+  });
+
+  it("trie sur la clé primaire déclarée quand la table n'a pas d'`id`", async () => {
+    const src = fakeSource({ total: 3, columns: ["student_id", "password"] });
+    const out = await fetchWholeTable(src, {
+      table: "student_credentials",
+      select: "*",
+      orderBy: "student_id",
+    });
+
+    expect(src.orderedBy).toEqual(["student_id"]);
+    expect(out.ok).toBe(true);
+  });
+
+  it("ÉCHOUE si on la trie sur une colonne que la table n'a pas", async () => {
+    const src = fakeSource({ total: 3, columns: ["module_id", "enabled"] });
+    const out = await fetchWholeTable(src, { table: "module_absence_rules", select: "*" });
+
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.error).toContain("does not exist");
   });
 
   it("rend une table vide sans erreur", async () => {

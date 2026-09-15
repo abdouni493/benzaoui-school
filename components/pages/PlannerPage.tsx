@@ -9,6 +9,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
+import { useCanSeeGains } from "@/lib/store/session";
 import {
   Trash2,
   Edit,
@@ -98,6 +99,9 @@ const WEEKDAYS: { key: Day; label: string }[] = [
 ];
 
 export function PlannerPage() {
+  /** Un compte de réception pose un créneau ; il ne voit pas ce qu'il coûte en
+   *  rémunération. Le pourcentage d'un enseignant est un chiffre de direction. */
+  const canSeeGains = useCanSeeGains();
   const {
     school,
     sessions,
@@ -1484,17 +1488,21 @@ export function PlannerPage() {
                             {t.firstName} {t.lastName}
                             {t.isPassager && <span className="ml-1 opacity-70">(passager)</span>}
                           </span>
-                          <span className={openTeacherId === t.id ? "text-white/80" : "text-muted"}>
-                            {t.paymentType === "monthly" ? "Mensuel" : `${t.percentage ?? 0}%`}
-                          </span>
+                          {canSeeGains && (
+                            <span className={openTeacherId === t.id ? "text-white/80" : "text-muted"}>
+                              {t.paymentType === "monthly" ? "Mensuel" : `${t.percentage ?? 0}%`}
+                            </span>
+                          )}
                         </button>
                       ))}
                   </div>
-                  <p className="text-[10px] text-muted leading-relaxed">
-                    {openIsFree
-                      ? "Séance offerte : l'enseignant n'est pas rémunéré sur ce créneau."
-                      : "L'enseignant est rémunéré sur cette séance libre exactement comme sur ses autres séances (sa part est calculée à chaque présence selon son contrat)."}
-                  </p>
+                  {canSeeGains && (
+                    <p className="text-[10px] text-muted leading-relaxed">
+                      {openIsFree
+                        ? "Séance offerte : l'enseignant n'est pas rémunéré sur ce créneau."
+                        : "L'enseignant est rémunéré sur cette séance libre exactement comme sur ses autres séances (sa part est calculée à chaque présence selon son contrat)."}
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-2">

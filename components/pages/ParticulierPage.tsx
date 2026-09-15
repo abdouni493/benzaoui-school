@@ -52,7 +52,7 @@ import {
 import { printHtmlDocument } from "@/lib/print";
 import { buildPrivateSessionInvoice } from "@/lib/reports/privateSessionInvoice";
 import { useSettings } from "@/lib/store/settings";
-import { useSession } from "@/lib/store/session";
+import { useCanSeeGains, useSession } from "@/lib/store/session";
 import { useToast } from "@/lib/store/toast";
 
 /** Domaine des identifiants du portail — identique à l'écran Étudiants. */
@@ -186,6 +186,22 @@ function fmtDuration(minutes: number): string {
 }
 
 export function ParticulierPage() {
+  /**
+   * CE QUE LE GUICHET NE VOIT PAS SUR CET ÉCRAN
+   * -------------------------------------------
+   * Un cours particulier se partage entre l'école et l'enseignant. Le guichet
+   * a besoin du TOTAL, de ce qui est ENCAISSÉ et de ce qui reste DÛ par la
+   * famille : c'est ce qu'il réclame et ce qu'il rend. Il n'a rien à faire du
+   * partage lui-même — le pourcentage de l'enseignant, sa part en dinars, ce
+   * qui revient à l'école — pas plus que sur l'écran Enseignants, qui lui est
+   * déjà fermé.
+   *
+   * Le règlement d'un enseignant suit la même ligne : c'est une sortie de
+   * caisse vers l'historique d'un enseignant, donc une opération de direction.
+   * Une séance conclue au guichet laisse donc l'enseignant « à régler », et
+   * l'alerte qui le dit est celle que la direction voit.
+   */
+  const canSeeGains = useCanSeeGains();
   const {
     privateSessions,
     privateSessionModules,
@@ -846,11 +862,12 @@ export function ParticulierPage() {
       addToast({
         type: "success",
         title: "Séance terminée",
-        message:
-          `Total ${res.total} DA — école ${res.schoolShare} DA, enseignants ${res.teacherShare} DA. ` +
-          ((res.teachersPaid ?? 0) > 0
-            ? `${res.teachersPaid} enseignant(s) réglé(s).`
-            : "Les enseignants restent à régler."),
+        message: canSeeGains
+          ? `Total ${res.total} DA — école ${res.schoolShare} DA, enseignants ${res.teacherShare} DA. ` +
+            ((res.teachersPaid ?? 0) > 0
+              ? `${res.teachersPaid} enseignant(s) réglé(s).`
+              : "Les enseignants restent à régler.")
+          : `Total ${res.total} DA. La séance est close.`,
       });
 
       // La facture, tout de suite : c'est le moment où la famille est au
@@ -1260,7 +1277,7 @@ export function ParticulierPage() {
         </div>
       )}
 
-      {unpaidTeachers.length > 0 && (
+      {canSeeGains && unpaidTeachers.length > 0 && (
         <div className="mb-4 rounded-2xl border border-primary/30 bg-primary-50/50 p-4">
           <div className="flex items-start gap-3">
             <Users className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
@@ -1333,7 +1350,9 @@ export function ParticulierPage() {
             [
               { key: "all" as const, label: "Tout" },
               { key: "debt" as const, label: `Dette élève (${debtSessions.length})` },
-              { key: "teacherDue" as const, label: `Prof à payer (${unpaidTeachers.length})` },
+              ...(canSeeGains
+                ? [{ key: "teacherDue" as const, label: `Prof à payer (${unpaidTeachers.length})` }]
+                : []),
             ]
           ).map((k) => (
             <button
@@ -1471,12 +1490,14 @@ export function ParticulierPage() {
                             </span>
                             <span className="flex shrink-0 items-center gap-1">
                               <span className="font-mono text-muted">{fmtDuration(m.minutes)}</span>
-                              <Badge
-                                tone={m.teacherPaid ? "success" : "warning"}
-                                className="text-[9px] font-bold"
-                              >
-                                {m.teacherPaid ? "prof payé" : `${m.teacherAmount} DA`}
-                              </Badge>
+                              {canSeeGains && (
+                                <Badge
+                                  tone={m.teacherPaid ? "success" : "warning"}
+                                  className="text-[9px] font-bold"
+                                >
+                                  {m.teacherPaid ? "prof payé" : `${m.teacherAmount} DA`}
+                                </Badge>
+                              )}
                             </span>
                           </div>
                         ))}
@@ -2205,7 +2226,8 @@ export function ParticulierPage() {
                                     )}
                                   </span>
                                   <span className="block font-mono text-[9px] text-muted">
-                                    📞 {t.phone || "—"} · {t.percentage ?? 0} %
+                                    📞 {t.phone || "—"}
+                                    {canSeeGains && ` · ${t.percentage ?? 0} %`}
                                   </span>
                                 </button>
                               ))}
@@ -2248,29 +2270,36 @@ export function ParticulierPage() {
                           )}
                         </div>
 
-                        <div>
-                          <label className="mb-1 block text-[10px] font-semibold text-muted">
-                            Part de l&apos;enseignant (%)
-                          </label>
-                          <Input
-                            type="number"
-                            min={0}
-                            max={100}
-                            value={d.teacherPercentage || ""}
-                            onChange={(e) =>
-                              updateModuleDraft(d.uiKey, {
-                                teacherPercentage: Number(e.target.value),
-                              })
-                            }
-                          />
-                          <p className="mt-1 text-[10px] text-muted">
-                            {priceOf(d)} DA × {d.teacherPercentage || 0} % ={" "}
-                            <strong className="text-primary">
-                              {Math.round((priceOf(d) * (d.teacherPercentage || 0)) / 100)} DA
-                            </strong>{" "}
-                            — ajustable une dernière fois à la conclusion.
-                          </p>
-                        </div>
+                        {/* Le partage école / enseignant : direction seulement.
+                            Masqué, le taux garde sa valeur — celui de la fiche
+                            de l'enseignant choisi, ou celui déjà enregistré sur
+                            le module qu'on modifie : rien n'est remis à zéro en
+                            programmant depuis le guichet. */}
+                        {canSeeGains && (
+                          <div>
+                            <label className="mb-1 block text-[10px] font-semibold text-muted">
+                              Part de l&apos;enseignant (%)
+                            </label>
+                            <Input
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={d.teacherPercentage || ""}
+                              onChange={(e) =>
+                                updateModuleDraft(d.uiKey, {
+                                  teacherPercentage: Number(e.target.value),
+                                })
+                              }
+                            />
+                            <p className="mt-1 text-[10px] text-muted">
+                              {priceOf(d)} DA × {d.teacherPercentage || 0} % ={" "}
+                              <strong className="text-primary">
+                                {Math.round((priceOf(d) * (d.teacherPercentage || 0)) / 100)} DA
+                              </strong>{" "}
+                              — ajustable une dernière fois à la conclusion.
+                            </p>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -2337,7 +2366,7 @@ export function ParticulierPage() {
                         <th className="p-2">Date</th>
                         <th className="p-2">Enseignant</th>
                         <th className="p-2 text-right">Prix</th>
-                        <th className="p-2 text-right">Part prof</th>
+                        {canSeeGains && <th className="p-2 text-right">Part prof</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -2356,23 +2385,25 @@ export function ParticulierPage() {
                             )}
                           </td>
                           <td className="p-2 text-right font-mono">{m.totalPrice} DA</td>
-                          <td className="p-2 text-right font-mono">
-                            {m.teacherPaid ? (
-                              <>
-                                {m.teacherAmount} DA
-                                <Badge tone="success" className="ml-1 text-[8px]">
-                                  payé
-                                </Badge>
-                              </>
-                            ) : (
-                              <>
-                                {Math.round((m.totalPrice * completeSplit.teacherPct) / 100)} DA
-                                <span className="block text-[9px] text-muted">
-                                  {completeSplit.teacherPct} %
-                                </span>
-                              </>
-                            )}
-                          </td>
+                          {canSeeGains && (
+                            <td className="p-2 text-right font-mono">
+                              {m.teacherPaid ? (
+                                <>
+                                  {m.teacherAmount} DA
+                                  <Badge tone="success" className="ml-1 text-[8px]">
+                                    payé
+                                  </Badge>
+                                </>
+                              ) : (
+                                <>
+                                  {Math.round((m.totalPrice * completeSplit.teacherPct) / 100)} DA
+                                  <span className="block text-[9px] text-muted">
+                                    {completeSplit.teacherPct} %
+                                  </span>
+                                </>
+                              )}
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -2476,7 +2507,11 @@ export function ParticulierPage() {
                 </p>
               </div>
 
-              {/* La répartition, dans les deux sens. */}
+              {/* La répartition, dans les deux sens — direction seulement.
+                  Masquée, la conclusion applique le taux déjà porté par les
+                  modules de la séance (celui posé à la programmation), exactement
+                  la valeur que ce panneau proposait par défaut. */}
+              {canSeeGains && (
               <div className="space-y-3 rounded-2xl border border-primary/25 bg-primary-50/40 p-4">
                 <span className="block text-[10px] font-bold uppercase tracking-wider text-primary">
                   Répartition
@@ -2545,6 +2580,7 @@ export function ParticulierPage() {
                   </p>
                 </div>
               </div>
+              )}
 
               {/* L'encaissement */}
               <div className="space-y-2 rounded-2xl border border-line bg-canvas p-4 text-xs">
@@ -2588,7 +2624,12 @@ export function ParticulierPage() {
                 </div>
               </div>
 
-              {/* L'enseignant est-il réglé maintenant ? */}
+              {/* L'enseignant est-il réglé maintenant ? Régler un enseignant
+                  est une sortie de caisse vers SON historique : direction
+                  seulement. Une séance conclue au guichet laisse donc
+                  l'enseignant à régler, et l'alerte de cette page — visible de
+                  la direction — le rappellera. */}
+              {canSeeGains && (
               <label
                 className={`flex cursor-pointer items-start gap-2.5 rounded-2xl border p-3.5 text-xs transition-colors ${
                   payTeachersNow
@@ -2623,6 +2664,7 @@ export function ParticulierPage() {
                   </span>
                 </span>
               </label>
+              )}
 
               <div className="flex flex-col gap-2 border-t border-line pt-4">
                 <Button onClick={handleComplete} disabled={savingComplete} variant="success">
@@ -2794,7 +2836,7 @@ export function ParticulierPage() {
               ))}
             </div>
 
-            {(detailsSession.teacherShare ?? 0) > 0 && (
+            {canSeeGains && (detailsSession.teacherShare ?? 0) > 0 && (
               <div className="grid grid-cols-2 gap-3 rounded-2xl border border-line bg-canvas/30 p-3 text-xs">
                 <div className="text-center">
                   <span className="block text-[10px] uppercase text-muted">
@@ -2835,8 +2877,10 @@ export function ParticulierPage() {
                         <th className="p-2 text-center">Durée</th>
                         <th className="p-2 text-right">Tarif</th>
                         <th className="p-2 text-right">Total</th>
-                        <th className="p-2 text-right">Part prof</th>
-                        <th className="p-2 text-right">Action</th>
+                        {/* Ce que l'enseignant touche, et le bouton qui le lui
+                            verse : direction seulement. */}
+                        {canSeeGains && <th className="p-2 text-right">Part prof</th>}
+                        {canSeeGains && <th className="p-2 text-right">Action</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -2859,39 +2903,43 @@ export function ParticulierPage() {
                           <td className="p-2 text-right font-mono font-bold text-primary">
                             {m.totalPrice} DA
                           </td>
-                          <td className="p-2 text-right font-mono">
-                            {m.teacherAmount} DA
-                            <span className="block text-[9px] text-muted">
-                              {m.teacherPercentage} %
-                            </span>
-                          </td>
-                          <td className="p-2 text-right">
-                            {m.teacherPaid ? (
-                              <Badge tone="success" className="text-[9px]">
-                                Payé
-                                {m.teacherPaidAt &&
-                                  ` · ${formatDateFr(m.teacherPaidAt.slice(0, 10))}`}
-                              </Badge>
-                            ) : m.teacherId ? (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() =>
-                                  handlePayTeacher(
-                                    m.id,
-                                    teacherLabel(m.teacherId, m.teacherName),
-                                    m.teacherAmount,
-                                  )
-                                }
-                              >
-                                Payer {m.teacherAmount} DA
-                              </Button>
-                            ) : (
-                              <Badge tone="warning" className="text-[9px]">
-                                Sans fiche — non réglable
-                              </Badge>
-                            )}
-                          </td>
+                          {canSeeGains && (
+                            <td className="p-2 text-right font-mono">
+                              {m.teacherAmount} DA
+                              <span className="block text-[9px] text-muted">
+                                {m.teacherPercentage} %
+                              </span>
+                            </td>
+                          )}
+                          {canSeeGains && (
+                            <td className="p-2 text-right">
+                              {m.teacherPaid ? (
+                                <Badge tone="success" className="text-[9px]">
+                                  Payé
+                                  {m.teacherPaidAt &&
+                                    ` · ${formatDateFr(m.teacherPaidAt.slice(0, 10))}`}
+                                </Badge>
+                              ) : m.teacherId ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() =>
+                                    handlePayTeacher(
+                                      m.id,
+                                      teacherLabel(m.teacherId, m.teacherName),
+                                      m.teacherAmount,
+                                    )
+                                  }
+                                >
+                                  Payer {m.teacherAmount} DA
+                                </Button>
+                              ) : (
+                                <Badge tone="warning" className="text-[9px]">
+                                  Sans fiche — non réglable
+                                </Badge>
+                              )}
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>
@@ -3155,16 +3203,24 @@ export function ParticulierPage() {
               <label className="mb-1 block text-xs font-semibold text-muted">Téléphone</label>
               <Input value={ntPhone} onChange={(e) => setNtPhone(e.target.value)} />
             </div>
-            <div>
-              <label className="mb-1 block text-xs font-semibold text-muted">Pourcentage (%)</label>
-              <Input
-                type="number"
-                min={0}
-                max={100}
-                value={ntPercentage || ""}
-                onChange={(e) => setNtPercentage(Number(e.target.value))}
-              />
-            </div>
+            {/* Ce qu'un enseignant touche se fixe à la direction, pas au
+                guichet. Masqué, le champ garde sa valeur — celle du module
+                d'où la fiche est créée, 50 % à défaut : la fiche naît avec le
+                même taux qu'avant. */}
+            {canSeeGains && (
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-muted">
+                  Pourcentage (%)
+                </label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={ntPercentage || ""}
+                  onChange={(e) => setNtPercentage(Number(e.target.value))}
+                />
+              </div>
+            )}
             <div className="sm:col-span-2">
               <label className="mb-1 block text-xs font-semibold text-muted">
                 Description — de quoi se rappeler qui c&apos;est

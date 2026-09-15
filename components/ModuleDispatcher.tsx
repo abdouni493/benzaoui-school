@@ -52,6 +52,26 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
   }
 
   // 4. Admin / Reception Portal Routing
+  //
+  // LES ÉCRANS D'ARGENT NE SONT PAS DES ÉCRANS DE GUICHET
+  // -----------------------------------------------------
+  // Le menu d'un compte de réception n'y mène pas — mais retirer une entrée du
+  // menu ne ferme pas l'URL : elle reste tapable, un signet la garde, un lien
+  // envoyé par message la rouvre. Ces cinq écrans-là ne montrent QUE ce que
+  // l'école gagne et ce que ses enseignants coûtent :
+  //
+  //   /teachers  · le pourcentage de chaque enseignant, son salaire, ses parts
+  //   /workers   · la paie des travailleurs
+  //   /analytics · les recettes agrégées
+  //   /cash      · la caisse
+  //   /reports   · les états financiers
+  //
+  // Ils rejoignent donc /expenses, fermé le premier, derrière la même réponse
+  // lisible. Ce n'est pas la barrière de sécurité (celle-là vit dans les RLS) :
+  // c'est ce qui fait que le guichet ne tombe plus dessus par accident.
+  const directionOnly = (title: string, message: string) =>
+    role === "admin" ? null : <RestrictedPage title={title} message={message} />;
+
   switch (pageSlug) {
     case "classes":
       return <ClassesPage />;
@@ -70,12 +90,22 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
     case "attendance":
       return <AttendancePage />;
     case "teachers":
-      return <TeachersPage />;
+      return (
+        directionOnly(
+          "Enseignants — écran réservé à la direction",
+          "Cet écran montre la rémunération de chaque enseignant (pourcentage, salaire, parts dues). Ces chiffres ne sont pas consultables depuis un compte de réception.",
+        ) ?? <TeachersPage />
+      );
     case "subjects":
       return <SubjectsPage />;
     case "workers":
     case "administration": // legacy slug — kept so old bookmarks keep working
-      return <AdministrationPage />;
+      return (
+        directionOnly(
+          "Travailleurs — écran réservé à la direction",
+          "La paie des travailleurs n'est pas consultable depuis un compte de réception.",
+        ) ?? <AdministrationPage />
+      );
     case "independent":
       return <IndependentPage />;
     case "particulier":
@@ -96,11 +126,26 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
         />
       );
     case "analytics":
-      return <AnalyticsPage />;
+      return (
+        directionOnly(
+          "Analyses — écran réservé à la direction",
+          "Les recettes de l'école ne sont pas consultables depuis un compte de réception.",
+        ) ?? <AnalyticsPage />
+      );
     case "cash":
-      return <CashPage />;
+      return (
+        directionOnly(
+          "Caisse — écran réservé à la direction",
+          "Le cumul de la caisse n'est pas consultable depuis un compte de réception. Les encaissements se font depuis les écrans concernés (élèves, séances libres, particulier).",
+        ) ?? <CashPage />
+      );
     case "reports":
-      return <ReportsPage />;
+      return (
+        directionOnly(
+          "Rapports — écran réservé à la direction",
+          "Les états financiers de l'école ne sont pas consultables depuis un compte de réception.",
+        ) ?? <ReportsPage />
+      );
     case "settings":
       return <SettingsPage />;
     default:

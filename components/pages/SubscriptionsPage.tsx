@@ -1138,6 +1138,11 @@ function statusOf(fp: FreePeriod): PeriodStatus {
 }
 
 function FreePeriodsPanel() {
+  /** Ce qu'une gratuité COÛTE à l'école est une recette en creux : direction
+   *  seulement. Le guichet doit savoir qu'une période est en cours (elle met
+   *  tous ses scans à 0 DA) et combien d'élèves elle touche — pas le manque à
+   *  gagner qu'elle représente. */
+  const canSeeGains = useCanSeeGains();
   const db = useData();
   const {
     classes,
@@ -1384,21 +1389,23 @@ function FreePeriodsPanel() {
             </div>
           </CardBody>
         </Card>
-        <Card>
-          <CardBody className="flex items-center gap-3">
-            <div className="rounded-xl bg-warning/10 p-2.5 text-warning">
-              <Wallet className="h-5 w-5" />
-            </div>
-            <div>
-              <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">
-                Coût total offert
-              </span>
-              <strong className="text-lg font-extrabold text-warning">
-                {formatDA(totals.waived)}
-              </strong>
-            </div>
-          </CardBody>
-        </Card>
+        {canSeeGains && (
+          <Card>
+            <CardBody className="flex items-center gap-3">
+              <div className="rounded-xl bg-warning/10 p-2.5 text-warning">
+                <Wallet className="h-5 w-5" />
+              </div>
+              <div>
+                <span className="block text-[10px] font-bold uppercase tracking-wider text-muted">
+                  Coût total offert
+                </span>
+                <strong className="text-lg font-extrabold text-warning">
+                  {formatDA(totals.waived)}
+                </strong>
+              </div>
+            </CardBody>
+          </Card>
+        )}
       </div>
 
       {/* History — one card per period */}
@@ -1506,19 +1513,23 @@ function FreePeriodsPanel() {
                         <span>Élèves concernés:</span>
                         <strong className="text-ink">{stat.students}</strong>
                       </div>
-                      <div className="flex justify-between text-muted">
-                        <span>Enseignants payés:</span>
-                        <strong className="text-ink">{fp.payTeachers ? "Oui" : "Non"}</strong>
-                      </div>
+                      {canSeeGains && (
+                        <div className="flex justify-between text-muted">
+                          <span>Enseignants payés:</span>
+                          <strong className="text-ink">{fp.payTeachers ? "Oui" : "Non"}</strong>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div className="mt-3 flex items-center justify-between border-t border-line pt-3 text-xs">
-                    <span className="text-muted">Coût de la période</span>
-                    <strong className="rounded-lg bg-warning/10 px-2 py-1 text-sm font-bold text-warning">
-                      {formatDA(stat.waived)}
-                    </strong>
-                  </div>
+                  {canSeeGains && (
+                    <div className="mt-3 flex items-center justify-between border-t border-line pt-3 text-xs">
+                      <span className="text-muted">Coût de la période</span>
+                      <strong className="rounded-lg bg-warning/10 px-2 py-1 text-sm font-bold text-warning">
+                        {formatDA(stat.waived)}
+                      </strong>
+                    </div>
+                  )}
                 </CardBody>
               </Card>
             );
@@ -1626,22 +1637,29 @@ function FreePeriodsPanel() {
             </p>
           </div>
 
-          <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-line p-3 text-xs">
-            <input
-              type="checkbox"
-              checked={payTeachers}
-              onChange={(e) => setPayTeachers(e.target.checked)}
-              className="mt-0.5 h-4 w-4 accent-[var(--primary)]"
-            />
-            <span>
-              <strong className="text-ink">Rémunérer les enseignants normalement</strong>
-              <span className="mt-0.5 block text-muted">
-                Les enseignants payés au pourcentage touchent leur part sur le prix habituel de la
-                séance, même si l&apos;élève n&apos;a rien payé. Décochez pour que la séance offerte
-                ne génère aucune part enseignant.
+          {/* Ce que la gratuité change pour la PAIE d'un enseignant est une
+              décision de direction. Le guichet ne voit pas la question : le
+              réglage garde alors sa valeur — celle déjà enregistrée sur une
+              période qu'on modifie, « rémunérer normalement » sur une nouvelle
+              — exactement comme avant que cette case existe à l'écran. */}
+          {canSeeGains && (
+            <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-line p-3 text-xs">
+              <input
+                type="checkbox"
+                checked={payTeachers}
+                onChange={(e) => setPayTeachers(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-[var(--primary)]"
+              />
+              <span>
+                <strong className="text-ink">Rémunérer les enseignants normalement</strong>
+                <span className="mt-0.5 block text-muted">
+                  Les enseignants payés au pourcentage touchent leur part sur le prix habituel de la
+                  séance, même si l&apos;élève n&apos;a rien payé. Décochez pour que la séance
+                  offerte ne génère aucune part enseignant.
+                </span>
               </span>
-            </span>
-          </label>
+            </label>
+          )}
 
           <label className="flex cursor-pointer items-start gap-2 rounded-xl border border-line p-3 text-xs">
             <input
@@ -1660,8 +1678,8 @@ function FreePeriodsPanel() {
 
           <div className="rounded-xl border border-line bg-primary-50/50 p-3 text-xs text-muted">
             🎁 <strong className="text-ink">Effet au scan :</strong> la carte est acceptée
-            normalement, la présence est enregistrée (et compte pour l&apos;enseignant et les
-            statistiques), mais <strong className="text-ink">aucun montant n&apos;est retiré</strong>{" "}
+            normalement, la présence est enregistrée{canSeeGains && " (et compte pour l'enseignant et les statistiques)"}, mais{" "}
+            <strong className="text-ink">aucun montant n&apos;est retiré</strong>{" "}
             du solde de l&apos;élève. Les absences hebdomadaires ne sont pas facturées non plus sur
             les semaines couvertes.
           </div>
@@ -1708,12 +1726,14 @@ function FreePeriodsPanel() {
                   {STATUS_META[statusOf(viewing)].label}
                 </Badge>
               </div>
-              <div>
-                <span className="block text-[10px] uppercase text-muted">Coût total</span>
-                <span className="font-extrabold text-warning">
-                  {formatDA(statOf(viewing.id).waived)}
-                </span>
-              </div>
+              {canSeeGains && (
+                <div>
+                  <span className="block text-[10px] uppercase text-muted">Coût total</span>
+                  <span className="font-extrabold text-warning">
+                    {formatDA(statOf(viewing.id).waived)}
+                  </span>
+                </div>
+              )}
             </div>
 
             {viewing.description && (
@@ -1753,12 +1773,14 @@ function FreePeriodsPanel() {
                     <span className="text-muted">Élèves concernés:</span>
                     <strong className="text-ink">{statOf(viewing.id).students}</strong>
                   </div>
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="font-semibold text-muted">Coût pour l&apos;école:</span>
-                    <strong className="text-lg font-extrabold text-warning">
-                      {formatDA(statOf(viewing.id).waived)}
-                    </strong>
-                  </div>
+                  {canSeeGains && (
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-semibold text-muted">Coût pour l&apos;école:</span>
+                      <strong className="text-lg font-extrabold text-warning">
+                        {formatDA(statOf(viewing.id).waived)}
+                      </strong>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
