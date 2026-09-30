@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Clock, MapPin, User, Users } from "lucide-react";
 import type { Day, ScheduleSession, SchoolClass } from "@/lib/types";
 import { DAYS } from "@/lib/types";
@@ -71,7 +72,23 @@ export function MatiereTimetable({
   isHighlighted,
   emptyLabel = "Aucun créneau ne correspond aux filtres actuels.",
 }: MatiereTimetableProps) {
-  const { modules, groups, salles, teachers, classes, filieres } = useData();
+  const {
+    modules,
+    groups,
+    salles,
+    teachers,
+    classes,
+    filieres,
+  } = useData(
+    useShallow((s) => ({
+      modules: s.modules,
+      groups: s.groups,
+      salles: s.salles,
+      teachers: s.teachers,
+      classes: s.classes,
+      filieres: s.filieres,
+    })),
+  );
 
   const filiereLabelOf = (id?: string) =>
     id ? filieres.find((f) => f.id === id)?.name ?? "" : "";

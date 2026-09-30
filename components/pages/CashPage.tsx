@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -45,7 +46,25 @@ function inRange(isoDate: string, start: string, end: string): boolean {
 }
 
 export function CashPage() {
-  const { cash, profiles, students, balanceTx, cashMove, deleteFrom, updateItem } = useData();
+  const {
+    cash,
+    profiles,
+    students,
+    balanceTx,
+    cashMove,
+    deleteFrom,
+    updateItem,
+  } = useData(
+    useShallow((s) => ({
+      cash: s.cash,
+      profiles: s.profiles,
+      students: s.students,
+      balanceTx: s.balanceTx,
+      cashMove: s.cashMove,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+    })),
+  );
 
   // Helper for timezone-safe local date string (YYYY-MM-DD)
   const getLocalDateString = (d: Date) => {
@@ -60,6 +79,10 @@ export function CashPage() {
   const [customStart, setCustomStart] = useState(getLocalDateString(new Date()));
   const [customEnd, setCustomEnd] = useState(getLocalDateString(new Date()));
   const [searchQuery, setSearchQuery] = useState("");
+  // La liste suit la frappe avec un temps de retard plutôt que de la bloquer.
+  const deferredQuery = useDeferredValue(searchQuery);
+  /** Lignes affichées dans le tableau (les totaux, eux, portent sur tout). */
+  const [txRowsShown, setTxRowsShown] = useState(300);
   const [activeTab, setActiveTab] = useState<"all" | "students" | "teachers" | "school_expenses" | "manual">("all");
 
   // ---- Encaissements par compte --------------------------------------------
@@ -126,8 +149,8 @@ export function CashPage() {
       if (!inPeriod) return false;
 
       // Filter by search query
-      if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase();
+      if (deferredQuery.trim()) {
+        const query = deferredQuery.toLowerCase();
         return (
           tx.description.toLowerCase().includes(query) ||
           tx.type.toLowerCase().includes(query) ||
@@ -748,7 +771,7 @@ export function CashPage() {
                   </td>
                 </tr>
               ) : (
-                tabTxList.slice().reverse().map((tx) => (
+                tabTxList.slice().reverse().slice(0, txRowsShown).map((tx) => (
                   <tr key={tx.id} className="hover:bg-primary-50/10 transition-colors group">
                     <td className="p-4 pl-6 font-mono text-[10px] text-muted">
                       <div className="flex items-center gap-1.5">
@@ -784,6 +807,17 @@ export function CashPage() {
               )}
             </tbody>
           </table>
+          {tabTxList.length > txRowsShown && (
+            <div className="flex flex-col items-center gap-2 border-t border-line p-4">
+              <span className="text-xs text-muted">
+                {txRowsShown} opérations affichées sur {tabTxList.length} — les totaux ci-dessus portent sur
+                toute la période.
+              </span>
+              <Button size="sm" variant="outline" onClick={() => setTxRowsShown(tabTxList.length)}>
+                Afficher tout ({tabTxList.length})
+              </Button>
+            </div>
+          )}
         </div>
       </div>
 

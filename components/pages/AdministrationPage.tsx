@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { createRoleUser, resetUserPassword } from "@/lib/supabase/createUser";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -130,7 +131,27 @@ export function AdministrationPage() {
     resolveWorkerAbsence,
     payWorkerPeriod,
     deleteWorkerPayment,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      school: s.school,
+      reception: s.reception,
+      workerShifts: s.workerShifts,
+      workerPayments: s.workerPayments,
+      acomptes: s.acomptes,
+      absences: s.absences,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+      scanWorkerCard: s.scanWorkerCard,
+      freezeOpenWorkerShifts: s.freezeOpenWorkerShifts,
+      setWorkerShift: s.setWorkerShift,
+      endWorkerShift: s.endWorkerShift,
+      markWorkerAbsences: s.markWorkerAbsences,
+      resolveWorkerAbsence: s.resolveWorkerAbsence,
+      payWorkerPeriod: s.payWorkerPeriod,
+      deleteWorkerPayment: s.deleteWorkerPayment,
+    })),
+  );
   const { language } = useSettings();
 
   // Modals

@@ -2,6 +2,7 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useSettings } from "@/lib/store/settings";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -73,8 +74,31 @@ const cardTone = (seed: string) => {
  * donné, quelle salle est libre.
  */
 export function RoomsPage() {
-  const { sessions, salles, modules, groups, teachers, classes, filieres, subscriptions, students, school } =
-    useData();
+  const {
+    sessions,
+    salles,
+    modules,
+    groups,
+    teachers,
+    classes,
+    filieres,
+    subscriptions,
+    students,
+    school,
+  } = useData(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      salles: s.salles,
+      modules: s.modules,
+      groups: s.groups,
+      teachers: s.teachers,
+      classes: s.classes,
+      filieres: s.filieres,
+      subscriptions: s.subscriptions,
+      students: s.students,
+      school: s.school,
+    })),
+  );
   const { language } = useSettings();
 
   const [date, setDate] = useState<string>(() => isoDateOf(new Date()));

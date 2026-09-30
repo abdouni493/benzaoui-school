@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { createRoleUser, resetUserPassword } from "@/lib/supabase/createUser";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -19,7 +20,21 @@ import {
 import { isSendablePhone } from "@/lib/whatsapp/phone";
 
 export function ParentsPage() {
-  const { parents, students, push, deleteFrom, updateItem } = useData();
+  const {
+    parents,
+    students,
+    push,
+    deleteFrom,
+    updateItem,
+  } = useData(
+    useShallow((s) => ({
+      parents: s.parents,
+      students: s.students,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+    })),
+  );
 
   // Search
   const [searchQuery, setSearchQuery] = useState("");

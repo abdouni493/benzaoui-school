@@ -29,6 +29,26 @@ npm run dev
    liste de ce qui manque encore** (résultat vide = base à jour). Une migration oubliée se
    manifeste sinon par un `400` sur `/rest/v1/rpc/...` — typiquement au scan des élèves.
 
+### Synchronisation des données (vitesse)
+
+L'application garde une copie des tables de l'école dans le navigateur (`lib/store/data.ts`).
+Depuis la migration **`20261001_fast_sync_and_rls_speed.sql`**, elle ne la relit plus en entier :
+
+- chaque table porte un `updated_at` tenu par la base, et les suppressions laissent une trace
+  (`sync_deletions`) ;
+- après une écriture (scan, versement, pointage…), `sync_changes(curseur)` rend **en une seule
+  requête** uniquement les lignes changées ;
+- une synchronisation de fond tourne toutes les 30 s (onglet visible) : le scan fait au guichet
+  apparaît chez l'administrateur sans recharger la page ; une relecture complète de contrôle
+  passe toutes les 30 min ;
+- une copie locale (IndexedDB, effacée à la déconnexion, **sans** les mots de passe du portail)
+  fait s'ouvrir l'application instantanément, puis seules les lignes changées sont téléchargées.
+
+**Sans cette migration, tout continue de fonctionner** : l'application retombe sur la relecture
+complète d'avant (en console : « sync_changes absente »). La migration réécrit aussi les policies
+RLS pour qu'elles soient évaluées une fois par requête au lieu d'une fois par ligne, sans rien
+changer aux droits. Elle se termine par un inventaire : **résultat vide = tout est en place**.
+
 ## Messages WhatsApp (Evolution API — passerelle auto-hébergée)
 
 Les fiches élèves et parents envoient des messages WhatsApp (alerte de dette, solde épuisé, solde

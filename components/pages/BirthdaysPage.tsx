@@ -26,6 +26,7 @@ import { Button } from "@/components/ui/Button";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useSettings } from "@/lib/store/settings";
 import { useTodayBirthdays } from "@/lib/useTodayBirthdays";
 import { birthdayIsoIn, isBirthdayOn, monthDayOf, upcomingBirthdays } from "@/lib/birthdays";
@@ -77,7 +78,21 @@ const inDaysLabel = (n: number) =>
   n === 0 ? "aujourd'hui" : n === 1 ? "demain" : `dans ${n} jours`;
 
 export function BirthdaysPage() {
-  const { students, modules, salles, teachers, school } = useData();
+  const {
+    students,
+    modules,
+    salles,
+    teachers,
+    school,
+  } = useData(
+    useShallow((s) => ({
+      students: s.students,
+      modules: s.modules,
+      salles: s.salles,
+      teachers: s.teachers,
+      school: s.school,
+    })),
+  );
   const { language } = useSettings();
   const { date, expected, away } = useTodayBirthdays();
 

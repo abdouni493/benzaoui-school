@@ -2,6 +2,7 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/SearchInput";
@@ -400,7 +401,33 @@ export function ReportsPage() {
     privateSessionStudents,
     filieres,
     profiles,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      cash: s.cash,
+      students: s.students,
+      unpaidTeacher: s.unpaidTeacher,
+      expenses: s.expenses,
+      teachers: s.teachers,
+      modules: s.modules,
+      sessions: s.sessions,
+      classes: s.classes,
+      reception: s.reception,
+      acomptes: s.acomptes,
+      absences: s.absences,
+      balanceTx: s.balanceTx,
+      attendance: s.attendance,
+      independent: s.independent,
+      coursework: s.coursework,
+      subscriptions: s.subscriptions,
+      categories: s.categories,
+      parents: s.parents,
+      privateSessions: s.privateSessions,
+      privateSessionModules: s.privateSessionModules,
+      privateSessionStudents: s.privateSessionStudents,
+      filieres: s.filieres,
+      profiles: s.profiles,
+    })),
+  );
 
   const [startDate, setStartDate] = useState(
     new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split("T")[0],

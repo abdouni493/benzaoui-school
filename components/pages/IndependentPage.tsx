@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -145,7 +146,26 @@ export function IndependentPage() {
     deleteFrom,
     updateItem,
     chargeStudent,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      school: s.school,
+      independent: s.independent,
+      teachers: s.teachers,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      sessions: s.sessions,
+      modules: s.modules,
+      classes: s.classes,
+      filieres: s.filieres,
+      groups: s.groups,
+      salles: s.salles,
+      freePeriods: s.freePeriods,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+      chargeStudent: s.chargeStudent,
+    })),
+  );
   const { language } = useSettings();
   /** Un compte de réception encaisse ; il ne voit pas ce que l'école gagne. */
   const canSeeGains = useCanSeeGains();

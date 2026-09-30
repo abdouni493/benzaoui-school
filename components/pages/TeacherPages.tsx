@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useSession } from "@/lib/store/session";
 import { useToast } from "@/lib/store/toast";
 import { changeOwnPassword } from "@/lib/supabase/createUser";
@@ -57,7 +58,26 @@ export function TeacherPages({ slug }: PageProps) {
     push,
     deleteFrom,
     updateItem,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      teachers: s.teachers,
+      sessions: s.sessions,
+      modules: s.modules,
+      classes: s.classes,
+      groups: s.groups,
+      announcements: s.announcements,
+      unpaidTeacher: s.unpaidTeacher,
+      acomptes: s.acomptes,
+      absences: s.absences,
+      cash: s.cash,
+      students: s.students,
+      attendance: s.attendance,
+      subjects: s.subjects,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+    })),
+  );
 
   const teacher = teachers.find((t) => t.id === user?.entityId);
 
@@ -273,7 +293,9 @@ function TeacherScheduleView({
   teacherSessions: ScheduleSession[];
   getSessionInfo: (s: ScheduleSession) => any;
 }) {
-  const { salles, students, subscriptions } = useData();
+  const { salles, students, subscriptions } = useData(
+    useShallow((s) => ({ salles: s.salles, students: s.students, subscriptions: s.subscriptions })),
+  );
   const allDays = ["saturday", "sunday", "monday", "tuesday", "wednesday", "thursday", "friday"];
   const [filterSessionId, setFilterSessionId] = useState("");
   const [selectedSession, setSelectedSession] = useState<any | null>(null);
@@ -521,7 +543,9 @@ function TeacherAttendanceView({
 }) {
   const [activeSession, setActiveSession] = useState<ScheduleSession | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
-  const { markAttendance } = useData();
+  const { markAttendance } = useData(
+    useShallow((s) => ({ markAttendance: s.markAttendance })),
+  );
   const { addToast } = useToast();
 
   // Enrolled students for selected session group

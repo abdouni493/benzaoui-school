@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useSession } from "@/lib/store/session";
 import { changeOwnPassword } from "@/lib/supabase/createUser";
 import { MatiereTimetable } from "@/components/timetable/MatiereTimetable";
@@ -63,7 +64,23 @@ export function StudentPages({ slug }: PageProps) {
     absencePenalties,
     subjects,
     updateItem,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      students: s.students,
+      subscriptions: s.subscriptions,
+      sessions: s.sessions,
+      modules: s.modules,
+      classes: s.classes,
+      groups: s.groups,
+      salles: s.salles,
+      announcements: s.announcements,
+      balanceTx: s.balanceTx,
+      attendance: s.attendance,
+      absencePenalties: s.absencePenalties,
+      subjects: s.subjects,
+      updateItem: s.updateItem,
+    })),
+  );
 
   const student = students.find((s) => s.id === user?.entityId);
 
@@ -292,7 +309,25 @@ function StudentScheduleView({
   student: Student;
   activeSubs: Subscription[];
 }) {
-  const { sessions, classes, groups, modules, salles, teachers, filieres } = useData();
+  const {
+    sessions,
+    classes,
+    groups,
+    modules,
+    salles,
+    teachers,
+    filieres,
+  } = useData(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      classes: s.classes,
+      groups: s.groups,
+      modules: s.modules,
+      salles: s.salles,
+      teachers: s.teachers,
+      filieres: s.filieres,
+    })),
+  );
   const [selected, setSelected] = useState<ScheduleSession | null>(null);
   const [scopeMode, setScopeMode] = useState<"level" | "mine">("level");
 

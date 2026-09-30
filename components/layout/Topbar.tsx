@@ -5,6 +5,7 @@ import { ThemeToggle } from "@/components/controls/ThemeToggle";
 import { LanguageSwitcher } from "@/components/controls/LanguageSwitcher";
 import { useSession } from "@/lib/store/session";
 import { useTranslation } from "@/lib/i18n/useTranslation";
+import { SyncIndicator } from "@/components/providers/DataSyncAgent";
 
 export function Topbar({ onMenu }: { onMenu: () => void }) {
   const { t } = useTranslation();
@@ -34,6 +35,7 @@ export function Topbar({ onMenu }: { onMenu: () => void }) {
           l'écran Étudiants (« Scanner RFID »), et le lecteur physique reste
           écouté en permanence par GlobalRFIDListener, sur toutes les pages. */}
       <div className="ms-auto flex items-center gap-2 md:gap-3">
+        <SyncIndicator />
         <LanguageSwitcher />
         <ThemeToggle />
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Gift } from "lucide-react";
 import { formatDateFr } from "@/lib/helpers";
 
@@ -17,7 +18,9 @@ import { formatDateFr } from "@/lib/helpers";
  * autres. Elle ne s'affiche que quand une gratuité est réellement active.
  */
 export function FreeBillingBanner({ date }: { date?: string }) {
-  const { freePeriods, sessions } = useData();
+  const { freePeriods, sessions } = useData(
+    useShallow((s) => ({ freePeriods: s.freePeriods, sessions: s.sessions })),
+  );
 
   const day = date ?? new Date().toLocaleDateString("fr-CA");
 

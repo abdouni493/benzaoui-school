@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { createClient } from "@/lib/supabase/client";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -117,7 +118,24 @@ export function PlannerPage() {
     updateItem,
     repriceSession,
     applyOfferedRules,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      school: s.school,
+      sessions: s.sessions,
+      classes: s.classes,
+      modules: s.modules,
+      groups: s.groups,
+      salles: s.salles,
+      teachers: s.teachers,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+      repriceSession: s.repriceSession,
+      applyOfferedRules: s.applyOfferedRules,
+    })),
+  );
   const { language } = useSettings();
 
   // View mode toggle

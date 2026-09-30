@@ -1,23 +1,72 @@
 "use client";
 
-import { useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Trash2, Edit, Eye, Plus, MoreVertical } from "lucide-react";
+import { ClassDetailsModal } from "@/components/classes/ClassDetailsModal";
+import {
+  AlertTriangle,
+  CalendarDays,
+  Edit,
+  Eye,
+  MoreVertical,
+  Plus,
+  Search,
+  Trash2,
+  Users,
+  Wallet,
+} from "lucide-react";
+import {
+  COURS_LEVEL_LABELS,
+  isExpiredOpenSeance,
+  normalizeSearchText,
+  studentDebtOf,
+  type StudentDebt,
+} from "@/lib/helpers";
+import { buildSessionStats, sessionsOfClass, summarizeClass, type ClassSummary } from "@/lib/classStats";
 import type { SchoolClass, CoursLevel, FormationLevel } from "@/lib/types";
 
+type SortKey = "name" | "students" | "debt";
+
 export function ClassesPage() {
-  const { classes, filieres, students, subscriptions, sessions, push, deleteFrom, updateItem } = useData();
+  const {
+    classes,
+    filieres,
+    students,
+    subscriptions,
+    sessions,
+    attendance,
+    absencePenalties,
+    unpaidTeacher,
+    push,
+    deleteFrom,
+    updateItem,
+  } = useData(
+    useShallow((s) => ({
+      classes: s.classes,
+      filieres: s.filieres,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      sessions: s.sessions,
+      attendance: s.attendance,
+      absencePenalties: s.absencePenalties,
+      unpaidTeacher: s.unpaidTeacher,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+    })),
+  );
 
   // Modal states
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
-  const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+  const [detailsClassId, setDetailsClassId] = useState<string | null>(null);
   const [selectedClass, setSelectedClass] = useState<SchoolClass | null>(null);
 
   // Form states
@@ -39,20 +88,52 @@ export function ClassesPage() {
   // Active menu dropdown index
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
 
-  // List filter by filière
+  // List filters
   const [filterFiliereId, setFilterFiliereId] = useState<string>("all");
+  const [filterType, setFilterType] = useState<"all" | "cours" | "formation">("all");
+  const [search, setSearch] = useState("");
+  const deferredSearch = useDeferredValue(search);
+  const [sort, setSort] = useState<SortKey>("name");
 
-  // Helpers
-  const getStudentCount = (classId: string) => {
-    return students.filter((student) =>
-      student.subscriptionIds.some((subId) => {
-        const sub = subscriptions.find((s) => s.id === subId);
-        if (!sub) return false;
-        const session = sessions.find((s) => s.id === sub.sessionId);
-        return session?.classId === classId;
-      })
-    ).length;
-  };
+  // ---- Les chiffres de TOUTES les classes, en une passe ---------------------------
+  // (l'ancien écran reparcourait élèves × abonnements × créneaux pour chaque
+  // carte, à chaque rendu)
+  const debtById = useMemo(() => {
+    const map = new Map<string, StudentDebt>();
+    for (const s of students) map.set(s.id, studentDebtOf(s));
+    return map;
+  }, [students]);
+
+  const summaries = useMemo(() => {
+    const stats = buildSessionStats({
+      sessions,
+      subscriptions,
+      students,
+      attendance,
+      absencePenalties,
+      unpaidTeacher,
+      debtOf: (s) => debtById.get(s.id) ?? studentDebtOf(s),
+    });
+    const out = new Map<string, ClassSummary>();
+    for (const cls of classes) {
+      // Les séances libres terminées ne comptent plus dans les chiffres courants.
+      const current = sessionsOfClass(sessions, cls.id).filter((s) => !isExpiredOpenSeance(s));
+      out.set(cls.id, summarizeClass(current, stats, (id) => debtById.get(id)));
+    }
+    return out;
+  }, [classes, sessions, subscriptions, students, attendance, absencePenalties, unpaidTeacher, debtById]);
+
+  const overall = useMemo(() => {
+    const studentsSet = new Set<string>();
+    const debtorSet = new Set<string>();
+    for (const s of summaries.values()) {
+      s.studentIds.forEach((id) => studentsSet.add(id));
+      s.debtorIds.forEach((id) => debtorSet.add(id));
+    }
+    let totalDebt = 0;
+    for (const id of debtorSet) totalDebt += debtById.get(id)?.total ?? 0;
+    return { students: studentsSet.size, debtors: debtorSet.size, totalDebt };
+  }, [summaries, debtById]);
 
   const getFiliereName = (fid?: string) => {
     return filieres.find((f) => f.id === fid)?.name ?? "-";
@@ -140,8 +221,7 @@ export function ClassesPage() {
   };
 
   const openDetails = (cls: SchoolClass) => {
-    setSelectedClass(cls);
-    setIsDetailsOpen(true);
+    setDetailsClassId(cls.id);
     setActiveMenuId(null);
   };
 
@@ -159,46 +239,91 @@ export function ClassesPage() {
     return ["1er", "2eme", "3eme"]; // lycée
   };
 
-  // Filter students enrolled in selected class
-  const getClassStudents = (classId: string) => {
-    return students.filter((student) =>
-      student.subscriptionIds.some((subId) => {
-        const sub = subscriptions.find((s) => s.id === subId);
-        if (!sub) return false;
-        const session = sessions.find((s) => s.id === sub.sessionId);
-        return session?.classId === classId;
-      })
-    );
-  };
+  // Classes shown in the grid: filière, type, search, then the chosen order.
+  const visibleClasses = useMemo(() => {
+    const q = normalizeSearchText(deferredSearch.trim());
+    const list = classes.filter((c) => {
+      if (filterFiliereId !== "all" && c.filiereId !== filterFiliereId) return false;
+      if (filterType !== "all" && c.type !== filterType) return false;
+      if (!q) return true;
+      const fil = c.filiereId ? filieres.find((f) => f.id === c.filiereId)?.name ?? "" : "";
+      const level = c.coursLevel ? COURS_LEVEL_LABELS[c.coursLevel] : c.formationLevel ?? "";
+      return normalizeSearchText(`${c.name} ${fil} ${level} ${c.description}`).includes(q);
+    });
+    const studentCount = (c: SchoolClass) => summaries.get(c.id)?.studentIds.length ?? 0;
+    const debt = (c: SchoolClass) => summaries.get(c.id)?.totalDebt ?? 0;
+    return list.sort((a, b) => {
+      if (sort === "students") return studentCount(b) - studentCount(a) || a.name.localeCompare(b.name);
+      if (sort === "debt") return debt(b) - debt(a) || a.name.localeCompare(b.name);
+      return a.name.localeCompare(b.name, "fr", { numeric: true });
+    });
+  }, [classes, filieres, filterFiliereId, filterType, deferredSearch, sort, summaries]);
 
-  // Filter sessions (emploi) associated with class
-  const getClassSessions = (classId: string) => {
-    return sessions.filter((s) => s.classId === classId);
-  };
-
-  // Classes shown in the grid, filtered by the selected filière
-  const visibleClasses =
-    filterFiliereId === "all"
-      ? classes
-      : classes.filter((c) => c.filiereId === filterFiliereId);
+  const filtersActive = filterFiliereId !== "all" || filterType !== "all" || search.trim() !== "";
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <PageHeader emoji="🏫" title="Classes" subtitle="Gérer les classes et formations" />
-        <Button onClick={() => { resetForm(); setIsCreateOpen(true); }} className="flex items-center gap-2">
+        <Button
+          onClick={() => {
+            resetForm();
+            setIsCreateOpen(true);
+          }}
+          className="flex items-center gap-2"
+        >
           <Plus className="h-4 w-4" /> Nouvelle Classe
         </Button>
       </div>
 
-      {/* Filter by filière */}
-      <div className="mb-6 flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold text-muted">Filtrer par filière :</span>
-        <Select
-          value={filterFiliereId}
-          onChange={(e) => setFilterFiliereId(e.target.value)}
-          className="min-w-[200px]"
-        >
+      {/* Chiffres de toutes les classes */}
+      <div className="mb-6 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <SummaryTile label="Classes" value={classes.length} icon="🏫" tone="primary" />
+        <SummaryTile label="Élèves inscrits" value={overall.students} icon="🎓" tone="success" />
+        <SummaryTile
+          label="Élèves en dette"
+          value={overall.debtors}
+          icon="⚠️"
+          tone={overall.debtors > 0 ? "danger" : "success"}
+        />
+        <SummaryTile
+          label="Dettes à recouvrer"
+          value={`${overall.totalDebt} DA`}
+          icon="💰"
+          tone={overall.totalDebt > 0 ? "warning" : "success"}
+        />
+      </div>
+
+      {/* Filtres */}
+      <div className="mb-6 flex flex-wrap items-center gap-2 rounded-2xl border border-line bg-surface p-3">
+        <div className="relative min-w-[200px] flex-1">
+          <Search className="pointer-events-none absolute top-1/2 h-4 w-4 -translate-y-1/2 text-muted ltr:left-3 rtl:right-3" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Rechercher une classe (nom, niveau, filière)…"
+            className="ltr:pl-9 rtl:pr-9"
+          />
+        </div>
+        <div className="flex gap-1">
+          {(
+            [
+              ["all", "Toutes"],
+              ["cours", "Cours"],
+              ["formation", "Formations"],
+            ] as const
+          ).map(([key, label]) => (
+            <Button
+              key={key}
+              size="sm"
+              variant={filterType === key ? "primary" : "outline"}
+              onClick={() => setFilterType(key)}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+        <Select value={filterFiliereId} onChange={(e) => setFilterFiliereId(e.target.value)} className="min-w-[180px]">
           <option value="all">Toutes les filières</option>
           {filieres.map((f) => (
             <option key={f.id} value={f.id}>
@@ -206,9 +331,18 @@ export function ClassesPage() {
             </option>
           ))}
         </Select>
-        {filterFiliereId !== "all" && (
+        <Select value={sort} onChange={(e) => setSort(e.target.value as SortKey)} className="min-w-[160px]">
+          <option value="name">Trier par nom</option>
+          <option value="students">Plus d&apos;élèves</option>
+          <option value="debt">Plus de dettes</option>
+        </Select>
+        {filtersActive && (
           <button
-            onClick={() => setFilterFiliereId("all")}
+            onClick={() => {
+              setFilterFiliereId("all");
+              setFilterType("all");
+              setSearch("");
+            }}
             className="text-xs text-primary hover:underline"
           >
             Réinitialiser
@@ -220,69 +354,111 @@ export function ClassesPage() {
       </div>
 
       {/* Grid of classes */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 xl:grid-cols-3">
         {visibleClasses.map((cls) => {
-          const studentCount = getStudentCount(cls.id);
+          const summary = summaries.get(cls.id);
+          const studentCount = summary?.studentIds.length ?? 0;
+          const debtors = summary?.debtorIds.length ?? 0;
+          const fil = cls.filiereId ? getFiliereName(cls.filiereId) : "";
           return (
-            <Card key={cls.id} className="relative overflow-visible">
-              <CardBody className="flex flex-col justify-between h-48">
-                <div>
-                  <div className="flex items-start justify-between">
-                    <div>
+            <Card key={cls.id} className="relative flex flex-col overflow-visible">
+              <CardBody className="flex flex-1 flex-col gap-3">
+                <div className="flex items-start justify-between gap-2">
+                  <button type="button" onClick={() => openDetails(cls)} className="min-w-0 text-start">
+                    <div className="flex flex-wrap items-center gap-1.5">
                       <Badge tone={cls.type === "cours" ? "primary" : "success"}>
                         {cls.type === "cours" ? "Cours" : "Formation"}
                       </Badge>
-                      <h3 className="text-xl font-bold mt-2 text-ink truncate max-w-[200px]">
-                        {cls.name}
-                      </h3>
-                    </div>
-                    {/* Action Menu (Three dots) */}
-                    <div className="relative">
-                      <button
-                        onClick={() => setActiveMenuId(activeMenuId === cls.id ? null : cls.id)}
-                        className="p-1 rounded-lg hover:bg-primary-50 text-muted hover:text-ink transition-colors"
-                      >
-                        <MoreVertical className="h-5 w-5" />
-                      </button>
-                      {activeMenuId === cls.id && (
-                        <>
-                          <div className="fixed inset-0 z-10" onClick={() => setActiveMenuId(null)} />
-                          <div className="absolute right-0 mt-1 w-36 bg-surface border border-line rounded-xl shadow-lg z-20 overflow-hidden">
-                            <button
-                              onClick={() => openDetails(cls)}
-                              className="flex items-center gap-2 w-full px-4 py-2 text-sm text-ink hover:bg-primary-50 text-left"
-                            >
-                              <Eye className="h-4 w-4" /> Détails
-                            </button>
-                            <button
-                              onClick={() => openEdit(cls)}
-                              className="flex items-center gap-2 w-full px-4 py-2 text-sm text-ink hover:bg-primary-50 text-left"
-                            >
-                              <Edit className="h-4 w-4" /> Modifier
-                            </button>
-                            <button
-                              onClick={() => handleDelete(cls.id)}
-                              className="flex items-center gap-2 w-full px-4 py-2 text-sm text-danger hover:bg-danger/10 text-left"
-                            >
-                              <Trash2 className="h-4 w-4" /> Supprimer
-                            </button>
-                          </div>
-                        </>
+                      {cls.type === "cours" && cls.coursLevel && (
+                        <span className="rounded-md border border-line px-1.5 py-0.5 text-[10px] font-semibold text-muted">
+                          {COURS_LEVEL_LABELS[cls.coursLevel]}
+                        </span>
+                      )}
+                      {fil && fil !== "-" && (
+                        <span className="rounded-md border border-line px-1.5 py-0.5 text-[10px] font-semibold text-muted">
+                          {fil}
+                        </span>
+                      )}
+                      {cls.type === "formation" && cls.formationLevel && (
+                        <span className="rounded-md border border-line px-1.5 py-0.5 text-[10px] font-semibold text-muted">
+                          Niveau {cls.formationLevel}
+                        </span>
                       )}
                     </div>
+                    <h3 className="mt-2 truncate text-lg font-bold text-ink hover:text-primary">{cls.name}</h3>
+                  </button>
+                  {/* Action Menu (Three dots) */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setActiveMenuId(activeMenuId === cls.id ? null : cls.id)}
+                      className="rounded-lg p-1 text-muted transition-colors hover:bg-primary-50 hover:text-ink"
+                      aria-label="Actions"
+                    >
+                      <MoreVertical className="h-5 w-5" />
+                    </button>
+                    {activeMenuId === cls.id && (
+                      <>
+                        <div className="fixed inset-0 z-10" onClick={() => setActiveMenuId(null)} />
+                        <div className="absolute right-0 z-20 mt-1 w-40 overflow-hidden rounded-xl border border-line bg-surface shadow-lg">
+                          <button
+                            onClick={() => openDetails(cls)}
+                            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-ink hover:bg-primary-50"
+                          >
+                            <Eye className="h-4 w-4" /> Détails
+                          </button>
+                          <button
+                            onClick={() => openEdit(cls)}
+                            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-ink hover:bg-primary-50"
+                          >
+                            <Edit className="h-4 w-4" /> Modifier
+                          </button>
+                          <button
+                            onClick={() => handleDelete(cls.id)}
+                            className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-danger hover:bg-danger/10"
+                          >
+                            <Trash2 className="h-4 w-4" /> Supprimer
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
-                  <p className="text-sm text-muted mt-2 line-clamp-2">{cls.description || "Aucune description"}</p>
                 </div>
-                <div className="border-t border-line pt-3 mt-3 flex items-center justify-between text-xs text-muted">
-                  <span>
-                    Niveau:{" "}
-                    <strong className="text-ink font-semibold">
-                      {cls.type === "cours" ? cls.coursLevel : cls.formationLevel}
-                    </strong>
-                  </span>
-                  <span className="text-primary font-bold text-sm bg-primary-50 px-2 py-1 rounded-lg">
-                    {studentCount} {studentCount > 1 ? "Étudiants" : "Étudiant"}
-                  </span>
+
+                <p className="line-clamp-2 text-xs text-muted">{cls.description || "Aucune description"}</p>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <MiniStat icon={<Users className="h-3.5 w-3.5" />} label="Élèves" value={studentCount} />
+                  <MiniStat
+                    icon={<CalendarDays className="h-3.5 w-3.5" />}
+                    label="Emplois"
+                    value={summary?.sessionIds.length ?? 0}
+                  />
+                  <MiniStat
+                    icon={<Wallet className="h-3.5 w-3.5" />}
+                    label="Dettes"
+                    value={`${summary?.totalDebt ?? 0} DA`}
+                    danger={(summary?.totalDebt ?? 0) > 0}
+                  />
+                </div>
+
+                {debtors > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => openDetails(cls)}
+                    className="flex items-center justify-between gap-2 rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-start transition-colors hover:bg-danger/15"
+                  >
+                    <span className="flex items-center gap-1.5 text-[11px] font-bold text-danger">
+                      <AlertTriangle className="h-3.5 w-3.5 animate-pulse" />
+                      {debtors} élève(s) en dette
+                    </span>
+                    <span className="text-[10px] font-semibold text-danger underline">Voir</span>
+                  </button>
+                )}
+
+                <div className="mt-auto pt-1">
+                  <Button className="w-full" onClick={() => openDetails(cls)}>
+                    <Eye className="h-4 w-4" /> Voir les détails
+                  </Button>
                 </div>
               </CardBody>
             </Card>
@@ -292,15 +468,29 @@ export function ClassesPage() {
 
       {visibleClasses.length === 0 && (
         <div className="rounded-2xl border border-dashed border-line py-14 text-center">
-          <p className="text-sm text-muted">Aucune classe pour cette filière.</p>
+          <p className="text-sm text-muted">
+            {classes.length === 0
+              ? "Aucune classe. Créez la première avec « Nouvelle Classe »."
+              : "Aucune classe pour ces filtres."}
+          </p>
         </div>
       )}
+
+      {/* Fiche d'une classe : emplois du temps, élèves, dettes, paiements */}
+      <ClassDetailsModal
+        classId={detailsClassId}
+        onClose={() => setDetailsClassId(null)}
+        onEdit={(cls) => {
+          setDetailsClassId(null);
+          openEdit(cls);
+        }}
+      />
 
       {/* Creation Modal */}
       <Modal open={isCreateOpen} onClose={() => setIsCreateOpen(false)} title="Créer une nouvelle classe">
         <div className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Type de classe</label>
+            <label className="mb-1 block text-xs font-semibold text-muted">Type de classe</label>
             <div className="grid grid-cols-2 gap-2">
               <Button
                 variant={type === "cours" ? "primary" : "outline"}
@@ -322,7 +512,7 @@ export function ClassesPage() {
           {type === "cours" ? (
             <>
               <div>
-                <label className="block text-xs font-semibold text-muted mb-1 font-sans">Niveau scolaire</label>
+                <label className="mb-1 block font-sans text-xs font-semibold text-muted">Niveau scolaire</label>
                 <Select
                   value={coursLevel}
                   onChange={(e) => {
@@ -338,7 +528,7 @@ export function ClassesPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Année</label>
+                <label className="mb-1 block text-xs font-semibold text-muted">Année</label>
                 <Select value={year} onChange={(e) => setYear(e.target.value)} className="w-full">
                   {getYearOptions().map((opt) => (
                     <option key={opt} value={opt}>
@@ -349,7 +539,7 @@ export function ClassesPage() {
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
+                <div className="mb-1 flex items-center justify-between">
                   <label className="block text-xs font-semibold text-muted">Filière</label>
                   <button
                     onClick={() => setShowAddFiliere(!showAddFiliere)}
@@ -386,21 +576,14 @@ export function ClassesPage() {
           ) : (
             <>
               <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Nom de la classe</label>
-                <Input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Ex: Anglais débutants A1"
-                />
+                <label className="mb-1 block text-xs font-semibold text-muted">Nom de la classe</label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: Anglais débutants A1" />
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
+                <div className="mb-1 flex items-center justify-between">
                   <label className="block text-xs font-semibold text-muted">Niveau de formation</label>
-                  <button
-                    onClick={() => setShowAddLevel(!showAddLevel)}
-                    className="text-xs text-primary hover:underline"
-                  >
+                  <button onClick={() => setShowAddLevel(!showAddLevel)} className="text-xs text-primary hover:underline">
                     + Nouveau niveau
                   </button>
                 </div>
@@ -434,7 +617,7 @@ export function ClassesPage() {
           )}
 
           <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Description</label>
+            <label className="mb-1 block text-xs font-semibold text-muted">Description</label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -457,7 +640,7 @@ export function ClassesPage() {
       <Modal open={isEditOpen} onClose={() => setIsEditOpen(false)} title="Modifier la classe">
         <div className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Type de classe</label>
+            <label className="mb-1 block text-xs font-semibold text-muted">Type de classe</label>
             <div className="grid grid-cols-2 gap-2">
               <Button
                 variant={type === "cours" ? "primary" : "outline"}
@@ -479,7 +662,7 @@ export function ClassesPage() {
           {type === "cours" ? (
             <>
               <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Niveau scolaire</label>
+                <label className="mb-1 block text-xs font-semibold text-muted">Niveau scolaire</label>
                 <Select
                   value={coursLevel}
                   onChange={(e) => {
@@ -495,7 +678,7 @@ export function ClassesPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Année</label>
+                <label className="mb-1 block text-xs font-semibold text-muted">Année</label>
                 <Select value={year} onChange={(e) => setYear(e.target.value)} className="w-full">
                   {getYearOptions().map((opt) => (
                     <option key={opt} value={opt}>
@@ -506,7 +689,7 @@ export function ClassesPage() {
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
+                <div className="mb-1 flex items-center justify-between">
                   <label className="block text-xs font-semibold text-muted">Filière</label>
                   <button
                     onClick={() => setShowAddFiliere(!showAddFiliere)}
@@ -543,16 +726,12 @@ export function ClassesPage() {
           ) : (
             <>
               <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Nom de la classe</label>
-                <Input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Ex: Anglais débutants A1"
-                />
+                <label className="mb-1 block text-xs font-semibold text-muted">Nom de la classe</label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex: Anglais débutants A1" />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Niveau de formation</label>
+                <label className="mb-1 block text-xs font-semibold text-muted">Niveau de formation</label>
                 <Select
                   value={formationLevel}
                   onChange={(e) => setFormationLevel(e.target.value as FormationLevel)}
@@ -569,7 +748,7 @@ export function ClassesPage() {
           )}
 
           <div>
-            <label className="block text-xs font-semibold text-muted mb-1">Description</label>
+            <label className="mb-1 block text-xs font-semibold text-muted">Description</label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -587,110 +766,58 @@ export function ClassesPage() {
           </div>
         </div>
       </Modal>
+    </div>
+  );
+}
 
-      {/* Details Modal */}
-      <Modal open={isDetailsOpen} onClose={() => setIsDetailsOpen(false)} title="Détails de la classe" wide>
-        {selectedClass && (
-          <div className="space-y-6">
-            {/* Header info */}
-            <div className="bg-primary-50/50 rounded-xl p-4 border border-line grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div>
-                <span className="text-xs text-muted block">Nom / Année</span>
-                <span className="font-bold text-ink">{selectedClass.name}</span>
-              </div>
-              <div>
-                <span className="text-xs text-muted block">Type</span>
-                <Badge tone={selectedClass.type === "cours" ? "primary" : "success"}>
-                  {selectedClass.type === "cours" ? "Cours" : "Formation"}
-                </Badge>
-              </div>
-              <div>
-                <span className="text-xs text-muted block">Niveau</span>
-                <span className="font-semibold text-ink">
-                  {selectedClass.type === "cours" ? selectedClass.coursLevel : selectedClass.formationLevel}
-                </span>
-              </div>
-              {selectedClass.type === "cours" && selectedClass.filiereId && (
-                <div>
-                  <span className="text-xs text-muted block">Filière</span>
-                  <span className="font-semibold text-ink">{getFiliereName(selectedClass.filiereId)}</span>
-                </div>
-              )}
-            </div>
+const SUMMARY_TONES = {
+  primary: "bg-gradient-primary",
+  success: "bg-gradient-success",
+  warning: "bg-gradient-warning",
+  danger: "bg-gradient-danger",
+} as const;
 
-            <div>
-              <span className="text-xs text-muted block font-semibold mb-1">Description</span>
-              <p className="text-sm text-ink bg-surface border border-line rounded-xl p-3">
-                {selectedClass.description || "Aucune description fournie."}
-              </p>
-            </div>
+function SummaryTile({
+  label,
+  value,
+  icon,
+  tone,
+}: {
+  label: string;
+  value: string | number;
+  icon: string;
+  tone: keyof typeof SUMMARY_TONES;
+}) {
+  return (
+    <div className={`${SUMMARY_TONES[tone]} relative overflow-hidden rounded-2xl p-4 text-white card-shadow`}>
+      <span className="absolute -end-2 -top-2 text-5xl opacity-20">{icon}</span>
+      <p className="text-[11px] font-bold uppercase tracking-wide text-white/85">{label}</p>
+      <p className="mt-1 text-2xl font-black">{value}</p>
+    </div>
+  );
+}
 
-            {/* Grid of Sessions & Students tabs */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Sessions List */}
-              <div className="border border-line rounded-xl p-4 bg-surface/50">
-                <h4 className="font-bold text-ink mb-3 flex items-center gap-2">
-                  📅 Emploi du temps ({getClassSessions(selectedClass.id).length})
-                </h4>
-                {getClassSessions(selectedClass.id).length === 0 ? (
-                  <p className="text-xs text-muted italic">Aucun emploi du temps affecté à cette classe.</p>
-                ) : (
-                  <div className="space-y-2 max-h-60 overflow-y-auto">
-                    {getClassSessions(selectedClass.id).map((s) => {
-                      const mod = sessions.find((se) => se.id === s.id)?.moduleId;
-                      const modName = useData.getState().modules.find((m) => m.id === mod)?.name ?? "Module";
-                      const tName = useData.getState().teachers.find((t) => t.id === s.teacherId);
-                      return (
-                        <div key={s.id} className="text-xs bg-surface border border-line p-2.5 rounded-lg space-y-1">
-                          <div className="flex justify-between font-bold text-ink">
-                            <span>{modName}</span>
-                            <span>{s.startTime} - {s.endTime}</span>
-                          </div>
-                          <div className="text-muted flex justify-between">
-                            <span>Ens: {tName ? `${tName.firstName} ${tName.lastName}` : "-"}</span>
-                            <span>Salle: {useData.getState().salles.find((sl) => sl.id === s.salleId)?.name ?? "-"}</span>
-                          </div>
-                          <div className="text-[10px] text-primary font-semibold">
-                            {s.days.map((d) => d.substring(0, 3).toUpperCase()).join(", ")}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Students List */}
-              <div className="border border-line rounded-xl p-4 bg-surface/50">
-                <h4 className="font-bold text-ink mb-3 flex items-center gap-2">
-                  🎓 Étudiants Inscrits ({getClassStudents(selectedClass.id).length})
-                </h4>
-                {getClassStudents(selectedClass.id).length === 0 ? (
-                  <p className="text-xs text-muted italic">Aucun étudiant inscrit dans cette classe.</p>
-                ) : (
-                  <div className="space-y-2 max-h-60 overflow-y-auto">
-                    {getClassStudents(selectedClass.id).map((stu) => (
-                      <div key={stu.id} className="flex justify-between items-center text-xs bg-surface border border-line p-2.5 rounded-lg">
-                        <div>
-                          <strong className="text-ink block">{stu.firstName} {stu.lastName}</strong>
-                          <span className="text-[10px] text-muted">{stu.phone}</span>
-                        </div>
-                        <Badge tone={stu.balance < 0 ? "danger" : stu.isFree ? "success" : "primary"}>
-                          {stu.isFree ? "Gratuit" : `${stu.balance} DA`}
-                        </Badge>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="flex justify-end pt-2">
-              <Button onClick={() => setIsDetailsOpen(false)}>Fermer</Button>
-            </div>
-          </div>
-        )}
-      </Modal>
+function MiniStat({
+  icon,
+  label,
+  value,
+  danger,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string | number;
+  danger?: boolean;
+}) {
+  return (
+    <div className={`rounded-xl border p-2 ${danger ? "border-danger/30 bg-danger/5" : "border-line bg-canvas/40"}`}>
+      <span
+        className={`flex items-center gap-1 text-[9px] font-bold uppercase tracking-wide ${danger ? "text-danger" : "text-muted"}`}
+      >
+        {icon} {label}
+      </span>
+      <strong className={`mt-0.5 block truncate text-sm font-black ${danger ? "text-danger" : "text-ink"}`}>
+        {value}
+      </strong>
     </div>
   );
 }

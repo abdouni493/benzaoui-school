@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { createRoleUser, resetUserPassword } from "@/lib/supabase/createUser";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -11,31 +12,21 @@ import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import {
-  Trash2,
-  Edit,
   Eye,
   Plus,
-  MoreVertical,
   Search,
   CreditCard,
   Printer,
   DollarSign,
-  User,
   BookOpen,
-  History,
   CheckCircle,
   Scan,
   Bell,
   Send,
   AlertTriangle,
-  MessageCircle,
-  Repeat,
   Wallet,
 } from "lucide-react";
 import type {
-  AbsencePenalty,
-  AttendanceRecord,
-  AttendanceStatus,
   CoursLevel,
   RegistrationFeeKey,
   SchoolClass,
@@ -45,8 +36,6 @@ import type {
   SubscriptionDiscount,
   DiscountType,
   Coursework,
-  BalanceTransaction,
-  BalanceTxType,
 } from "@/lib/types";
 import {
   byNewestFirst,
@@ -55,7 +44,6 @@ import {
   freeReasonOf,
   FREE_REASON_HINTS,
   FREE_REASON_LABELS,
-  allocateDebtPayment,
   studentDebtOf,
   balanceDriftByStudent,
   daysUntil,
@@ -85,7 +73,6 @@ import {
   type WhatsAppRecipient,
   type WhatsAppStudentContext,
 } from "@/components/whatsapp/WhatsAppMessageModal";
-import { isSendablePhone } from "@/lib/whatsapp/phone";
 import { buildBalanceAlert } from "@/lib/whatsapp/alert";
 import type { SendResponse } from "@/lib/whatsapp/types";
 import {
@@ -94,6 +81,12 @@ import {
   type AssignGroupOption,
   type AssignItem,
 } from "@/components/students/EnrollmentPicker";
+import {
+  PayDebtModal,
+  StudentDetailsModal,
+  TX_TYPE_LABELS,
+} from "@/components/students/StudentDetailsModal";
+import { StudentCardGrid, type StudentCardActions } from "@/components/students/StudentCard";
 
 /** Domaine des identifiants du portail. Les comptes élèves ne servent qu'à se
  *  connecter à l'application : l'adresse est fabriquée, jamais une vraie boîte
@@ -109,14 +102,6 @@ const WA_BATCH_SIZE = 8;
  *  et « Modifier l'étudiant » affichent exactement les mêmes blocs ; l'écran
  *  « Inscriptions » n'en reprend que le choix des créneaux. */
 type StudentFormMode = "create" | "edit" | "assign";
-
-/** Libellés des types de ligne du solde (onglet « Transactions »). */
-const TX_TYPE_LABELS: Record<BalanceTxType, string> = {
-  topup: "Versement / Recharge",
-  deduction: "Débit (séance, absence…)",
-  debt_payment: "Règlement de dette",
-  registration: "Frais d'inscription",
-};
 
 export function StudentsPage() {
   const {
@@ -141,16 +126,37 @@ export function StudentsPage() {
     deleteFrom,
     updateItem,
     addBalance,
-    payDebt,
     settleRegistrationFee,
     payRegistrationFeeCash,
-    updateBalanceTx,
-    deleteBalanceTx,
-    cancelAttendance,
-    updateAttendance,
-    deleteAbsencePenalty,
     setStudentPassword,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      school: s.school,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      sessions: s.sessions,
+      classes: s.classes,
+      modules: s.modules,
+      teachers: s.teachers,
+      groups: s.groups,
+      salles: s.salles,
+      coursework: s.coursework,
+      balanceTx: s.balanceTx,
+      attendance: s.attendance,
+      absencePenalties: s.absencePenalties,
+      parents: s.parents,
+      filieres: s.filieres,
+      studentCredentials: s.studentCredentials,
+      complete: s.complete,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+      addBalance: s.addBalance,
+      settleRegistrationFee: s.settleRegistrationFee,
+      payRegistrationFeeCash: s.payRegistrationFeeCash,
+      setStudentPassword: s.setStudentPassword,
+    })),
+  );
 
   const { language, autoSendWhatsapp, autoSendEmail, setAutoSendWhatsapp, setAutoSendEmail } = useSettings();
   const { addToast } = useToast();
@@ -166,10 +172,10 @@ export function StudentsPage() {
   // Modals
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
-  const [isDetailsOpen, setIsDetailsOpen] = useState(false);
+  const [detailsStudentId, setDetailsStudentId] = useState<string | null>(null);
   const [isAssignOpen, setIsAssignOpen] = useState(false);
   const [isTopupOpen, setIsTopupOpen] = useState(false);
-  const [isPayDebtOpen, setIsPayDebtOpen] = useState(false);
+  const [payDebtStudentId, setPayDebtStudentId] = useState<string | null>(null);
   const [isScanOpen, setIsScanOpen] = useState(false);
   const [isAlertLowBalanceOpen, setIsAlertLowBalanceOpen] = useState(false);
   const [isDebtorsOpen, setIsDebtorsOpen] = useState(false);
@@ -242,9 +248,6 @@ export function StudentsPage() {
   const [topupDate, setTopupDate] = useState(new Date().toISOString().split("T")[0]);
   const [settleReg, setSettleReg] = useState(false);
 
-  // Form: Pay Debt
-  const [payAmount, setPayAmount] = useState<number>(0);
-
   // Frais d'inscription : DEUX portes, jamais confondues. « Sur le solde »
   // débite l'élève (et le fait plonger en dette si le solde ne suit pas),
   // « à part » encaisse l'argent en caisse et ne touche pas au solde.
@@ -303,38 +306,6 @@ export function StudentsPage() {
     neutral?: boolean;
   } | null>(null);
 
-  // Tab state in Details modal
-  const [detailsTab, setDetailsTab] = useState<"personal" | "subs" | "payments" | "attendance">("personal");
-
-  // Details modal filters — transactions per module; presences per module and
-  // per date (by month or custom period)
-  const [txModuleFilter, setTxModuleFilter] = useState<string>("all");
-  const [attModuleFilter, setAttModuleFilter] = useState<string>("all");
-  const [attDateMode, setAttDateMode] = useState<"all" | "month" | "range">("all");
-  const [attMonth, setAttMonth] = useState("");
-  const [attStart, setAttStart] = useState("");
-  const [attEnd, setAttEnd] = useState("");
-  const [attKindFilter, setAttKindFilter] = useState<"all" | "present" | "absent">("all");
-
-  // Correcting one presence / removing one billed absence
-  const [editingAtt, setEditingAtt] = useState<AttendanceRecord | null>(null);
-  const [deletingAtt, setDeletingAtt] = useState<AttendanceRecord | null>(null);
-  const [deletingPen, setDeletingPen] = useState<AbsencePenalty | null>(null);
-  const [attEditStatus, setAttEditStatus] = useState<AttendanceStatus>("present");
-  const [attEditDate, setAttEditDate] = useState("");
-  const [attEditAmount, setAttEditAmount] = useState<number>(0);
-  const [attBusy, setAttBusy] = useState(false);
-
-  // Correcting one line of the transaction history (edit / delete)
-  const [editingTx, setEditingTx] = useState<BalanceTransaction | null>(null);
-  const [deletingTx, setDeletingTx] = useState<BalanceTransaction | null>(null);
-  const [txAmount, setTxAmount] = useState<number>(0);
-  const [txDescription, setTxDescription] = useState("");
-  const [txDate, setTxDate] = useState("");
-  const [txType, setTxType] = useState<BalanceTxType>("topup");
-  const [txAdjustCash, setTxAdjustCash] = useState(true);
-  const [txBusy, setTxBusy] = useState(false);
-
   // The selected student is a snapshot: re-sync it after every store refresh
   // (scan, topup, fetchAll) so the detail view never shows stale data.
   useEffect(() => {
@@ -344,88 +315,85 @@ export function StudentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [students]);
 
-  /** Modules assigned to a student (via his subscriptions), for the filters. */
-  const getStudentModuleOptions = (stu: Student) => {
-    const map = new Map<string, string>();
-    stu.subscriptionIds.forEach((subId) => {
-      const sub = subscriptions.find((s) => s.id === subId);
-      const sess = sub ? sessions.find((se) => se.id === sub.sessionId) : undefined;
-      if (!sess) return;
-      const mod = modules.find((m) => m.id === sess.moduleId);
-      if (mod) map.set(mod.id, mod.name);
-    });
-    return [...map.entries()].map(([id, name]) => ({ id, name }));
-  };
+  // ---- Index ---------------------------------------------------------------------
+  // La liste affiche des centaines de cartes, chacune avec ses abonnements : un
+  // `.find()` par libellé dans chaque table, c'était des centaines de milliers
+  // de comparaisons à CHAQUE frappe au clavier. Les tables sont indexées une
+  // fois, et chaque libellé calculé une fois, tant qu'elles ne changent pas.
+  const lookups = useMemo(
+    () => ({
+      subscription: new Map(subscriptions.map((s) => [s.id, s])),
+      session: new Map(sessions.map((s) => [s.id, s])),
+      module: new Map(modules.map((m) => [m.id, m])),
+      classe: new Map(classes.map((c) => [c.id, c])),
+      filiere: new Map(filieres.map((f) => [f.id, f])),
+      coursework: new Map(coursework.map((c) => [c.id, c])),
+    }),
+    [subscriptions, sessions, modules, classes, filieres, coursework],
+  );
 
-  // Helpers
-  const getModuleLabel = (subId: string) => {
-    const sub = subscriptions.find((s) => s.id === subId);
-    if (!sub) {
-      const cw = coursework.find((c) => c.id === subId);
-      if (cw) return `Stage: ${cw.name}`;
-      return "Abonnement inconnu";
-    }
-    const s = sessions.find((se) => se.id === sub.sessionId);
-    if (!s) return "Séance inconnue";
-    const mod = modules.find((m) => m.id === s.moduleId)?.name ?? "Module";
-    const cls = classes.find((c) => c.id === s.classId);
-    if (!cls) return mod;
-    const level = cls.coursLevel || cls.formationLevel || "";
-    const fil = filieres.find((f) => f.id === cls.filiereId)?.name ?? "";
-    
-    let classNameClean = cls.name || "";
-    if (fil) {
-      const regex = new RegExp(`\\s*-\\s*${fil}`, "i");
-      classNameClean = classNameClean.replace(regex, "").trim();
-    }
-    
-    const parts: string[] = [];
-    if (classNameClean) parts.push(classNameClean);
-    if (level) parts.push(level);
-    if (fil) parts.push(fil);
+  /** Libellé « Module (classe - niveau - filière) » de chaque abonnement. */
+  const moduleLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const cw of coursework) labels.set(cw.id, `Stage: ${cw.name}`);
+    for (const sub of subscriptions) {
+      const s = lookups.session.get(sub.sessionId);
+      if (!s) {
+        labels.set(sub.id, "Séance inconnue");
+        continue;
+      }
+      const mod = lookups.module.get(s.moduleId)?.name ?? "Module";
+      const cls = lookups.classe.get(s.classId);
+      if (!cls) {
+        labels.set(sub.id, mod);
+        continue;
+      }
+      const level = cls.coursLevel || cls.formationLevel || "";
+      const fil = (cls.filiereId && lookups.filiere.get(cls.filiereId)?.name) || "";
 
-    return `${mod} (${parts.join(" - ")})`;
-  };
+      let classNameClean = cls.name || "";
+      if (fil) {
+        const escaped = fil.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        classNameClean = classNameClean.replace(new RegExp(`\\s*-\\s*${escaped}`, "i"), "").trim();
+      }
+
+      const parts: string[] = [];
+      if (classNameClean) parts.push(classNameClean);
+      if (level) parts.push(level);
+      if (fil) parts.push(fil);
+      labels.set(sub.id, `${mod} (${parts.join(" - ")})`);
+    }
+    return labels;
+  }, [subscriptions, coursework, lookups]);
+
+  const getModuleLabel = useCallback(
+    (subId: string) => moduleLabels.get(subId) ?? "Abonnement inconnu",
+    [moduleLabels],
+  );
 
   const getSubLabel = (subId: string) => {
-    const sub = subscriptions.find((s) => s.id === subId);
+    const sub = lookups.subscription.get(subId);
     if (!sub) {
       // Check if it's a coursework instead
-      const cw = coursework.find((c) => c.id === subId);
+      const cw = lookups.coursework.get(subId);
       if (cw) return `Stage: ${cw.name}`;
       return "Abonnement inconnu";
     }
-    const s = sessions.find((se) => se.id === sub.sessionId);
+    const s = lookups.session.get(sub.sessionId);
     if (!s) return "Séance inconnue";
-    const mod = modules.find((m) => m.id === s.moduleId)?.name ?? "Module";
-    const cls = classes.find((c) => c.id === s.classId)?.name ?? "Classe";
+    const mod = lookups.module.get(s.moduleId)?.name ?? "Module";
+    const cls = lookups.classe.get(s.classId)?.name ?? "Classe";
     return `${cls} - ${mod}`;
   };
 
   /** The subscription, if it belongs to a formation class (level-priced, time-limited). */
   const getFormationSub = (subId: string): Subscription | undefined => {
-    const sub = subscriptions.find((s) => s.id === subId);
+    const sub = lookups.subscription.get(subId);
     if (!sub) return undefined;
-    const sess = sessions.find((se) => se.id === sub.sessionId);
-    const cls = sess ? classes.find((c) => c.id === sess.classId) : undefined;
+    const sess = lookups.session.get(sub.sessionId);
+    const cls = sess ? lookups.classe.get(sess.classId) : undefined;
     return cls?.type === "formation" || sub.periodMonths ? sub : undefined;
   };
-
-  /** Expiry info for every formation enrollment of the student (dates only exist for formations). */
-  const getFormationExpiries = (stu: Student) =>
-    stu.subscriptionIds.flatMap((subId) => {
-      const dates = stu.subscriptionDates?.[subId];
-      if (!dates?.expiryDate) return [];
-      return [
-        {
-          subId,
-          label: getModuleLabel(subId),
-          startDate: dates.startDate,
-          expiryDate: dates.expiryDate,
-          daysLeft: daysUntil(dates.expiryDate),
-        },
-      ];
-    });
 
   // Auto-generate credentials when firstName, lastName, or birthDate changes in the creation modal
   useEffect(() => {
@@ -480,12 +448,20 @@ export function StudentsPage() {
    *  dans la liste : changer le nom saisi referme le dossier. */
   const openDuplicate = nameDuplicates.find((st) => st.id === duplicateOpenId) ?? null;
 
-  const isSoonToRunOut = (student: Student) => {
-    if (student.isFree) return false;
-    const studentSubs = subscriptions.filter((sub) => student.subscriptionIds.includes(sub.id));
-    const minCost = studentSubs.length > 0 ? Math.max(...studentSubs.map((s) => s.pricePerSession)) : 500;
-    return student.balance >= 0 && student.balance < minCost * 2;
-  };
+  const isSoonToRunOut = useCallback(
+    (student: Student) => {
+      if (student.isFree) return false;
+      const studentSubs = student.subscriptionIds
+        .map((id) => lookups.subscription.get(id))
+        .filter((s): s is Subscription => !!s);
+      const minCost = studentSubs.length > 0 ? Math.max(...studentSubs.map((s) => s.pricePerSession)) : 500;
+      return student.balance >= 0 && student.balance < minCost * 2;
+    },
+    [lookups],
+  );
+  /** Les soldes presque épuisés — lus par le bouton « Alertes Soldes », son
+   *  compteur et sa fenêtre : calculés une seule fois. */
+  const soonStudents = useMemo(() => students.filter(isSoonToRunOut), [students, isSoonToRunOut]);
 
   // Ce qu'un élève doit se lit ENTIÈREMENT sur sa fiche : son solde (négatif
   // = séances suivies non payées) et ses frais d'inscription. Le solde porte
@@ -506,46 +482,67 @@ export function StudentsPage() {
       }),
     [students, balanceTx, complete.balanceTx],
   );
-  const debtOf = (student: Student) =>
-    studentDebtOf(student, { drift: driftByStudent.get(student.id) ?? 0 });
+  /** La dette de chaque élève, calculée une fois par changement de données :
+   *  une carte reçoit le MÊME objet tant que rien n'a bougé pour elle, et
+   *  n'est donc pas redessinée. */
+  const debtById = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof studentDebtOf>>();
+    for (const stu of students) {
+      map.set(stu.id, studentDebtOf(stu, { drift: driftByStudent.get(stu.id) ?? 0 }));
+    }
+    return map;
+  }, [students, driftByStudent]);
+  const debtOf = useCallback(
+    (student: Student) =>
+      debtById.get(student.id) ?? studentDebtOf(student, { drift: driftByStudent.get(student.id) ?? 0 }),
+    [debtById, driftByStudent],
+  );
 
   // Tous ceux à qui l'école réclame quelque chose, du plus lourd au plus
   // léger. Le compteur du bouton et la fenêtre lisent la même liste.
-  const debtors = students
-    .map((stu) => ({ stu, debt: debtOf(stu) }))
-    .filter((row) => row.debt.alert)
-    .map((row) => ({ ...row, owed: row.debt.total }))
-    .sort((a, b) => b.owed - a.owed);
-  const totalOwed = debtors.reduce((sum, row) => sum + row.owed, 0);
+  const { debtors, totalOwed } = useMemo(() => {
+    const rows = students
+      .map((stu) => ({ stu, debt: debtOf(stu) }))
+      .filter((row) => row.debt.alert)
+      .map((row) => ({ ...row, owed: row.debt.total }))
+      .sort((a, b) => b.owed - a.owed);
+    return { debtors: rows, totalOwed: rows.reduce((sum, row) => sum + row.owed, 0) };
+  }, [students, debtOf]);
+
+  // La saisie reste fluide : le filtrage suit la frappe avec un temps de retard
+  // plutôt que de la bloquer à chaque lettre.
+  const deferredSearch = useDeferredValue(searchQuery);
 
   // Filter students based on queries
-  const getFilteredStudents = () => {
+  const filteredStudents = useMemo(() => {
+    // La carte se cherche comme le reste : sans se soucier de la casse ni
+    // des espaces, exactement comme le scan la lit.
+    const query = deferredSearch.trim().toLowerCase();
+    const rawQuery = deferredSearch.trim();
+    const soon = filterType === "soon" ? new Set(soonStudents.map((s) => s.id)) : null;
     return students
       .filter((s) => {
-        // La carte se cherche comme le reste : sans se soucier de la casse ni
-        // des espaces, exactement comme le scan la lit.
-        const query = searchQuery.trim().toLowerCase();
-        const nameMatch = `${s.firstName} ${s.lastName}`.toLowerCase().includes(query);
-        const phoneMatch = s.phone.includes(searchQuery.trim());
-        const emailMatch = s.email.toLowerCase().includes(query);
-        const rfidMatch = (s.rfid ?? "").trim().toLowerCase().includes(query);
-        const matchesSearch = !query || nameMatch || phoneMatch || emailMatch || rfidMatch;
-
-        if (!matchesSearch) return false;
+        if (query) {
+          const nameMatch = `${s.firstName} ${s.lastName}`.toLowerCase().includes(query);
+          const phoneMatch = s.phone.includes(rawQuery);
+          const emailMatch = s.email.toLowerCase().includes(query);
+          const rfidMatch = (s.rfid ?? "").trim().toLowerCase().includes(query);
+          if (!nameMatch && !phoneMatch && !emailMatch && !rfidMatch) return false;
+        }
 
         // « En dette » retient aussi l'élève dont le solde ment : des séances
         // facturées dans son historique que le solde n'a jamais enregistrées.
         if (filterType === "debt") return debtOf(s).alert;
         if (filterType === "paid") return !debtOf(s).alert;
         if (filterType === "free") return s.isFree;
-        if (filterType === "soon") return isSoonToRunOut(s);
+        if (filterType === "soon") return soon?.has(s.id) ?? false;
 
         return true;
       })
       // Du plus récemment inscrit au plus ancien : la fiche qu'on vient
       // d'enregistrer est la première sous les yeux de la réception.
       .sort(byNewestFirst);
-  };
+  }, [students, deferredSearch, filterType, debtOf, soonStudents]);
 
   const handleCreateStudent = async () => {
     if (!firstName || !lastName || !phone || !rfid) {
@@ -820,30 +817,6 @@ export function StudentsPage() {
     });
   };
 
-  const handlePayDebtSubmit = async () => {
-    if (!selectedStudent || payAmount <= 0) return;
-    const stu = selectedStudent;
-    setIsPayDebtOpen(false);
-    setOverlayStudentId(null);
-    // Le versement est réparti côté serveur : inscription due d'abord, séances
-    // suivies ensuite, surplus au solde — et il entre en caisse, ce qui n'était
-    // pas le cas avant.
-    const res = await payDebt(stu.id, payAmount);
-    const parts = [
-      (res.registrationPaid ?? 0) > 0 ? `${res.registrationPaid} DA d'inscription` : "",
-      (res.debtPaid ?? 0) > 0 ? `${res.debtPaid} DA de séances suivies` : "",
-      (res.credited ?? 0) > 0 ? `${res.credited} DA portés au solde` : "",
-    ].filter(Boolean);
-    addToast({
-      type: res.ok ? "success" : "danger",
-      title: res.ok ? "Dette réglée" : "Règlement refusé",
-      message: res.ok
-        ? `${payAmount} DA encaissés${parts.length ? ` — ${parts.join(", ")}` : ""}.`
-        : `La base a refusé le règlement : ${res.error ?? "erreur inconnue"}.`,
-      studentName: `${stu.firstName} ${stu.lastName}`,
-    });
-  };
-
   /** L'alerte « inscription impayée » d'une carte élève ouvre la fenêtre de
    *  règlement : c'est là que se choisit la porte — sur le solde, ou à part. */
   const openRegFee = (student: Student) => {
@@ -894,152 +867,6 @@ export function StudentsPage() {
         : `La base a refusé le règlement : ${res.error ?? "erreur inconnue"}.`,
       studentName: `${student.firstName} ${student.lastName}`,
     });
-  };
-
-  // ---- Correcting one transaction of the student's history -------------------
-  // The list renders `tx.date` raw, so the edit box works on the very same
-  // string (what the row shows is what you edit).
-  const txDateToInput = (iso: string) => iso.substring(0, 16);
-  const txInputToIso = (value: string) => (value.length === 16 ? `${value}:00.000Z` : new Date(value).toISOString());
-
-  const openEditTx = (tx: BalanceTransaction) => {
-    setEditingTx(tx);
-    setTxAmount(tx.amount);
-    setTxDescription(tx.description);
-    setTxDate(txDateToInput(tx.date));
-    setTxType(tx.type);
-    setTxAdjustCash(true);
-  };
-
-  const openDeleteTx = (tx: BalanceTransaction) => {
-    setDeletingTx(tx);
-    setTxAdjustCash(true);
-  };
-
-  const closeTxModals = () => {
-    setEditingTx(null);
-    setDeletingTx(null);
-    setTxBusy(false);
-  };
-
-  const handleUpdateTx = async () => {
-    if (!editingTx || !txDate) return;
-    setTxBusy(true);
-    const res = await updateBalanceTx(editingTx.id, {
-      amount: Math.round(txAmount),
-      description: txDescription,
-      date: txInputToIso(txDate),
-      type: txType,
-      adjustCash: txAdjustCash,
-    });
-    setTxBusy(false);
-    if (!res.ok) {
-      addToast({ type: "danger", title: "Modification impossible", message: res.error ?? "La transaction n'a pas pu être modifiée." });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Transaction modifiée",
-      message: `Nouveau solde: ${res.newBalance} DA${res.cashAdjusted ? " — caisse corrigée." : ""}`,
-    });
-    closeTxModals();
-  };
-
-  const handleDeleteTx = async () => {
-    if (!deletingTx) return;
-    setTxBusy(true);
-    const res = await deleteBalanceTx(deletingTx.id, txAdjustCash);
-    setTxBusy(false);
-    if (!res.ok) {
-      addToast({ type: "danger", title: "Suppression impossible", message: res.error ?? "La transaction n'a pas pu être supprimée." });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Transaction supprimée",
-      message: `Nouveau solde: ${res.newBalance} DA${res.cashAdjusted ? " — caisse corrigée." : ""}`,
-    });
-    closeTxModals();
-  };
-
-  // ---- Correcting the presence history ---------------------------------------
-  // A presence carries money (it debited the séance), so editing/removing one
-  // has to move the balance back by the same amount — both live in a server-side
-  // RPC (update_attendance / cancel_attendance) for that reason.
-  const openEditAtt = (att: AttendanceRecord) => {
-    setEditingAtt(att);
-    setAttEditStatus(att.status);
-    setAttEditDate(att.timestamp.substring(0, 16));
-    setAttEditAmount(att.amountDeducted);
-  };
-
-  const closeAttModals = () => {
-    setEditingAtt(null);
-    setDeletingAtt(null);
-    setDeletingPen(null);
-    setAttBusy(false);
-  };
-
-  const handleUpdateAtt = async () => {
-    if (!editingAtt || !attEditDate) return;
-    setAttBusy(true);
-    const res = await updateAttendance(editingAtt.id, {
-      status: attEditStatus,
-      occurredAt: txInputToIso(attEditDate),
-      amount: Math.max(0, Math.round(attEditAmount || 0)),
-    });
-    setAttBusy(false);
-    if (!res.ok) {
-      addToast({
-        type: "danger",
-        title: "Modification impossible",
-        message:
-          res.messageKey === "attendance.duplicateDay"
-            ? "Une présence existe déjà pour cet élève sur ce créneau à cette date."
-            : "La présence n'a pas pu être modifiée.",
-      });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Présence modifiée",
-      message: `Montant: ${res.cost ?? 0} DA — nouveau solde: ${res.newBalance ?? 0} DA.`,
-    });
-    closeAttModals();
-  };
-
-  const handleDeleteAtt = async () => {
-    if (!deletingAtt) return;
-    setAttBusy(true);
-    const res = await cancelAttendance(deletingAtt.id);
-    setAttBusy(false);
-    if (!res.ok) {
-      addToast({ type: "danger", title: "Suppression impossible", message: "La présence n'a pas pu être supprimée." });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Présence supprimée",
-      message: `${res.refunded ? `${res.refunded} DA remboursés — ` : ""}nouveau solde: ${res.newBalance ?? 0} DA.`,
-    });
-    closeAttModals();
-  };
-
-  const handleDeletePenalty = async () => {
-    if (!deletingPen) return;
-    setAttBusy(true);
-    const res = await deleteAbsencePenalty(deletingPen.id);
-    setAttBusy(false);
-    if (!res.ok) {
-      addToast({ type: "danger", title: "Suppression impossible", message: "L'absence n'a pas pu être supprimée." });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Absence supprimée",
-      message: `${res.refunded ?? 0} DA remboursés — nouveau solde: ${res.newBalance ?? 0} DA.`,
-    });
-    closeAttModals();
   };
 
   /**
@@ -1178,7 +1005,6 @@ export function StudentsPage() {
     setTopupAmount(0);
     setTopupDesc("Recharge de solde");
     setSettleReg(false);
-    setPayAmount(0);
     setSelectedAssignIds([]);
     setAssignStartDates({});
     setAssignSubDates({});
@@ -1260,15 +1086,7 @@ export function StudentsPage() {
   };
 
   const openDetails = (stu: Student) => {
-    setSelectedStudent(stu);
-    setDetailsTab("personal");
-    setTxModuleFilter("all");
-    setAttModuleFilter("all");
-    setAttDateMode("all");
-    setAttMonth("");
-    setAttStart("");
-    setAttEnd("");
-    setIsDetailsOpen(true);
+    setDetailsStudentId(stu.id);
     setOverlayStudentId(null);
   };
 
@@ -1514,14 +1332,9 @@ export function StudentsPage() {
   };
 
   const openPayDebt = (stu: Student) => {
-    setSelectedStudent(stu);
-    // Ce que la RPC sait régler : le solde négatif et l'inscription due. Les
-    // séances facturées qui n'ont jamais atteint le solde ne sont PAS ajoutées
-    // au montant proposé : tant que le solde ne les porte pas, un versement
-    // qui les couvrirait rendrait le solde faussement créditeur. La fenêtre
-    // le dit, et le script de réparation remet le solde d'aplomb.
-    setPayAmount(debtOf(stu).total);
-    setIsPayDebtOpen(true);
+    // Ce que la RPC sait régler : le solde négatif et l'inscription due — la
+    // fenêtre propose ce total et annonce la répartition avant d'encaisser.
+    setPayDebtStudentId(stu.id);
     setOverlayStudentId(null);
   };
 
@@ -3370,6 +3183,64 @@ export function StudentsPage() {
     );
   };
 
+  // ---- Ce que les cartes déclenchent, en un objet STABLE ----------------------
+  // Les fonctions ci-dessus sont recréées à chaque rendu ; les passer telles
+  // quelles aux cartes forcerait chacune à se redessiner à chaque lettre tapée.
+  // Les cartes reçoivent donc un objet qui ne change jamais, et qui appelle la
+  // version la plus récente de chaque fonction.
+  const latestActions = useRef<Omit<StudentCardActions, "setOverlay"> | null>(null);
+  useEffect(() => {
+    latestActions.current = {
+      openWhatsApp,
+      openDetails,
+      openAssign,
+      openTopup,
+      openPayDebt,
+      printStudent: handlePrintStudent,
+      openEdit,
+      openPrintPayments,
+      deleteStudent: handleDelete,
+      openRegFee,
+    };
+  });
+  const cardActions = useMemo<StudentCardActions>(
+    () => ({
+      openWhatsApp: (stu, focus) => latestActions.current?.openWhatsApp(stu, focus),
+      openDetails: (stu) => latestActions.current?.openDetails(stu),
+      openAssign: (stu) => latestActions.current?.openAssign(stu),
+      openTopup: (stu) => latestActions.current?.openTopup(stu),
+      openPayDebt: (stu) => latestActions.current?.openPayDebt(stu),
+      printStudent: (stu) => latestActions.current?.printStudent(stu),
+      openEdit: (stu) => latestActions.current?.openEdit(stu),
+      openPrintPayments: (stu) => latestActions.current?.openPrintPayments(stu),
+      deleteStudent: (id) => latestActions.current?.deleteStudent(id),
+      openRegFee: (stu) => latestActions.current?.openRegFee(stu),
+      // Un `setState` de React ne change jamais : il peut être passé tel quel.
+      setOverlay: setOverlayStudentId,
+    }),
+    [],
+  );
+
+  const parentById = useMemo(() => new Map(parents.map((p) => [p.id, p])), [parents]);
+
+  // Formations expirées ou sur le point de l'être — calculé quand les élèves
+  // changent, pas à chaque frappe.
+  const expiryAlerts = useMemo(
+    () =>
+      students
+        .flatMap((stu) =>
+          stu.subscriptionIds.flatMap((subId) => {
+            const dates = stu.subscriptionDates?.[subId];
+            if (!dates?.expiryDate) return [];
+            const daysLeft = daysUntil(dates.expiryDate);
+            if (daysLeft > EXPIRY_WARNING_DAYS) return [];
+            return [{ stu, subId, label: getModuleLabel(subId), expiryDate: dates.expiryDate, daysLeft }];
+          }),
+        )
+        .sort((a, b) => a.daysLeft - b.daysLeft),
+    [students, getModuleLabel],
+  );
+
   return (
     <div>
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
@@ -3398,7 +3269,7 @@ export function StudentsPage() {
           </Button>
           <Button
             onClick={() => {
-              const lowStus = students.filter(isSoonToRunOut);
+              const lowStus = soonStudents;
               setSelectedAlertStudentIds(lowStus.map((s) => s.id));
               setIsAlertLowBalanceOpen(true);
             }}
@@ -3406,9 +3277,9 @@ export function StudentsPage() {
             className="flex items-center gap-2 border-danger/30 hover:border-danger hover:bg-danger/10 text-danger relative"
           >
             <Bell className="h-4 w-4 text-danger" /> Alertes Soldes
-            {students.filter(isSoonToRunOut).length > 0 && (
+            {soonStudents.length > 0 && (
               <span className="absolute -top-1 -right-1 bg-danger text-white text-[9px] font-bold h-4.5 w-4.5 rounded-full flex items-center justify-center pulse-glow">
-                {students.filter(isSoonToRunOut).length}
+                {soonStudents.length}
               </span>
             )}
           </Button>
@@ -3459,13 +3330,7 @@ export function StudentsPage() {
 
       {/* Formation expiry alerts */}
       {(() => {
-        const alerts = students
-          .flatMap((stu) =>
-            getFormationExpiries(stu)
-              .filter((f) => f.daysLeft <= EXPIRY_WARNING_DAYS)
-              .map((f) => ({ stu, ...f })),
-          )
-          .sort((a, b) => a.daysLeft - b.daysLeft);
+        const alerts = expiryAlerts;
         if (alerts.length === 0) return null;
         return (
           <Card className="mb-6">
@@ -3508,301 +3373,17 @@ export function StudentsPage() {
         );
       })()}
 
-      {/* Students list */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {getFilteredStudents().map((stu) => {
-          const isOverlaid = overlayStudentId === stu.id;
-          const debt = debtOf(stu);
-
-          return (
-            <Card key={stu.id} className="relative overflow-visible">
-              <CardBody className="flex flex-col justify-between h-56 relative">
-                {/* Overlay Action Buttons displayed ABOVE the card when three dots are clicked */}
-                {isOverlaid && (
-                  <div className="absolute inset-0 bg-primary-600/95 backdrop-blur-sm rounded-2xl z-20 flex flex-col justify-start overflow-y-auto p-4 text-white space-y-2">
-                    <div className="flex justify-between items-center border-b border-white/20 pb-2 mb-1">
-                      <span className="font-bold text-sm truncate">{stu.firstName} {stu.lastName}</span>
-                      <button onClick={() => setOverlayStudentId(null)} className="text-xs hover:underline bg-white/10 px-2 py-0.5 rounded">
-                        Fermer
-                      </button>
-                    </div>
-
-                    {/* Envoi WhatsApp — mis en avant : c'est l'action de relance
-                        la plus fréquente sur une fiche en dette. */}
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <button
-                        onClick={() => openWhatsApp(stu, "student")}
-                        disabled={!isSendablePhone(stu.phone)}
-                        title={
-                          isSendablePhone(stu.phone)
-                            ? "Envoyer un message WhatsApp à l'élève"
-                            : "Aucun numéro exploitable pour cet élève"
-                        }
-                        className="flex items-center gap-1.5 justify-center bg-emerald-500/90 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed py-2 rounded-xl font-semibold"
-                      >
-                        <MessageCircle className="h-3.5 w-3.5" /> WhatsApp Élève
-                      </button>
-                      {(() => {
-                        const parent = parents.find((p) => p.id === stu.parentId);
-                        const canSend = isSendablePhone(parent?.phone);
-                        return (
-                          <button
-                            onClick={() => openWhatsApp(stu, "parent")}
-                            disabled={!canSend}
-                            title={
-                              !parent
-                                ? "Aucun parent rattaché à cet élève"
-                                : canSend
-                                  ? `Envoyer un message WhatsApp à ${parent.firstName} ${parent.lastName}`
-                                  : "Le parent rattaché n'a pas de numéro exploitable"
-                            }
-                            className="flex items-center gap-1.5 justify-center bg-emerald-500/90 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed py-2 rounded-xl font-semibold"
-                          >
-                            <MessageCircle className="h-3.5 w-3.5" /> WhatsApp Parent
-                          </button>
-                        );
-                      })()}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <button
-                        onClick={() => openDetails(stu)}
-                        className="flex items-center gap-1.5 justify-center bg-white/10 hover:bg-white/20 py-2 rounded-xl"
-                      >
-                        <Eye className="h-3.5 w-3.5" /> Voir Détails
-                      </button>
-                      <button
-                        onClick={() => openAssign(stu)}
-                        className="flex items-center gap-1.5 justify-center bg-white/10 hover:bg-white/20 py-2 rounded-xl"
-                      >
-                        <BookOpen className="h-3.5 w-3.5" /> Inscriptions
-                      </button>
-                      <button
-                        onClick={() => openTopup(stu)}
-                        className="flex items-center gap-1.5 justify-center bg-white/10 hover:bg-white/20 py-2 rounded-xl"
-                      >
-                        <DollarSign className="h-3.5 w-3.5" /> Charger Solde
-                      </button>
-                      <button
-                        onClick={() => openPayDebt(stu)}
-                        className="flex items-center gap-1.5 justify-center bg-white/10 hover:bg-white/20 py-2 rounded-xl"
-                      >
-                        <DollarSign className="h-3.5 w-3.5" /> Régler Dette
-                      </button>
-                      <button
-                        onClick={() => handlePrintStudent(stu)}
-                        className="flex items-center gap-1.5 justify-center bg-white/10 hover:bg-white/20 py-2 rounded-xl"
-                      >
-                        <Printer className="h-3.5 w-3.5" /> Imprimer Fiche
-                      </button>
-                      <button
-                        onClick={() => openEdit(stu)}
-                        className="flex items-center gap-1.5 justify-center bg-white/10 hover:bg-white/20 py-2 rounded-xl"
-                      >
-                        <Edit className="h-3.5 w-3.5" /> Modifier
-                      </button>
-                      <button
-                        onClick={() => openPrintPayments(stu)}
-                        className="flex items-center gap-1.5 justify-center bg-white/10 hover:bg-white/20 py-2 rounded-xl col-span-2"
-                      >
-                        <Printer className="h-3.5 w-3.5" /> Imprimer Paiements (Période)
-                      </button>
-                    </div>
-                    <button
-                      onClick={() => handleDelete(stu.id)}
-                      className="flex items-center gap-1.5 justify-center bg-danger hover:bg-danger/80 py-2 rounded-xl text-xs w-full font-bold"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" /> Supprimer l'élève
-                    </button>
-                  </div>
-                )}
-
-                <div>
-                  <div className="flex items-start justify-between">
-                    <button
-                      type="button"
-                      onClick={() => openDetails(stu)}
-                      title="Voir la fiche de l'élève"
-                      className="flex items-center gap-2 text-start rounded-xl hover:bg-primary-50/60 transition-colors p-0.5 -m-0.5"
-                    >
-                      <div className="h-10 w-10 bg-primary/10 rounded-xl flex items-center justify-center font-bold text-primary text-sm">
-                        {stu.firstName.substring(0, 1)}{stu.lastName.substring(0, 1)}
-                      </div>
-                      <div>
-                        <h4 className="flex items-center gap-1.5 text-sm font-bold text-ink transition-colors hover:text-primary">
-                          {stu.firstName} {stu.lastName}
-                          {/* Alarme visible sans ouvrir la fiche : l'élève a
-                              suivi des séances qu'il n'a pas payées. Depuis que
-                              le badge n'est plus refusé pour solde épuisé, la
-                              dette est la seule trace de ce qui est dû. */}
-                          {debt.sessions > 0 && (
-                            <span
-                              title={`Séances suivies non payées : ${debt.sessions} DA`}
-                              className="flex items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white"
-                            >
-                              <AlertTriangle className="h-2.5 w-2.5" /> Dette {debt.sessions} DA
-                            </span>
-                          )}
-                          {/* Le solde stocké et son propre historique ne disent
-                              pas la même chose. Ce n'est PAS une dette de plus
-                              — c'est une incohérence à réparer en base
-                              (reconcile_student_balances) ; aucun versement n'y
-                              changerait quoi que ce soit. */}
-                          {debt.drift !== 0 && (
-                            <span
-                              title={`Le solde stocké s'écarte de ${Math.abs(debt.drift)} DA de la somme de son historique. À corriger en base — ce n'est pas un montant à encaisser.`}
-                              className="flex items-center gap-0.5 rounded-md bg-warning px-1.5 py-0.5 text-[9px] font-bold text-white"
-                            >
-                              <AlertTriangle className="h-2.5 w-2.5" /> Solde à vérifier
-                            </span>
-                          )}
-                          {/* Alarme visible sans ouvrir la fiche : l'inscription
-                              n'a jamais été réglée. */}
-                          {(stu.registrationDue ?? 0) > 0 && (
-                            <span
-                              role="button"
-                              tabIndex={0}
-                              title={`Frais d'inscription impayés : ${stu.registrationDue} DA — cliquez pour les régler`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openRegFee(stu);
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter" || e.key === " ") {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  openRegFee(stu);
-                                }
-                              }}
-                              className="flex cursor-pointer items-center gap-0.5 rounded-md bg-danger px-1.5 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
-                            >
-                              <AlertTriangle className="h-2.5 w-2.5" /> Inscription impayée
-                            </span>
-                          )}
-                        </h4>
-                        <span className="text-[10px] text-muted block flex items-center gap-1">
-                          <CreditCard className="h-3 w-3 inline" /> {stu.rfid}
-                        </span>
-                      </div>
-                    </button>
-
-                    <button
-                      onClick={() => setOverlayStudentId(stu.id)}
-                      className="p-1 rounded-lg hover:bg-primary-50 text-muted hover:text-ink transition-colors"
-                    >
-                      <MoreVertical className="h-5 w-5" />
-                    </button>
-                  </div>
-
-                  <div className="mt-3 space-y-1.5 text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-muted">Téléphone:</span>
-                      <strong className="text-ink">{stu.phone}</strong>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-muted">Solde Actuel:</span>
-                      <strong className={debt.sessions > 0 ? "text-danger" : "text-success"}>
-                        {stu.balance} DA
-                      </strong>
-                    </div>
-
-                    {debt.sessions > 0 && (
-                      <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5">
-                        <span className="flex items-center gap-1 text-[10px] font-bold text-danger">
-                          <AlertTriangle className="h-3 w-3 animate-pulse" />
-                          SÉANCES NON PAYÉES : {debt.sessions} DA dus
-                        </span>
-                        <button
-                          onClick={() => openPayDebt(stu)}
-                          className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white hover:bg-danger/80"
-                        >
-                          Régler
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Le solde stocké ne vaut pas la somme de son historique.
-                        Une seule des deux valeurs est juste, et un versement ne
-                        les réconcilierait pas : c'est reconcile_student_balances
-                        qu'il faut jouer. On le signale sans jamais le compter
-                        comme une créance. */}
-                    {debt.drift !== 0 && (
-                      <div className="flex items-center justify-between gap-2 rounded-lg border border-warning/50 bg-warning/10 p-1.5">
-                        <span className="flex items-center gap-1 text-[10px] font-bold text-warning">
-                          <AlertTriangle className="h-3 w-3" />
-                          SOLDE À VÉRIFIER : {Math.abs(debt.drift)} DA d&apos;écart avec l&apos;historique
-                        </span>
-                        <button
-                          onClick={() => openDetails(stu)}
-                          title="Ouvrir la fiche : l'onglet Transactions détaille l'historique du solde"
-                          className="shrink-0 rounded bg-warning px-2 py-0.5 text-[9px] font-bold text-white hover:bg-warning/80"
-                        >
-                          Vérifier
-                        </button>
-                      </div>
-                    )}
-
-                    {/* L'alerte ENTIÈRE est le bouton : la réception clique là
-                        où elle lit le problème, et la fenêtre lui demande
-                        ensuite PAR QUELLE PORTE l'élève règle — sur son solde,
-                        ou séparément au guichet. */}
-                    {stu.registrationDue && stu.registrationDue > 0 ? (
-                      <button
-                        type="button"
-                        onClick={() => openRegFee(stu)}
-                        title="Régler les frais d'inscription — sur le solde, ou encaissés à part"
-                        className="flex w-full items-center justify-between gap-2 rounded-lg border border-danger/50 bg-danger/10 p-1.5 text-start transition-colors hover:bg-danger/20"
-                      >
-                        <span className="flex items-center gap-1 text-[10px] font-bold text-danger">
-                          <AlertTriangle className="h-3 w-3 animate-pulse" />
-                          Frais d&apos;inscription NON PAYÉS : {stu.registrationDue} DA
-                        </span>
-                        <span className="shrink-0 rounded bg-danger px-2 py-0.5 text-[9px] font-bold text-white">
-                          Régler
-                        </span>
-                      </button>
-                    ) : (
-                      <div className="flex justify-between text-[10px] text-success bg-success/15 px-2 py-0.5 rounded">
-                        <span>Frais d'inscription</span>
-                        <strong>Payé ✔</strong>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="border-t border-line pt-2 mt-2">
-                  <span className="text-[10px] text-muted block mb-1">Modules/Abonnements:</span>
-                  {stu.subscriptionIds.length === 0 ? (
-                    <span className="text-[10px] text-muted italic">Non inscrit</span>
-                  ) : (
-                    <div className="flex flex-wrap gap-1 max-h-12 overflow-y-auto">
-                      {stu.subscriptionIds.map((id) => {
-                        const exp = stu.subscriptionDates?.[id]?.expiryDate;
-                        const days = exp ? daysUntil(exp) : null;
-                        const tone =
-                          days === null
-                            ? "neutral"
-                            : days < 0
-                              ? "danger"
-                              : days <= EXPIRY_WARNING_DAYS
-                                ? "warning"
-                                : "neutral";
-                        return (
-                          <Badge key={id} tone={tone} className="text-[9px] px-1 py-0.5 whitespace-normal">
-                            {getModuleLabel(id)}
-                            {days !== null && days < 0 && " · Expirée"}
-                            {days !== null && days >= 0 && days <= EXPIRY_WARNING_DAYS && ` · J-${days}`}
-                          </Badge>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </CardBody>
-            </Card>
-          );
-        })}
-      </div>
+      {/* Students list — cartes mémorisées, affichées par tranches : taper dans
+          une fenêtre ne redessine plus des centaines de cartes derrière elle. */}
+      <StudentCardGrid
+        students={filteredStudents}
+        debtOf={debtOf}
+        overlayStudentId={overlayStudentId}
+        parentById={parentById}
+        labelOf={getModuleLabel}
+        actions={cardActions}
+        resetKey={`${deferredSearch}|${filterType}`}
+      />
 
       {/* Creation Modal */}
       <Modal open={isCreateOpen} onClose={() => setIsCreateOpen(false)} title="Ajouter un étudiant" wide>
@@ -3979,877 +3560,13 @@ export function StudentsPage() {
         </div>
       </Modal>
 
-      {/* Details Modal with subdivisions */}
-      <Modal open={isDetailsOpen} onClose={() => setIsDetailsOpen(false)} title="Fiche Étudiant" wide>
-        {selectedStudent && (
-          <div className="space-y-6">
-            {/* Header brief info */}
-            <div className="bg-primary-50/50 p-4 border border-line rounded-xl flex items-center justify-between">
-              <div>
-                <h3 className="font-bold text-lg text-ink">{selectedStudent.firstName} {selectedStudent.lastName}</h3>
-                <span className="text-xs text-muted">ID: {selectedStudent.id} | Carte: {selectedStudent.rfid}</span>
-              </div>
-              <Badge tone={debtOf(selectedStudent).alert ? "danger" : selectedStudent.isFree ? "success" : "primary"} className="text-sm px-3 py-1">
-                {selectedStudent.isFree ? "Études gratuites" : `${selectedStudent.balance} DA`}
-              </Badge>
-            </div>
-
-            {/* Ce que l'élève doit, en haut de sa fiche et non au fond d'un
-                onglet : c'est la question qu'on se pose en ouvrant la fiche. Le
-                badge du chiffre ne suffit pas — un solde négatif se lit comme un
-                solde tant qu'on ne le nomme pas « dette ». */}
-            {(() => {
-              const debt = debtOf(selectedStudent);
-              // Le solde est POSITIF et l'inscription réglée : il n'y a rien à
-              // réclamer, quoi qu'ait pu coûter l'historique des séances. Le
-              // total débité d'une vie d'élève n'est pas une dette — il est
-              // déjà payé, c'est ce qui a fait descendre le solde.
-              if (!debt.alert) return null;
-              return (
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-danger/50 bg-danger/10 p-3">
-                  <div className="flex items-start gap-2">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 animate-pulse text-danger" />
-                    <div>
-                      <strong className="block text-xs font-bold text-danger">
-                        DETTE : {debt.total} DA à régler
-                      </strong>
-                      <span className="text-[10px] text-danger/90">
-                        {debt.sessions > 0 && (
-                          <>
-                            Séances suivies et non payées : {debt.sessions} DA — c&apos;est
-                            exactement ce que son solde affiche en négatif.{" "}
-                          </>
-                        )}
-                        {debt.registration > 0 && (
-                          <>Frais d&apos;inscription impayés : {debt.registration} DA. </>
-                        )}
-                        Chaque nouvelle séance creuse la dette d&apos;autant.
-                      </span>
-                    </div>
-                  </div>
-                  <Button size="sm" variant="danger" onClick={() => openPayDebt(selectedStudent)}>
-                    <DollarSign className="me-1 h-3.5 w-3.5" /> Régler la dette
-                  </Button>
-                </div>
-              );
-            })()}
-
-            {/* L'INCOHÉRENCE, séparée de la DETTE — parce qu'on n'en fait pas la
-                même chose. Une dette s'encaisse au guichet ; un solde qui
-                s'écarte de son propre historique se répare en base. Les
-                mélanger, c'était réclamer à la famille de l'argent qu'elle ne
-                devait pas. */}
-            {(() => {
-              const drift = debtOf(selectedStudent).drift;
-              if (drift === 0) return null;
-              return (
-                <div className="flex items-start gap-2 rounded-xl border border-warning/50 bg-warning/10 p-3">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-                  <div>
-                    <strong className="block text-xs font-bold text-warning">
-                      SOLDE À VÉRIFIER : {Math.abs(drift)} DA d&apos;écart avec l&apos;historique
-                    </strong>
-                    <span className="text-[10px] text-warning/90">
-                      Le solde affiché ({selectedStudent.balance} DA) ne vaut pas la somme des
-                      lignes de l&apos;onglet Transactions ({selectedStudent.balance - drift} DA).
-                      Ce n&apos;est pas un montant à encaisser : c&apos;est une écriture qui a
-                      manqué sa cible. À corriger en base avec{" "}
-                      <code className="font-mono">reconcile_student_balances(true)</code>.
-                    </span>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Navigation Tabs inside details modal */}
-            <div className="flex border-b border-line gap-2">
-              <button
-                onClick={() => setDetailsTab("personal")}
-                className={`pb-2.5 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
-                  detailsTab === "personal" ? "border-primary text-primary" : "border-transparent text-muted hover:text-ink"
-                }`}
-              >
-                <User className="h-4 w-4" /> Personnel
-              </button>
-              <button
-                onClick={() => setDetailsTab("subs")}
-                className={`pb-2.5 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
-                  detailsTab === "subs" ? "border-primary text-primary" : "border-transparent text-muted hover:text-ink"
-                }`}
-              >
-                <BookOpen className="h-4 w-4" /> Abonnements ({selectedStudent.subscriptionIds.length})
-              </button>
-              <button
-                onClick={() => setDetailsTab("payments")}
-                className={`pb-2.5 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
-                  detailsTab === "payments" ? "border-primary text-primary" : "border-transparent text-muted hover:text-ink"
-                }`}
-              >
-                <History className="h-4 w-4" /> Transactions ({balanceTx.filter((t) => t.studentId === selectedStudent.id).length})
-              </button>
-              <button
-                onClick={() => setDetailsTab("attendance")}
-                className={`pb-2.5 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
-                  detailsTab === "attendance" ? "border-primary text-primary" : "border-transparent text-muted hover:text-ink"
-                }`}
-              >
-                <CheckCircle className="h-4 w-4" /> Présences &amp; Absences (
-                {attendance.filter((t) => t.studentId === selectedStudent.id).length +
-                  absencePenalties.filter((p) => p.studentId === selectedStudent.id).length}
-                )
-              </button>
-            </div>
-
-            {/* Tab Contents */}
-            <div className="min-h-[220px]">
-              {detailsTab === "personal" && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                  <div>
-                    <span className="text-muted block font-semibold mb-0.5">Date de naissance:</span>
-                    <span className="text-ink font-bold">{selectedStudent.birthDate || "-"}</span>
-                  </div>
-                  <div>
-                    <span className="text-muted block font-semibold mb-0.5">Téléphone:</span>
-                    <span className="text-ink font-bold">{selectedStudent.phone}</span>
-                  </div>
-                  <div>
-                    <span className="text-muted block font-semibold mb-0.5">Email de connexion:</span>
-                    <span className="text-ink font-bold">{selectedStudent.email}</span>
-                  </div>
-                  <div>
-                    <span className="text-muted block font-semibold mb-0.5">Mot de passe de connexion:</span>
-                    <span className="text-ink font-bold text-xs italic text-muted">
-                      Non affiché — utilisez « Modifier » pour définir un nouveau mot de passe.
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-muted block font-semibold mb-0.5">Tuteur affecté:</span>
-                    <span className="text-ink font-bold">
-                      {parents.find((p) => p.id === selectedStudent.parentId)
-                        ? `${parents.find((p) => p.id === selectedStudent.parentId)?.firstName} ${
-                            parents.find((p) => p.id === selectedStudent.parentId)?.lastName
-                          } (${parents.find((p) => p.id === selectedStudent.parentId)?.phone})`
-                        : "Aucun tuteur assigné"}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {detailsTab === "subs" && (
-                <div className="space-y-2">
-                  {selectedStudent.subscriptionIds.length === 0 ? (
-                    <p className="text-xs text-muted italic">Non inscrit à des cours ou stages.</p>
-                  ) : (
-                    selectedStudent.subscriptionIds.map((subId) => {
-                      const sub = subscriptions.find((s) => s.id === subId);
-                      const isCw = !sub; // If not in subscriptions, check coursework
-                      const cw = coursework.find((c) => c.id === subId);
-                      const formationSub = isCw ? undefined : getFormationSub(subId);
-                      const dates = selectedStudent.subscriptionDates?.[subId];
-                      const days = dates?.expiryDate ? daysUntil(dates.expiryDate) : null;
-                      return (
-                        <div key={subId} className="flex justify-between items-center text-xs bg-canvas border border-line p-3 rounded-xl">
-                          <div>
-                            <strong className="text-ink block">{getSubLabel(subId)}</strong>
-                            <span className="text-[10px] text-muted">
-                              {isCw
-                                ? "Stage Intensif"
-                                : formationSub
-                                  ? `Formation · Prix du niveau: ${formationSub.levelPrice ?? 0} DA · ${formationSub.periodMonths ?? 0} mois`
-                                  : `Tarif: ${sub?.pricePerSession} DA / séance`}
-                            </span>
-                            {!isCw && (
-                              <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted">
-                                <span>
-                                  Inscrit le <strong className="text-ink">{formatDateFr(dates?.subscribedAt)}</strong>
-                                </span>
-                                <span>
-                                  · Début <strong className="text-ink">{formatDateFr(dates?.startDate)}</strong>
-                                </span>
-                                {dates?.startDate && daysUntil(dates.startDate) > 0 && (
-                                  <Badge tone="success" className="text-[9px] px-1.5 py-0">
-                                    Pas encore commencé — séances offertes
-                                  </Badge>
-                                )}
-                              </span>
-                            )}
-                            {formationSub && dates?.expiryDate && days !== null && (
-                              <span className="flex items-center gap-1.5 mt-0.5 text-[10px] text-muted">
-                                Du {formatDateFr(dates.startDate)} au {formatDateFr(dates.expiryDate)}
-                                <Badge
-                                  tone={days < 0 ? "danger" : days <= EXPIRY_WARNING_DAYS ? "warning" : "success"}
-                                  className="text-[9px] px-1.5 py-0"
-                                >
-                                  {days < 0
-                                    ? "Expirée"
-                                    : days === 0
-                                      ? "Expire aujourd'hui"
-                                      : days <= EXPIRY_WARNING_DAYS
-                                        ? `Expire dans ${days} j`
-                                        : "Active"}
-                                </Badge>
-                              </span>
-                            )}
-                          </div>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => {
-                              if (confirm("Se désabonner de ce module ?")) {
-                                updateItem("students", selectedStudent.id, {
-                                  subscriptionIds: selectedStudent.subscriptionIds.filter((id) => id !== subId),
-                                });
-                              }
-                            }}
-                            className="text-danger hover:bg-danger/10"
-                          >
-                            Désinscrire
-                          </Button>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              )}
-
-              {detailsTab === "payments" && (() => {
-                const moduleOptions = getStudentModuleOptions(selectedStudent);
-                const filterModuleName =
-                  txModuleFilter === "all" ? "" : modules.find((m) => m.id === txModuleFilter)?.name ?? "";
-                const txList = balanceTx.filter((t) => {
-                  if (t.studentId !== selectedStudent.id) return false;
-                  if (txModuleFilter === "all") return true;
-                  // Rows older than balance_tx.module_id are matched by the
-                  // module name embedded in their description.
-                  if (t.moduleId) return t.moduleId === txModuleFilter;
-                  return !!filterModuleName && t.description.toLowerCase().includes(filterModuleName.toLowerCase());
-                });
-                return (
-                  <div className="space-y-3">
-                    <div className="flex flex-wrap items-center gap-2 bg-canvas/40 border border-line rounded-xl p-2">
-                      <label className="text-[10px] font-bold text-muted uppercase shrink-0">Module :</label>
-                      <Select value={txModuleFilter} onChange={(e) => setTxModuleFilter(e.target.value)} className="w-52">
-                        <option value="all">Tous les modules</option>
-                        {moduleOptions.map((m) => (
-                          <option key={m.id} value={m.id}>{m.name}</option>
-                        ))}
-                      </Select>
-                      <span className="text-[10px] text-muted ms-auto font-mono">{txList.length} transaction(s)</span>
-                    </div>
-                    <div className="space-y-2 max-h-60 overflow-y-auto">
-                      {txList.length === 0 ? (
-                        <p className="text-xs text-muted italic">Aucune transaction pour ce filtre.</p>
-                      ) : (
-                        [...txList].reverse().map((tx) => {
-                          const isAbsence = tx.amount < 0 && tx.description.startsWith("Absence hebdomadaire");
-                          return (
-                            <div
-                              key={tx.id}
-                              className={`flex justify-between items-center gap-2 text-xs p-3 rounded-xl border ${
-                                isAbsence ? "bg-warning/5 border-warning/40" : "bg-canvas border-line"
-                              }`}
-                            >
-                              <div className="min-w-0">
-                                <strong className="text-ink block flex items-center gap-1.5">
-                                  {isAbsence && <Badge tone="warning">Absence</Badge>}
-                                  {tx.description}
-                                </strong>
-                                <span className="text-[10px] text-muted">
-                                  {tx.date.substring(0, 16).replace("T", " ")} · {TX_TYPE_LABELS[tx.type]}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <strong className={tx.amount > 0 ? "text-success font-bold" : "text-danger font-bold"}>
-                                  {tx.amount > 0 ? `+${tx.amount}` : tx.amount} DA
-                                </strong>
-                                {/* Correction manuelle d'une ligne (montant saisi de travers, doublon…) */}
-                                <button
-                                  onClick={() => openEditTx(tx)}
-                                  title="Modifier cette transaction"
-                                  className="p-1.5 rounded-lg text-muted hover:bg-primary-50 hover:text-primary transition-colors"
-                                >
-                                  <Edit className="h-3.5 w-3.5" />
-                                </button>
-                                <button
-                                  onClick={() => openDeleteTx(tx)}
-                                  title="Supprimer cette transaction"
-                                  className="p-1.5 rounded-lg text-muted hover:bg-danger/10 hover:text-danger transition-colors"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
-
-              {detailsTab === "attendance" && (() => {
-                const moduleOptions = getStudentModuleOptions(selectedStudent);
-                const inDateWindow = (when: Date) => {
-                  if (attDateMode === "month" && attMonth) {
-                    const key = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}`;
-                    if (key !== attMonth) return false;
-                  }
-                  if (attDateMode === "range") {
-                    if (attStart && when < new Date(`${attStart}T00:00:00`)) return false;
-                    if (attEnd && when > new Date(`${attEnd}T23:59:59.999`)) return false;
-                  }
-                  return true;
-                };
-                const attList = attendance.filter((att) => {
-                  if (att.studentId !== selectedStudent.id) return false;
-                  if (attModuleFilter !== "all") {
-                    const sess = sessions.find((se) => se.id === att.sessionId);
-                    if (!sess || sess.moduleId !== attModuleFilter) return false;
-                  }
-                  if (attKindFilter === "absent" && att.status !== "absent") return false;
-                  if (attKindFilter === "present" && att.status === "absent") return false;
-                  return inDateWindow(new Date(att.timestamp));
-                });
-                // Automatic weekly-absence charges, shown alongside real scans so
-                // the presence history tells the whole story (a "-price DA" entry
-                // for every module week the student never showed up for).
-                const penList = absencePenalties.filter((pen) => {
-                  if (pen.studentId !== selectedStudent.id) return false;
-                  if (attModuleFilter !== "all" && pen.moduleId !== attModuleFilter) return false;
-                  if (attKindFilter === "present") return false;
-                  return inDateWindow(new Date(`${pen.periodEnd}T12:00:00`));
-                });
-                const presentCount = attList.filter((a) => a.status !== "absent").length;
-                const lateCount = attList.filter((a) => a.status === "late").length;
-                const absentTotal = attList.filter((a) => a.status === "absent").length + penList.length;
-                const chargedTotal =
-                  attList.reduce((sum, a) => sum + a.amountDeducted, 0) +
-                  penList.reduce((sum, p) => sum + p.amount, 0);
-                const fmtDay = (d: string) => d.split("-").reverse().join("/");
-                const rows = [
-                  ...attList.map((att) => ({ kind: "att" as const, id: att.id, when: new Date(att.timestamp), att })),
-                  ...penList.map((pen) => ({ kind: "pen" as const, id: pen.id, when: new Date(`${pen.periodEnd}T12:00:00`), pen })),
-                ].sort((a, b) => b.when.getTime() - a.when.getTime());
-                return (
-                  <div className="space-y-3">
-                    <div className="flex flex-wrap items-center gap-2 bg-canvas/40 border border-line rounded-xl p-2">
-                      <label className="text-[10px] font-bold text-muted uppercase shrink-0">Module :</label>
-                      <Select value={attModuleFilter} onChange={(e) => setAttModuleFilter(e.target.value)} className="w-44">
-                        <option value="all">Tous les modules</option>
-                        {moduleOptions.map((m) => (
-                          <option key={m.id} value={m.id}>{m.name}</option>
-                        ))}
-                      </Select>
-
-                      <label className="text-[10px] font-bold text-muted uppercase shrink-0 ms-2">Date :</label>
-                      <div className="flex gap-1">
-                        {([
-                          ["all", "Tout"],
-                          ["month", "Par mois"],
-                          ["range", "Période"],
-                        ] as const).map(([mode, label]) => (
-                          <Button
-                            key={mode}
-                            size="sm"
-                            variant={attDateMode === mode ? "primary" : "outline"}
-                            onClick={() => setAttDateMode(mode)}
-                          >
-                            {label}
-                          </Button>
-                        ))}
-                      </div>
-
-                      {attDateMode === "month" && (
-                        <Input
-                          type="month"
-                          value={attMonth}
-                          onChange={(e) => setAttMonth(e.target.value)}
-                          className="w-40"
-                        />
-                      )}
-                      {attDateMode === "range" && (
-                        <div className="flex items-center gap-1.5">
-                          <Input type="date" value={attStart} onChange={(e) => setAttStart(e.target.value)} className="w-36" />
-                          <span className="text-[10px] text-muted">→</span>
-                          <Input type="date" value={attEnd} onChange={(e) => setAttEnd(e.target.value)} className="w-36" />
-                        </div>
-                      )}
-
-                      <label className="text-[10px] font-bold text-muted uppercase shrink-0 ms-2">Type :</label>
-                      <div className="flex gap-1">
-                        {([
-                          ["all", "Tout"],
-                          ["present", "Présences"],
-                          ["absent", "Absences"],
-                        ] as const).map(([mode, label]) => (
-                          <Button
-                            key={mode}
-                            size="sm"
-                            variant={attKindFilter === mode ? "primary" : "outline"}
-                            onClick={() => setAttKindFilter(mode)}
-                          >
-                            {label}
-                          </Button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Compte-rendu du filtre courant */}
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      <div className="rounded-xl border border-success/30 bg-success/5 p-2 text-center">
-                        <span className="block text-[10px] font-semibold text-muted">Présences</span>
-                        <strong className="text-sm text-success">{presentCount}</strong>
-                      </div>
-                      <div className="rounded-xl border border-warning/30 bg-warning/5 p-2 text-center">
-                        <span className="block text-[10px] font-semibold text-muted">Dont retards</span>
-                        <strong className="text-sm text-warning">{lateCount}</strong>
-                      </div>
-                      <div className="rounded-xl border border-danger/30 bg-danger/5 p-2 text-center">
-                        <span className="block text-[10px] font-semibold text-muted">Absences</span>
-                        <strong className="text-sm text-danger">{absentTotal}</strong>
-                      </div>
-                      <div className="rounded-xl border border-line bg-canvas/40 p-2 text-center">
-                        <span className="block text-[10px] font-semibold text-muted">Total débité</span>
-                        <strong className="text-sm text-ink">{chargedTotal} DA</strong>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2 max-h-72 overflow-y-auto">
-                      {rows.length === 0 ? (
-                        <p className="text-xs text-muted italic">Aucune présence ni absence pour ces filtres.</p>
-                      ) : (
-                        rows.map((row) => {
-                          if (row.kind === "att") {
-                            const att = row.att;
-                            const s = sessions.find((se) => se.id === att.sessionId);
-                            const modName = s ? modules.find((m) => m.id === s.moduleId)?.name : "Module";
-                            const grpName = s ? groups.find((g) => g.id === s.groupId)?.name : undefined;
-                            const salleName = s ? salles.find((sl) => sl.id === s.salleId)?.name : undefined;
-                            const isAbsent = att.status === "absent";
-                            return (
-                              <div
-                                key={att.id}
-                                className={`flex flex-wrap justify-between items-center gap-2 text-xs p-3 rounded-xl border ${
-                                  isAbsent ? "bg-danger/5 border-danger/30" : "bg-canvas border-line"
-                                }`}
-                              >
-                                <div className="min-w-0">
-                                  <strong className="text-ink block">
-                                    {isAbsent ? "Absence" : "Présence"}: {modName}
-                                    {grpName ? <span className="text-muted font-semibold"> — {grpName}</span> : null}
-                                    {att.substituteGroup && (
-                                      <Badge tone="primary" className="ms-1.5 text-[9px] px-1.5 py-0">
-                                        <Repeat className="me-0.5 inline h-2.5 w-2.5" /> Autre groupe
-                                      </Badge>
-                                    )}
-                                  </strong>
-                                  <span className="text-[10px] text-muted">
-                                    {att.timestamp.substring(0, 16).replace("T", " ")}
-                                    {s ? ` · ${s.startTime}-${s.endTime}` : ""}
-                                    {salleName ? ` · Salle ${salleName}` : ""}
-                                  </span>
-                                </div>
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  <Badge tone={att.status === "present" ? "success" : att.status === "late" ? "warning" : "danger"}>
-                                    {att.status === "present" ? "Présent" : att.status === "late" ? "En retard" : "Absent"}
-                                  </Badge>
-                                  {(() => {
-                                    // « Pourquoi le solde n'a-t-il pas bougé ? » se lit ICI :
-                                    // c'est la première chose qu'on regarde quand on croit à
-                                    // une panne de facturation. La raison est donc écrite en
-                                    // clair, et non seulement dans une infobulle.
-                                    const reason = freeReasonOf(att, {
-                                      studentIsFree: selectedStudent.isFree,
-                                      sessionIsFree: !!s?.isFree,
-                                    });
-                                    if (!reason) {
-                                      return (
-                                        <span className="font-bold text-danger text-[10px]">
-                                          -{att.amountDeducted} DA
-                                        </span>
-                                      );
-                                    }
-                                    const waived = att.waivedAmount ?? 0;
-                                    return (
-                                      <span
-                                        className="text-[10px] font-bold text-success"
-                                        title={FREE_REASON_HINTS[reason]}
-                                      >
-                                        Offert · {FREE_REASON_LABELS[reason]}
-                                        {waived > 0 ? ` (${waived} DA)` : ""}
-                                      </span>
-                                    );
-                                  })()}
-                                  <button
-                                    onClick={() => openEditAtt(att)}
-                                    title="Modifier cette présence"
-                                    className="p-1.5 rounded-lg text-muted hover:bg-primary-50 hover:text-primary transition-colors"
-                                  >
-                                    <Edit className="h-3.5 w-3.5" />
-                                  </button>
-                                  <button
-                                    onClick={() => setDeletingAtt(att)}
-                                    title="Supprimer cette présence (et rembourser)"
-                                    className="p-1.5 rounded-lg text-muted hover:bg-danger/10 hover:text-danger transition-colors"
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                  </button>
-                                </div>
-                              </div>
-                            );
-                          }
-                          const pen = row.pen;
-                          const s = sessions.find((se) => se.id === pen.sessionId);
-                          const modName = modules.find((m) => m.id === pen.moduleId)?.name ?? "Module";
-                          const grpName = s ? groups.find((g) => g.id === s.groupId)?.name : undefined;
-                          return (
-                            <div key={pen.id} className="flex flex-wrap justify-between items-center gap-2 text-xs bg-danger/5 border border-danger/30 p-3 rounded-xl">
-                              <div className="min-w-0">
-                                <strong className="text-ink block">
-                                  Absence facturée: {modName}
-                                  {grpName ? <span className="text-muted font-semibold"> — {grpName}</span> : null}
-                                </strong>
-                                <span className="text-[10px] text-muted">
-                                  Semaine du {fmtDay(pen.periodStart)} au {fmtDay(pen.periodEnd)}
-                                  {" · "}solde après : <span className={pen.balanceAfter < 0 ? "text-danger font-bold" : ""}>{pen.balanceAfter} DA</span>
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <Badge tone="danger">Absent (semaine)</Badge>
-                                <span className="font-bold text-danger text-[10px]">-{pen.amount} DA</span>
-                                <button
-                                  onClick={() => setDeletingPen(pen)}
-                                  title="Supprimer cette absence (et rembourser)"
-                                  className="p-1.5 rounded-lg text-muted hover:bg-danger/10 hover:text-danger transition-colors"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            <div className="flex justify-end pt-2 border-t border-line">
-              <Button onClick={() => setIsDetailsOpen(false)}>Fermer</Button>
-            </div>
-          </div>
-        )}
-      </Modal>
-
-      {/* Edit one line of the balance history — the RPC moves students.balance
-          by the same delta, so history and balance can never drift apart. */}
-      <Modal open={!!editingTx} onClose={closeTxModals} title="Modifier la transaction">
-        {editingTx && (() => {
-          const owner = students.find((s) => s.id === editingTx.studentId);
-          const previewBalance = (owner?.balance ?? 0) - editingTx.amount + Math.round(txAmount || 0);
-          const delta = Math.round(txAmount || 0) - editingTx.amount;
-          return (
-            <div className="space-y-4">
-              <div className="bg-canvas border border-line rounded-xl p-3 text-xs space-y-0.5">
-                <strong className="text-ink block">
-                  {owner ? `${owner.firstName} ${owner.lastName}` : "Étudiant"}
-                </strong>
-                <span className="text-muted block">
-                  Ligne d&apos;origine : {editingTx.amount > 0 ? `+${editingTx.amount}` : editingTx.amount} DA ·{" "}
-                  {editingTx.date.substring(0, 16).replace("T", " ")}
-                </span>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Type</label>
-                <Select value={txType} onChange={(e) => setTxType(e.target.value as BalanceTxType)} className="w-full">
-                  {(Object.keys(TX_TYPE_LABELS) as BalanceTxType[]).map((t) => (
-                    <option key={t} value={t}>{TX_TYPE_LABELS[t]}</option>
-                  ))}
-                </Select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Montant (DA)</label>
-                <Input
-                  type="number"
-                  value={txAmount}
-                  onChange={(e) => setTxAmount(Number(e.target.value))}
-                />
-                <p className="text-[10px] text-muted mt-1">
-                  Montant signé : <strong>positif</strong> pour un versement/crédit, <strong>négatif</strong> pour un débit.
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Description</label>
-                <Input value={txDescription} onChange={(e) => setTxDescription(e.target.value)} />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-muted mb-1">Date</label>
-                <Input type="datetime-local" value={txDate} onChange={(e) => setTxDate(e.target.value)} />
-              </div>
-
-              {editingTx.type === "topup" && (
-                <label className="flex items-center justify-between p-3 bg-canvas border border-line rounded-xl cursor-pointer">
-                  <span className="text-xs font-bold text-ink">
-                    Corriger aussi la caisse
-                    <span className="block text-[10px] font-normal text-muted">
-                      Écrit une écriture de correction de {delta > 0 ? `+${delta}` : delta} DA dans la caisse
-                      (le versement d&apos;origine y avait été enregistré).
-                    </span>
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={txAdjustCash}
-                    onChange={(e) => setTxAdjustCash(e.target.checked)}
-                    className="h-5 w-5 shrink-0"
-                  />
-                </label>
-              )}
-
-              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                <span className="font-semibold text-muted">Solde après correction</span>
-                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button variant="outline" onClick={closeTxModals} disabled={txBusy}>
-                  Annuler
-                </Button>
-                <Button onClick={handleUpdateTx} disabled={txBusy || !txDate}>
-                  {txBusy ? "Enregistrement…" : "Enregistrer"}
-                </Button>
-              </div>
-            </div>
-          );
-        })()}
-      </Modal>
-
-      {/* Delete one line of the balance history */}
-      <Modal open={!!deletingTx} onClose={closeTxModals} title="Supprimer la transaction">
-        {deletingTx && (() => {
-          const owner = students.find((s) => s.id === deletingTx.studentId);
-          const previewBalance = (owner?.balance ?? 0) - deletingTx.amount;
-          return (
-            <div className="space-y-4">
-              <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
-                <AlertTriangle className="h-4 w-4 text-danger shrink-0 mt-0.5" />
-                <p className="text-xs text-ink leading-relaxed">
-                  Cette transaction sera définitivement supprimée et son effet sur le solde annulé.
-                  {deletingTx.type === "deduction" && (
-                    <span className="block mt-1 text-muted">
-                      La présence liée (onglet « Présences ») n&apos;est pas supprimée pour autant.
-                    </span>
-                  )}
-                </p>
-              </div>
-
-              <div className="bg-canvas border border-line rounded-xl p-3 text-xs space-y-0.5">
-                <strong className="text-ink block">{deletingTx.description}</strong>
-                <span className="text-muted block">
-                  {owner ? `${owner.firstName} ${owner.lastName} · ` : ""}
-                  {deletingTx.date.substring(0, 16).replace("T", " ")} · {TX_TYPE_LABELS[deletingTx.type]}
-                </span>
-                <strong className={deletingTx.amount > 0 ? "text-success" : "text-danger"}>
-                  {deletingTx.amount > 0 ? `+${deletingTx.amount}` : deletingTx.amount} DA
-                </strong>
-              </div>
-
-              {deletingTx.type === "topup" && (
-                <label className="flex items-center justify-between p-3 bg-canvas border border-line rounded-xl cursor-pointer">
-                  <span className="text-xs font-bold text-ink">
-                    Corriger aussi la caisse
-                    <span className="block text-[10px] font-normal text-muted">
-                      Écrit une écriture d&apos;annulation de {-deletingTx.amount} DA dans la caisse.
-                    </span>
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={txAdjustCash}
-                    onChange={(e) => setTxAdjustCash(e.target.checked)}
-                    className="h-5 w-5 shrink-0"
-                  />
-                </label>
-              )}
-
-              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                <span className="font-semibold text-muted">Solde après suppression</span>
-                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button variant="outline" onClick={closeTxModals} disabled={txBusy}>
-                  Annuler
-                </Button>
-                <Button variant="danger" onClick={handleDeleteTx} disabled={txBusy}>
-                  {txBusy ? "Suppression…" : "Supprimer"}
-                </Button>
-              </div>
-            </div>
-          );
-        })()}
-      </Modal>
-
-      {/* Correct one presence — the RPC moves the balance by the same delta */}
-      <Modal open={!!editingAtt} onClose={closeAttModals} title="Modifier la présence">
-        {editingAtt && (() => {
-          const s = sessions.find((se) => se.id === editingAtt.sessionId);
-          const modName = s ? modules.find((m) => m.id === s.moduleId)?.name ?? "Module" : "Module";
-          const grpName = s ? groups.find((g) => g.id === s.groupId)?.name ?? "-" : "-";
-          const owner = students.find((st) => st.id === editingAtt.studentId);
-          const delta = Math.max(0, Math.round(attEditAmount || 0)) - editingAtt.amountDeducted;
-          const previewBalance = (owner?.balance ?? 0) - delta;
-          return (
-            <div className="space-y-4">
-              <div className="rounded-xl border border-line bg-canvas p-3 text-xs space-y-0.5">
-                <strong className="block text-ink">
-                  {modName} — {grpName}
-                  {editingAtt.substituteGroup && (
-                    <Badge tone="primary" className="ms-1.5 text-[9px] px-1.5 py-0">Autre groupe</Badge>
-                  )}
-                </strong>
-                <span className="block text-muted">
-                  {owner ? `${owner.firstName} ${owner.lastName} · ` : ""}
-                  {s ? `${formatDays(s.days)} · ${s.startTime}-${s.endTime}` : ""}
-                </span>
-                <span className="block text-muted">
-                  Débit d&apos;origine : {editingAtt.amountDeducted} DA
-                </span>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs font-semibold text-muted">Statut</label>
-                <Select
-                  value={attEditStatus}
-                  onChange={(e) => setAttEditStatus(e.target.value as AttendanceStatus)}
-                  className="w-full"
-                >
-                  <option value="present">Présent</option>
-                  <option value="late">En retard</option>
-                  <option value="absent">Absent</option>
-                </Select>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs font-semibold text-muted">Date et heure</label>
-                <Input type="datetime-local" value={attEditDate} onChange={(e) => setAttEditDate(e.target.value)} />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs font-semibold text-muted">Montant débité (DA)</label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={attEditAmount}
-                  onChange={(e) => setAttEditAmount(Number(e.target.value))}
-                />
-                <p className="mt-1 text-[10px] text-muted">
-                  La différence est reportée sur le solde de l&apos;élève et tracée dans ses transactions.
-                  Mettez <strong>0</strong> pour une séance offerte.
-                </p>
-              </div>
-
-              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                <span className="font-semibold text-muted">Solde après correction</span>
-                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>Annuler</Button>
-                <Button onClick={handleUpdateAtt} disabled={attBusy || !attEditDate}>
-                  {attBusy ? "Enregistrement…" : "Enregistrer"}
-                </Button>
-              </div>
-            </div>
-          );
-        })()}
-      </Modal>
-
-      {/* Delete one presence — refunds the séance and clears the teacher due */}
-      <Modal open={!!deletingAtt} onClose={closeAttModals} title="Supprimer la présence">
-        {deletingAtt && (() => {
-          const s = sessions.find((se) => se.id === deletingAtt.sessionId);
-          const modName = s ? modules.find((m) => m.id === s.moduleId)?.name ?? "Module" : "Module";
-          const grpName = s ? groups.find((g) => g.id === s.groupId)?.name ?? "-" : "-";
-          const owner = students.find((st) => st.id === deletingAtt.studentId);
-          const previewBalance = (owner?.balance ?? 0) + deletingAtt.amountDeducted;
-          return (
-            <div className="space-y-4">
-              <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
-                <p className="text-xs leading-relaxed text-ink">
-                  La présence sera supprimée, les {deletingAtt.amountDeducted} DA débités seront remboursés
-                  et la part due à l&apos;enseignant pour cette séance sera annulée.
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-line bg-canvas p-3 text-xs space-y-0.5">
-                <strong className="block text-ink">{modName} — {grpName}</strong>
-                <span className="block text-muted">
-                  {owner ? `${owner.firstName} ${owner.lastName} · ` : ""}
-                  {deletingAtt.timestamp.substring(0, 16).replace("T", " ")}
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                <span className="font-semibold text-muted">Solde après suppression</span>
-                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>Annuler</Button>
-                <Button variant="danger" onClick={handleDeleteAtt} disabled={attBusy}>
-                  {attBusy ? "Suppression…" : "Supprimer"}
-                </Button>
-              </div>
-            </div>
-          );
-        })()}
-      </Modal>
-
-      {/* Delete one automatic weekly-absence charge */}
-      <Modal open={!!deletingPen} onClose={closeAttModals} title="Supprimer l'absence facturée">
-        {deletingPen && (() => {
-          const modName = modules.find((m) => m.id === deletingPen.moduleId)?.name ?? "Module";
-          const owner = students.find((st) => st.id === deletingPen.studentId);
-          const previewBalance = (owner?.balance ?? 0) + deletingPen.amount;
-          const fmt = (d: string) => d.split("-").reverse().join("/");
-          return (
-            <div className="space-y-4">
-              <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
-                <p className="text-xs leading-relaxed text-ink">
-                  L&apos;absence hebdomadaire sera supprimée, les {deletingPen.amount} DA facturés seront
-                  remboursés et la ligne correspondante disparaîtra de l&apos;historique du solde.
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-line bg-canvas p-3 text-xs space-y-0.5">
-                <strong className="block text-ink">{modName}</strong>
-                <span className="block text-muted">
-                  {owner ? `${owner.firstName} ${owner.lastName} · ` : ""}
-                  Semaine du {fmt(deletingPen.periodStart)} au {fmt(deletingPen.periodEnd)}
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                <span className="font-semibold text-muted">Solde après suppression</span>
-                <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>Annuler</Button>
-                <Button variant="danger" onClick={handleDeletePenalty} disabled={attBusy}>
-                  {attBusy ? "Suppression…" : "Supprimer"}
-                </Button>
-              </div>
-            </div>
-          );
-        })()}
-      </Modal>
+      {/* Fiche Étudiant — la même fenêtre que sur la fiche d'une classe :
+          onglets, corrections de transactions et de présences, dette. */}
+      <StudentDetailsModal
+        studentId={detailsStudentId}
+        open={!!detailsStudentId}
+        onClose={() => setDetailsStudentId(null)}
+      />
 
       {/* Inscriptions Modal — les créneaux se choisissent ici exactement comme
           sur l'écran « Ajouter un étudiant » : niveau → année → filière, puis
@@ -5187,106 +3904,9 @@ export function StudentsPage() {
         )}
       </Modal>
 
-      {/* Pay Debt (Régler dette) Modal */}
-      <Modal open={isPayDebtOpen} onClose={() => setIsPayDebtOpen(false)} title="Paiement de Dette">
-        <div className="space-y-4">
-          {selectedStudent && (
-            <div className="bg-canvas border border-line p-3 rounded-xl text-xs space-y-1">
-              <div>
-                <span className="text-muted block text-[10px] uppercase">Étudiant</span>
-                <strong className="text-ink">{selectedStudent.firstName} {selectedStudent.lastName}</strong>
-              </div>
-              <div className="flex justify-between border-t border-line/50 pt-1.5 mt-1">
-                <span className="text-muted">Solde:</span>
-                <strong className={selectedStudent.balance < 0 ? "text-danger" : "text-success"}>
-                  {selectedStudent.balance} DA
-                </strong>
-              </div>
-              {debtOf(selectedStudent).sessions > 0 ? (
-                <div className="flex justify-between">
-                  <span className="text-muted">Séances suivies non payées:</span>
-                  <strong className="text-danger">{debtOf(selectedStudent).sessions} DA</strong>
-                </div>
-              ) : null}
-              {debtOf(selectedStudent).registration > 0 ? (
-                <div className="flex justify-between">
-                  <span className="text-muted">Frais inscription:</span>
-                  <strong className="text-danger">{debtOf(selectedStudent).registration} DA</strong>
-                </div>
-              ) : null}
-              <div className="flex justify-between border-t border-line/50 pt-1.5 mt-1">
-                <span className="font-bold text-ink">Total dû:</span>
-                <strong className="text-danger">{debtOf(selectedStudent).total} DA</strong>
-              </div>
-              {/* Le solde ne vaut pas la somme de son historique : le montant
-                  réclamé ci-dessus est donc calculé sur une valeur douteuse.
-                  Le guichet doit le savoir AVANT d'encaisser. */}
-              {debtOf(selectedStudent).drift !== 0 && (
-                <div className="mt-1 rounded-lg border border-warning/40 bg-warning/10 p-2 text-[10px] leading-relaxed text-warning">
-                  <strong className="block">
-                    Solde à vérifier : {Math.abs(debtOf(selectedStudent).drift)} DA d&apos;écart
-                    avec l&apos;historique.
-                  </strong>
-                  Le « Total dû » ci-dessus est calculé sur le solde stocké, qui ne correspond pas
-                  à la somme de ses transactions. Faites corriger la base
-                  (<code className="font-mono">reconcile_student_balances</code>) avant
-                  d&apos;encaisser.
-                </div>
-              )}
-              {/* L'ordre d'imputation est décidé côté serveur : l'annoncer ici,
-                  chiffré sur le montant tapé, évite la question « pourquoi mon
-                  solde n'a pas bougé de tout le versement ? ». */}
-              {payAmount > 0 &&
-                (() => {
-                  const split = allocateDebtPayment(payAmount, debtOf(selectedStudent));
-                  return (
-                    <div className="mt-1 space-y-0.5 rounded-lg border border-primary/30 bg-primary/5 p-2 text-[10px]">
-                      <strong className="block text-primary">Ce versement ira :</strong>
-                      {split.registration > 0 && (
-                        <div className="flex justify-between">
-                          <span className="text-muted">Frais d&apos;inscription :</span>
-                          <strong className="text-ink">{split.registration} DA</strong>
-                        </div>
-                      )}
-                      {split.sessions > 0 && (
-                        <div className="flex justify-between">
-                          <span className="text-muted">Séances suivies non payées :</span>
-                          <strong className="text-ink">{split.sessions} DA</strong>
-                        </div>
-                      )}
-                      {split.credited > 0 && (
-                        <div className="flex justify-between">
-                          <span className="text-muted">Porté au solde :</span>
-                          <strong className="text-success">{split.credited} DA</strong>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-              <p className="pt-1 text-[10px] leading-relaxed text-muted">
-                Recharger le solde règle la dette de la même façon, par simple addition.
-              </p>
-            </div>
-          )}
-
-          <div>
-            <label className="block text-xs font-semibold text-muted mb-1 font-sans">Montant remboursé (DA) *</label>
-            <Input
-              type="number"
-              value={payAmount || ""}
-              onChange={(e) => setPayAmount(Number(e.target.value))}
-              placeholder="Ex: 1000"
-            />
-          </div>
-
-          <div className="flex justify-end gap-2 pt-4">
-            <Button variant="outline" onClick={() => setIsPayDebtOpen(false)}>
-              Annuler
-            </Button>
-            <Button onClick={handlePayDebtSubmit}>Enregistrer le paiement</Button>
-          </div>
-        </div>
-      </Modal>
+      {/* Pay Debt (Régler dette) — fenêtre partagée avec la fiche élève et la
+          fiche classe : la répartition annoncée est celle que la base fera. */}
+      <PayDebtModal studentId={payDebtStudentId} onClose={() => setPayDebtStudentId(null)} />
 
       {/* Card scanner Modal */}
       <Modal
@@ -5484,7 +4104,7 @@ export function StudentsPage() {
 
           {/* List of low balance students */}
           <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
-            {students.filter(isSoonToRunOut).length === 0 ? (
+            {soonStudents.length === 0 ? (
               <p className="text-xs text-muted italic p-4 text-center">Aucun étudiant n'a son solde presque épuisé en ce moment.</p>
             ) : (
               <>
@@ -5492,10 +4112,10 @@ export function StudentsPage() {
                   <label className="flex items-center gap-2 text-xs font-bold text-ink cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={selectedAlertStudentIds.length === students.filter(isSoonToRunOut).length}
+                      checked={selectedAlertStudentIds.length === soonStudents.length}
                       onChange={(e) => {
                         if (e.target.checked) {
-                          setSelectedAlertStudentIds(students.filter(isSoonToRunOut).map(s => s.id));
+                          setSelectedAlertStudentIds(soonStudents.map(s => s.id));
                         } else {
                           setSelectedAlertStudentIds([]);
                         }
@@ -5505,11 +4125,11 @@ export function StudentsPage() {
                     Tout Sélectionner
                   </label>
                   <span className="text-[10px] text-muted font-mono">
-                    {selectedAlertStudentIds.length} / {students.filter(isSoonToRunOut).length} élèves
+                    {selectedAlertStudentIds.length} / {soonStudents.length} élèves
                   </span>
                 </div>
 
-                {students.filter(isSoonToRunOut).map((stu) => {
+                {soonStudents.map((stu) => {
                   const isChecked = selectedAlertStudentIds.includes(stu.id);
                   const parentObj = parents.find((p) => p.id === stu.parentId);
 

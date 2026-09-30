@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -80,7 +81,19 @@ export function TimetablesPage() {
     students,
     subscriptions,
     filieres,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      classes: s.classes,
+      modules: s.modules,
+      groups: s.groups,
+      salles: s.salles,
+      teachers: s.teachers,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      filieres: s.filieres,
+    })),
+  );
   /** Un compte de réception encaisse ; il ne voit pas ce que l'école gagne. */
   const canSeeGains = useCanSeeGains();
 

@@ -13,7 +13,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const user = useSession((s) => s.user);
   const hydrated = useSession((s) => s.hydrated);
   const fetchSchool = useData((s) => s.fetchSchool);
-  const fetchAll = useData((s) => s.fetchAll);
+  const startData = useData((s) => s.start);
   const clearData = useData((s) => s.clear);
   const processWeeklyAbsences = useData((s) => s.processWeeklyAbsences);
 
@@ -25,14 +25,18 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!hydrated) return;
     if (user) {
-      fetchAll();
-      // Staff load is the safety-net trigger for the automatic weekly-absence
-      // billing (server-side, idempotent, throttled to once/day). The action
-      // re-fetches on its own if it charged anything, so any freshly-written
-      // debits show up without an extra refresh here.
-      if (user.role === "admin" || user.role === "reception") {
-        processWeeklyAbsences();
-      }
+      // La copie locale s'affiche aussitôt (si elle existe), puis seules les
+      // lignes changées depuis sont téléchargées ; sinon, chargement complet.
+      void startData(user.id).then(() => {
+        // Staff load is the safety-net trigger for the automatic weekly-absence
+        // billing (server-side, idempotent, throttled to once/day). The action
+        // re-syncs on its own if it charged anything, so any freshly-written
+        // debits show up without an extra refresh here. It runs AFTER the
+        // data is in place so it never competes with the first load.
+        if (user.role === "admin" || user.role === "reception") {
+          void processWeeklyAbsences();
+        }
+      });
     } else {
       clearData();
     }

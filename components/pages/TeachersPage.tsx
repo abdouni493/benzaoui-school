@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { createClient } from "@/lib/supabase/client";
 import { createRoleUser, resetUserPassword } from "@/lib/supabase/createUser";
 import { Card, CardBody } from "@/components/ui/Card";
@@ -164,7 +165,35 @@ export function TeachersPage() {
     deleteUnpaidTeacherSessions,
     updateTeacherPayment,
     deleteTeacherPayment,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      teachers: s.teachers,
+      sessions: s.sessions,
+      modules: s.modules,
+      groups: s.groups,
+      classes: s.classes,
+      salles: s.salles,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      unpaidTeacher: s.unpaidTeacher,
+      acomptes: s.acomptes,
+      absences: s.absences,
+      cash: s.cash,
+      attendance: s.attendance,
+      independent: s.independent,
+      teacherPayments: s.teacherPayments,
+      freePeriods: s.freePeriods,
+      school: s.school,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+      settleTeacherPercentage: s.settleTeacherPercentage,
+      payTeacherSessions: s.payTeacherSessions,
+      deleteUnpaidTeacherSessions: s.deleteUnpaidTeacherSessions,
+      updateTeacherPayment: s.updateTeacherPayment,
+      deleteTeacherPayment: s.deleteTeacherPayment,
+    })),
+  );
   const { language } = useSettings();
 
   // Modals
@@ -274,13 +303,27 @@ export function TeachersPage() {
 
   const dateKeyOf = (iso: string) => new Date(iso).toLocaleDateString("fr-CA");
 
+  // ---- Index -------------------------------------------------------------------------
+  // `attendanceFor` parcourait TOUT l'historique des présences — en convertissant
+  // chaque date en texte — pour CHAQUE séance due, et la grille des enseignants
+  // le demande pour chaque carte : des millions de conversions à chaque rendu,
+  // l'écran figé plusieurs secondes. Les présences sont indexées une fois, par
+  // élève + créneau + jour, tant que l'historique ne change pas.
+  const attendanceByKey = useMemo(() => {
+    const idx = new Map<string, AttendanceRecord>();
+    attendance.forEach((a) => {
+      const key = `${a.studentId}|${a.sessionId}|${new Date(a.timestamp).toLocaleDateString("fr-CA")}`;
+      // La première présence du jour, comme le faisait `.find()`.
+      if (!idx.has(key)) idx.set(key, a);
+    });
+    return idx;
+  }, [attendance]);
+  const sessionById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
+  const studentById = useMemo(() => new Map(students.map((s) => [s.id, s])), [students]);
+  const freePeriodById = useMemo(() => new Map(freePeriods.map((f) => [f.id, f])), [freePeriods]);
+
   const attendanceFor = (studentId: string, sessionId: string, dateKey: string) =>
-    attendance.find(
-      (a) =>
-        a.studentId === studentId &&
-        a.sessionId === sessionId &&
-        dateKeyOf(a.timestamp) === dateKey,
-    );
+    attendanceByKey.get(`${studentId}|${sessionId}|${dateKey}`);
 
   /**
    * Une SÉANCE OFFERTE ne rémunère personne — ni l'école, ni l'élève, ni
@@ -292,11 +335,11 @@ export function TeachersPage() {
    * base pas encore migrée n'affiche jamais ces séances comme « à payer ».
    */
   const offeredReasonFor = (u: UnpaidTeacherSession): string | null => {
-    const sess = sessions.find((s) => s.id === u.sessionId);
+    const sess = sessionById.get(u.sessionId);
     if (sess?.isFree) return "Créneau offert";
     const att = attendanceFor(u.studentId, u.sessionId, dateKeyOf(u.date));
     if (att?.freePeriodId) {
-      const period = freePeriods.find((f) => f.id === att.freePeriodId);
+      const period = freePeriodById.get(att.freePeriodId);
       if (period && !period.payTeachers) {
         return `Période gratuite « ${period.name} » — sans rémunération`;
       }
@@ -349,13 +392,7 @@ export function TeachersPage() {
    * retombe sur le montant figé quand l'abonnement ou l'élève a disparu.
    */
   const liveDues = useMemo(() => {
-    const attIdx = new Map<string, AttendanceRecord>();
-    attendance.forEach((a) => {
-      attIdx.set(
-        `${a.studentId}|${a.sessionId}|${new Date(a.timestamp).toLocaleDateString("fr-CA")}`,
-        a,
-      );
-    });
+    const attIdx = attendanceByKey;
     const subBySession = new Map<string, Subscription>();
     subscriptions.forEach((su) => {
       if (!subBySession.has(su.sessionId)) subBySession.set(su.sessionId, su);
@@ -383,7 +420,7 @@ export function TeachersPage() {
       shareById.set(u.id, Math.round((fee * pct) / 100));
     });
     return { feeById, shareById };
-  }, [unpaidTeacher, attendance, subscriptions, students, teachers]);
+  }, [unpaidTeacher, attendanceByKey, subscriptions, students, teachers]);
 
   /** Tarif élève d'une présence encore due, au prix courant (montant figé en
    *  repli quand la présence est déjà réglée ou l'abonnement supprimé). */
@@ -412,13 +449,13 @@ export function TeachersPage() {
     dateKey: string,
     seen: Set<string>,
   ): TimingStudent[] => {
-    const sess = sessions.find((se) => se.id === sessionId);
+    const sess = sessionById.get(sessionId);
     const groupName = sess ? groups.find((g) => g.id === sess.groupId)?.name ?? "-" : "-";
 
     return (presencesByTiming.get(`${sessionId}|${dateKey}`) ?? [])
       .filter((a) => !seen.has(a.studentId))
       .map((a) => {
-        const stu = students.find((st) => st.id === a.studentId);
+        const stu = studentById.get(a.studentId);
         const settled = settledDueKeys.has(`${a.studentId}|${sessionId}|${dateKey}`);
         const reason = freeReasonOf(a, {
           studentIsFree: stu?.isFree,
@@ -468,7 +505,7 @@ export function TeachersPage() {
     rows.forEach((u) => {
       const dateKey = new Date(u.date).toLocaleDateString("fr-CA");
       const key = `${dateKey}_${u.sessionId}`;
-      const sess = sessions.find((s) => s.id === u.sessionId);
+      const sess = sessionById.get(u.sessionId);
       if (!map[key]) {
         map[key] = {
           dateKey,
@@ -483,13 +520,8 @@ export function TeachersPage() {
           totalPayout: 0,
         };
       }
-      const stu = students.find((st) => st.id === u.studentId);
-      const att = attendance.find(
-        (a) =>
-          a.studentId === u.studentId &&
-          a.sessionId === u.sessionId &&
-          new Date(a.timestamp).toLocaleDateString("fr-CA") === dateKey
-      );
+      const stu = studentById.get(u.studentId);
+      const att = attendanceFor(u.studentId, u.sessionId, dateKey);
       map[key].students.push({
         studentId: u.studentId,
         name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
@@ -687,14 +719,9 @@ export function TeachersPage() {
       .forEach((u) => {
         const dateKey = new Date(u.date).toLocaleDateString("fr-CA");
         const t = timingFor(u.sessionId, dateKey);
-        const stu = students.find((st) => st.id === u.studentId);
-        const att = attendance.find(
-          (a) =>
-            a.studentId === u.studentId &&
-            a.sessionId === u.sessionId &&
-            new Date(a.timestamp).toLocaleDateString("fr-CA") === dateKey,
-        );
-        const sess = sessions.find((s) => s.id === u.sessionId);
+        const stu = studentById.get(u.studentId);
+        const att = attendanceFor(u.studentId, u.sessionId, dateKey);
+        const sess = sessionById.get(u.sessionId);
         t.students.push({
           studentId: u.studentId,
           name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
@@ -757,7 +784,7 @@ export function TeachersPage() {
           ind.teacherPercentage !== undefined && ind.teacherPercentage !== null;
         const person = ind.studentId
           ? (() => {
-              const stu = students.find((st) => st.id === ind.studentId);
+              const stu = ind.studentId ? studentById.get(ind.studentId) : undefined;
               return stu ? `${stu.firstName} ${stu.lastName}` : "Élève";
             })()
           : ind.passagerName ?? "Passager";
@@ -912,7 +939,7 @@ export function TeachersPage() {
   const unitPriceOf = (sessionId: string) => {
     const sub = subscriptions.find((su) => su.sessionId === sessionId);
     if (sub && sub.pricePerSession > 0) return sub.pricePerSession;
-    const sess = sessions.find((se) => se.id === sessionId);
+    const sess = sessionById.get(sessionId);
     return Math.max(0, Math.round(sess?.openPrice ?? 0));
   };
   /** Les créneaux réellement couverts par ce règlement — ce que le bon de
@@ -1051,8 +1078,8 @@ export function TeachersPage() {
   const buildDueRows = (tid: string) =>
     getTeacherUnpaidSessions(tid)
       .map((u) => {
-        const sess = sessions.find((se) => se.id === u.sessionId);
-        const stu = students.find((st) => st.id === u.studentId);
+        const sess = sessionById.get(u.sessionId);
+        const stu = studentById.get(u.studentId);
         const dateKey = dateKeyOf(u.date);
         const att = attendanceFor(u.studentId, u.sessionId, dateKey);
         return {
@@ -1370,6 +1397,29 @@ export function TeachersPage() {
 
     return months;
   };
+
+  /**
+   * Ce que chaque carte d'enseignant annonce (séances dues, créneaux-jours à
+   * régler, mois impayés). Ces calculs parcourent les dues, les présences et la
+   * caisse : ils étaient refaits pour TOUTES les cartes à chaque frappe dans la
+   * recherche ou dans un formulaire de la page. Ils ne dépendent que des
+   * données — ils ne sont refaits que quand elles changent.
+   */
+  const cardStats = useMemo(
+    () =>
+      new Map(
+        teachers.map((t) => [
+          t.id,
+          {
+            unpaidSess: getPayableDues(t.id),
+            unpaidMonths: getUnpaidMonthsList(t),
+            unpaidTimingsCount: buildUnpaidTimings(t.id).length,
+          },
+        ]),
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [teachers, unpaidTeacher, independent, attendanceByKey, sessions, students, groups, modules, classes, freePeriods, liveDues, subscriptions, cash],
+  );
 
   const handleCreateTeacher = async () => {
     if (!firstName || !lastName || !phone || !email) {
@@ -1977,9 +2027,10 @@ export function TeachersPage() {
           .map((t) => {
           // Ce que la carte annonce doit être ce que l'écran de règlement
           // proposera : les séances OFFERTES n'y comptent pas.
-          const unpaidSess = getPayableDues(t.id);
-          const unpaidMonths = getUnpaidMonthsList(t);
-          const unpaidTimingsCount = buildUnpaidTimings(t.id).length;
+          const stats = cardStats.get(t.id);
+          const unpaidSess = stats?.unpaidSess ?? getPayableDues(t.id);
+          const unpaidMonths = stats?.unpaidMonths ?? getUnpaidMonthsList(t);
+          const unpaidTimingsCount = stats?.unpaidTimingsCount ?? buildUnpaidTimings(t.id).length;
 
           return (
             <Card

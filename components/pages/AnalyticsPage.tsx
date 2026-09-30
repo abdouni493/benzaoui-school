@@ -3,6 +3,7 @@
 import { useId, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Button } from "@/components/ui/Button";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -658,7 +659,25 @@ function DetailRow({ icon, label, value }: { icon: ReactNode; label: string; val
 /* ------------------------------------------------------------------ */
 
 export function AnalyticsPage() {
-  const { classes, students, subscriptions, sessions, teachers, attendance, school } = useData();
+  const {
+    classes,
+    students,
+    subscriptions,
+    sessions,
+    teachers,
+    attendance,
+    school,
+  } = useData(
+    useShallow((s) => ({
+      classes: s.classes,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      sessions: s.sessions,
+      teachers: s.teachers,
+      attendance: s.attendance,
+      school: s.school,
+    })),
+  );
 
   const todayIso = new Date().toISOString().split("T")[0];
   const yearStartIso = new Date(new Date().getFullYear(), 0, 1).toISOString().split("T")[0];

@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useSession } from "@/lib/store/session";
 import { Card, CardBody } from "@/components/ui/Card";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { TeacherPages } from "@/components/pages/TeacherPages";
+
+// Le portail enseignant n'est téléchargé que par un compte enseignant.
+const TeacherPages = dynamic(
+  () => import("@/components/pages/TeacherPages").then((m) => m.TeacherPages),
+  { ssr: false },
+);
 import { DaySchedulePanel } from "@/components/schedule/DaySchedulePanel";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import { WhatsAppAlertsCard } from "@/components/whatsapp/WhatsAppAlertsCard";
@@ -30,9 +37,9 @@ import {
 } from "lucide-react";
 
 export default function DashboardPage() {
-  const { user } = useSession();
-  if (user?.role === "teacher") return <TeacherPages slug="dashboard" />;
-  return <AdminDashboard reception={user?.role === "reception"} />;
+  const role = useSession((s) => s.user?.role);
+  if (role === "teacher") return <TeacherPages slug="dashboard" />;
+  return <AdminDashboard reception={role === "reception"} />;
 }
 
 // Framer motion variants with const casting for strict TS types
@@ -87,7 +94,27 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     privateSessions,
     privateSessionModules,
     complete,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      students: s.students,
+      teachers: s.teachers,
+      classes: s.classes,
+      attendance: s.attendance,
+      cash: s.cash,
+      unpaidTeacher: s.unpaidTeacher,
+      sessions: s.sessions,
+      modules: s.modules,
+      groups: s.groups,
+      subscriptions: s.subscriptions,
+      balanceTx: s.balanceTx,
+      reception: s.reception,
+      workerShifts: s.workerShifts,
+      workerPayments: s.workerPayments,
+      privateSessions: s.privateSessions,
+      privateSessionModules: s.privateSessionModules,
+      complete: s.complete,
+    })),
+  );
 
   // 1. General Operational Metrics
   const totalStudents = students.length;
@@ -107,52 +134,75 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   // suivie — badge comme pointage manuel le font descendre du prix de la
   // séance, dans la même transaction que sa ligne d'historique. Ajouter le
   // total des présences par-dessus comptait deux fois les mêmes séances.
-  const driftByStudent = balanceDriftByStudent({
-    students,
-    balanceTx,
-    complete: complete.balanceTx !== false,
-  });
-  const debtors = students
-    .map((s) => ({ student: s, debt: studentDebtOf(s, { drift: driftByStudent.get(s.id) ?? 0 }) }))
-    .filter((row) => row.debt.alert)
-    .map((row) => ({ ...row, owed: row.debt.total }))
-    .sort((a, b) => b.owed - a.owed);
-  const totalDebts = debtors.reduce((sum, row) => sum + row.owed, 0);
-  // Les élèves qui ont étudié sans provision : c'est la dette que le badge
-  // crée tout seul, celle que personne n'a décidée au guichet.
-  const studiedWithoutFunds = debtors.filter((row) => row.debt.sessions > 0);
-  // Les soldes qui ne valent pas la somme de leur propre historique. Ce n'est
-  // PAS de l'argent dû : c'est une écriture qui a manqué sa cible, à réparer
-  // en base. On les compte sur TOUS les élèves, pas seulement les débiteurs —
-  // un solde faux est le plus souvent faux dans le sens positif.
-  const driftingBalances = students.filter((s) => (driftByStudent.get(s.id) ?? 0) !== 0);
-  const unpaidTeacherSessions = unpaidTeacher.filter((u) => !u.paid).reduce((sum, u) => sum + u.amount, 0);
-
-  // 3. Subscription Count By Module (CSS Bar Chart Data)
-  const getModuleEnrollments = () => {
-    const counts: Record<string, number> = {};
-    students.forEach((s) => {
-      s.subscriptionIds.forEach((subId) => {
-        const sub = subscriptions.find((subItem) => subItem.id === subId);
-        if (sub) {
-          const session = sessions.find((se) => se.id === sub.sessionId);
-          if (session) {
-            counts[session.moduleId] = (counts[session.moduleId] || 0) + 1;
-          }
-        }
-      });
+  // Tout ce qui suit est recalculé UNIQUEMENT quand les tables qu'il lit
+  // changent — plus à chaque minute d'horloge, plus à chaque scan qui ne les
+  // concerne pas. Les recherches linéaires imbriquées (élève × inscription ×
+  // abonnement × créneau) passent par des index construits une seule fois.
+  const { debtors, totalDebts, studiedWithoutFunds, driftingBalances } = useMemo(() => {
+    const driftByStudent = balanceDriftByStudent({
+      students,
+      balanceTx,
+      complete: complete.balanceTx !== false,
     });
+    const debtors = students
+      .map((s) => ({ student: s, debt: studentDebtOf(s, { drift: driftByStudent.get(s.id) ?? 0 }) }))
+      .filter((row) => row.debt.alert)
+      .map((row) => ({ ...row, owed: row.debt.total }))
+      .sort((a, b) => b.owed - a.owed);
+    return {
+      debtors,
+      totalDebts: debtors.reduce((sum, row) => sum + row.owed, 0),
+      // Les élèves qui ont étudié sans provision : c'est la dette que le badge
+      // crée tout seul, celle que personne n'a décidée au guichet.
+      studiedWithoutFunds: debtors.filter((row) => row.debt.sessions > 0),
+      // Les soldes qui ne valent pas la somme de leur propre historique. Ce
+      // n'est PAS de l'argent dû : c'est une écriture qui a manqué sa cible, à
+      // réparer en base. On les compte sur TOUS les élèves, pas seulement les
+      // débiteurs — un solde faux est le plus souvent faux dans le sens positif.
+      driftingBalances: students.filter((s) => (driftByStudent.get(s.id) ?? 0) !== 0),
+    };
+  }, [students, balanceTx, complete.balanceTx]);
 
-    return modules
-      .map((m) => ({
-        name: m.name,
-        count: counts[m.id] || 0,
-      }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5); // top 5
-  };
+  const { unpaidTeacherSessions, unpaidByTeacher } = useMemo(() => {
+    const byTeacher = new Map<string, number>();
+    let total = 0;
+    for (const u of unpaidTeacher) {
+      if (u.paid) continue;
+      total += u.amount;
+      byTeacher.set(u.teacherId, (byTeacher.get(u.teacherId) ?? 0) + u.amount);
+    }
+    return { unpaidTeacherSessions: total, unpaidByTeacher: byTeacher };
+  }, [unpaidTeacher]);
 
-  const moduleEnrollments = getModuleEnrollments();
+  // Pour chaque abonnement : son créneau (module + groupe), une fois pour toutes.
+  const { moduleEnrollments, studentsPerGroup } = useMemo(() => {
+    const sessionById = new Map(sessions.map((se) => [se.id, se]));
+    const sessionOfSub = new Map<string, (typeof sessions)[number]>();
+    for (const sub of subscriptions) {
+      const se = sessionById.get(sub.sessionId);
+      if (se) sessionOfSub.set(sub.id, se);
+    }
+    const counts = new Map<string, number>();
+    const perGroup = new Map<string, number>();
+    for (const s of students) {
+      const groupsOfStudent = new Set<string>();
+      for (const subId of s.subscriptionIds) {
+        const se = sessionOfSub.get(subId);
+        if (!se) continue;
+        counts.set(se.moduleId, (counts.get(se.moduleId) ?? 0) + 1);
+        groupsOfStudent.add(se.groupId);
+      }
+      for (const g of groupsOfStudent) perGroup.set(g, (perGroup.get(g) ?? 0) + 1);
+    }
+    return {
+      // 3. Subscription Count By Module (CSS Bar Chart Data) — top 5
+      moduleEnrollments: modules
+        .map((m) => ({ name: m.name, count: counts.get(m.id) ?? 0 }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5),
+      studentsPerGroup: perGroup,
+    };
+  }, [students, subscriptions, sessions, modules]);
   const maxEnrollment = Math.max(...moduleEnrollments.map((m) => m.count), 1);
 
   // 4. Weekly Cash Flows (Admin Only - CSS Bar Chart Data)
@@ -182,21 +232,11 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   // 5. Intelligent Alerts & Analytics
   const severeDebtors = debtors.filter((row) => row.owed >= 2000);
   const lowEnrollmentGroups = groups.filter((g) => {
-    const enrolledCount = students.filter((s) => s.subscriptionIds.some((subId) => {
-      const sub = subscriptions.find((subItem) => subItem.id === subId);
-      if (sub) {
-        const session = sessions.find((se) => se.id === sub.sessionId);
-        return session ? session.groupId === g.id : false;
-      }
-      return false;
-    })).length;
+    const enrolledCount = studentsPerGroup.get(g.id) ?? 0;
     return enrolledCount > 0 && enrolledCount < 3;
   });
-  
-  const heavyUnpaidTeachers = teachers.filter((t) => {
-    const amt = unpaidTeacher.filter((u) => u.teacherId === t.id && !u.paid).reduce((sum, u) => sum + u.amount, 0);
-    return amt >= 5000;
-  });
+
+  const heavyUnpaidTeachers = teachers.filter((t) => (unpaidByTeacher.get(t.id) ?? 0) >= 5000);
 
   // ---------------------------------------------------------------------------
   // 5.a  Les salaires du personnel
@@ -204,12 +244,18 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   // Calculés par `lib/workerPay.ts`, exactement comme sur l'écran Travailleurs.
   // Deux calculs séparés finissaient toujours par annoncer deux retards
   // différents — et c'est le tableau de bord qu'on croit.
-  const workerAlerts = payAlertsOf(workers, workerShifts, workerPayments);
-  const lateWorkers = workerAlerts.filter((a) => a.urgency === "late");
-  const soonWorkers = workerAlerts.filter((a) => a.urgency === "soon");
-  // Les absences dont la retenue n'a jamais été tranchée. Même module que
-  // l'écran Travailleurs : les deux annoncent donc exactement les mêmes.
-  const pendingWorkerAbsences = pendingAbsencesOf(workers, workerShifts);
+  const { lateWorkers, soonWorkers, pendingWorkerAbsences } = useMemo(() => {
+    const workerAlerts = payAlertsOf(workers, workerShifts, workerPayments);
+    return {
+      lateWorkers: workerAlerts.filter((a) => a.urgency === "late"),
+      soonWorkers: workerAlerts.filter((a) => a.urgency === "soon"),
+      // Les absences dont la retenue n'a jamais été tranchée. Même module que
+      // l'écran Travailleurs : les deux annoncent donc exactement les mêmes.
+      pendingWorkerAbsences: pendingAbsencesOf(workers, workerShifts),
+    };
+    // `nowMs` : l'échéance d'un salaire avance avec l'horloge.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workers, workerShifts, workerPayments, nowMs]);
 
   // ---------------------------------------------------------------------------
   // 5.b  Les séances particulières

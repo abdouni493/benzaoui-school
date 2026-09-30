@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useSession } from "@/lib/store/session";
 import { uploadImage } from "@/lib/supabase/uploadImage";
 import { changeOwnPassword } from "@/lib/supabase/createUser";
@@ -39,8 +40,16 @@ type SettingsTab = "school" | "security" | "whatsapp" | "backup";
 const SETTINGS_TABS: readonly SettingsTab[] = ["school", "security", "whatsapp", "backup"];
 
 export function SettingsPage() {
-  const dataStore = useData();
-  const { school, modules, moduleAbsenceRules, setModuleAbsenceRule, updateSchool, restoreState } = dataStore;
+  const { school, modules, moduleAbsenceRules, setModuleAbsenceRule, updateSchool, restoreState } = useData(
+    useShallow((s) => ({
+      school: s.school,
+      modules: s.modules,
+      moduleAbsenceRules: s.moduleAbsenceRules,
+      setModuleAbsenceRule: s.setModuleAbsenceRule,
+      updateSchool: s.updateSchool,
+      restoreState: s.restoreState,
+    })),
+  );
   const sessionUser = useSession((s) => s.user);
   const loginSession = useSession((s) => s.login);
   const [logoUploading, setLogoUploading] = useState(false);
@@ -183,6 +192,9 @@ export function SettingsPage() {
   };
 
   const handleDownloadBackup = () => {
+    // Lu au moment du clic : la page n'a pas à se redessiner à chaque
+    // changement de n'importe quelle table juste pour pouvoir exporter.
+    const dataStore = useData.getState();
     const backupData: Record<string, any> = {};
     Object.keys(dataStore).forEach((key) => {
       const val = (dataStore as any)[key];

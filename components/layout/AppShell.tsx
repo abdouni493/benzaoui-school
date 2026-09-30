@@ -10,6 +10,7 @@ import { useSettings } from "@/lib/store/settings";
 
 import { GlobalRFIDListener } from "@/components/controls/GlobalRFIDListener";
 import { WhatsAppOutboxWatcher } from "@/components/whatsapp/WhatsAppOutboxWatcher";
+import { DataSyncAgent } from "@/components/providers/DataSyncAgent";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -30,6 +31,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex h-dvh overflow-hidden bg-canvas">
+      {/* Garde les données à jour en arrière-plan (delta toutes les 30 s). */}
+      <DataSyncAgent />
       <GlobalRFIDListener />
       {/* Fait repartir les messages WhatsApp APPROUVÉS, mis en attente pendant
           que la passerelle était injoignable. Monté ici pour survivre aux

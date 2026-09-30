@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { createClient } from "@/lib/supabase/client";
 import { createRoleUser } from "@/lib/supabase/createUser";
 import { Card, CardBody } from "@/components/ui/Card";
@@ -223,7 +224,30 @@ export function ParticulierPage() {
     setPrivateSessionStatus,
     reschedulePrivateSession,
     deletePrivateSession,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      privateSessions: s.privateSessions,
+      privateSessionModules: s.privateSessionModules,
+      privateSessionStudents: s.privateSessionStudents,
+      students: s.students,
+      teachers: s.teachers,
+      modules: s.modules,
+      classes: s.classes,
+      filieres: s.filieres,
+      reception: s.reception,
+      school: s.school,
+      push: s.push,
+      createPrivateRequest: s.createPrivateRequest,
+      updatePrivateRequest: s.updatePrivateRequest,
+      programPrivateSession: s.programPrivateSession,
+      completePrivateSession: s.completePrivateSession,
+      payPrivateSession: s.payPrivateSession,
+      payPrivateSessionTeacher: s.payPrivateSessionTeacher,
+      setPrivateSessionStatus: s.setPrivateSessionStatus,
+      reschedulePrivateSession: s.reschedulePrivateSession,
+      deletePrivateSession: s.deletePrivateSession,
+    })),
+  );
   const { addToast } = useToast();
   const { language } = useSettings();
   const sessionUser = useSession((s) => s.user);

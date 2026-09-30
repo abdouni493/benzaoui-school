@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -12,7 +13,21 @@ import { Trash2, Edit, Plus, Filter, Tag, Calendar } from "lucide-react";
 import type { Expense, ExpenseCategory } from "@/lib/types";
 
 export function ExpensesPage() {
-  const { expenses, categories, push, deleteFrom, updateItem } = useData();
+  const {
+    expenses,
+    categories,
+    push,
+    deleteFrom,
+    updateItem,
+  } = useData(
+    useShallow((s) => ({
+      expenses: s.expenses,
+      categories: s.categories,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+    })),
+  );
 
   // Filters
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState("all");

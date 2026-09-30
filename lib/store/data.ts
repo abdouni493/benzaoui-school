@@ -3,6 +3,14 @@
 import { create } from "zustand";
 import { createClient } from "@/lib/supabase/client";
 import { useToast } from "@/lib/store/toast";
+import {
+  applyRowDelta,
+  hashString,
+  reconcileRows,
+  sameValue,
+  uuidPartitions,
+} from "@/lib/store/merge";
+import { clearSnapshots, readSnapshot, writeSnapshot } from "@/lib/store/snapshot";
 import type {
   AbsencePenalty,
   Announcement,
@@ -175,12 +183,20 @@ function makeMapper<T>(fields: readonly FieldSpec<T>[]) {
     }
     return out;
   };
-  return { fromRow, toRow };
+  return { fromRow, toRow, fields: fields as readonly (readonly [string, string])[] };
 }
 
 interface TableConfig {
   table: string;
   select: string;
+  /**
+   * Le champ (côté application) qui identifie une ligne — `id` pour presque
+   * toutes les tables. C'est lui qui permet de fusionner une relecture ou un
+   * delta avec ce qui est déjà affiché, ligne par ligne.
+   */
+  key?: string;
+  /** Les colonnes lues : elles datent le format de la copie locale. */
+  fields?: readonly (readonly [string, string])[];
   /**
    * Colonne de tri de la pagination — la CLÉ PRIMAIRE de la table, et rien
    * d'autre : c'est elle qui rend deux pages successives disjointes.
@@ -612,12 +628,14 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
     table: "student_credentials",
     select: "*",
     orderBy: "student_id",
+    key: "studentId",
     ...studentCredentialsMapper,
   },
   moduleAbsenceRules: {
     table: "module_absence_rules",
     select: "*",
     orderBy: "module_id",
+    key: "moduleId",
     ...moduleAbsenceRulesMapper,
   },
   sessions: { table: "sessions", select: "*", ...sessionsMapper },
@@ -628,6 +646,12 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
     // `(*)` instead of explicit columns so the fetch keeps working before the
     // start_date/expiry_date migration has been applied.
     select: "*, student_subscriptions(*)",
+    fields: [
+      ...studentsBaseMapper.fields,
+      ["subscriptionIds", "student_subscriptions.subscription_id"],
+      ["subscriptionDates", "student_subscriptions.dates"],
+      ["subscriptionDiscounts", "student_subscriptions.discount"],
+    ],
     fromRow: (row) => ({
       ...studentsBaseMapper.fromRow(row),
       subscriptionIds: (row.student_subscriptions ?? []).map((r: any) => r.subscription_id), // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -668,6 +692,7 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
   parents: {
     table: "parents",
     select: "*, students(id)",
+    fields: [...parentsBaseMapper.fields, ["childIds", "students.id"]],
     fromRow: (row) => ({
       ...parentsBaseMapper.fromRow(row),
       childIds: (row.students ?? []).map((r: any) => r.id), // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -711,6 +736,21 @@ const TABLES: Record<Exclude<keyof Database, "school">, TableConfig> = {
 //
 // On pagine donc explicitement, en triant sur la clé primaire — le seul tri
 // que toutes les tables partagent, et le seul qui rende la pagination stable.
+//
+// PAR CLÉ, ET PLUS PAR DÉCALAGE
+// -----------------------------
+// La page suivante commence APRÈS la dernière clé reçue (`id > dernière`), et
+// non « à partir de la 500e ligne ». Un décalage bouge dès qu'une ligne est
+// créée ou supprimée pendant la lecture : une présence annulée au guichet
+// pendant le chargement faisait sauter une ligne voisine, perdue jusqu'au
+// chargement suivant. Une clé, elle, ne bouge pas.
+//
+// ET EN PARALLÈLE SUR LES GROSSES TABLES
+// --------------------------------------
+// Les clés sont des UUID, répartis uniformément : une grosse table se découpe
+// en tranches d'UUID contiguës (`0…` à `3…`, `4…` à `7…`, …) lues en même
+// temps, chacune page par page. Aucune ligne ne peut tomber entre deux
+// tranches, et 3 000 présences arrivent en deux allers-retours au lieu de six.
 
 /** Taille de page. Sous le plafond de PostgREST, pour que « moins d'une page
  *  reçue » signifie toujours « fin de table » et jamais « plafond atteint ». */
@@ -720,30 +760,76 @@ const PAGE_SIZE = 500;
  *  que de boucler indéfiniment (et de saturer la mémoire du navigateur). */
 const MAX_ROWS = 200_000;
 
+/** Tranches lues en parallèle, au plus, sur une grosse table. */
+const MAX_PARTITIONS = 8;
+
 export type FetchOutcome =
   | { ok: true; rows: Record<string, unknown>[] }
   | { ok: false; error: string };
 
-/** Le strict minimum que `fetchWholeTable` demande à un client Supabase — de
- *  quoi le tester sans base. */
+type PageResult = { data: unknown[] | null; error: { message: string } | null };
+
+/** Une requête de page : ce que `fetchWholeTable` demande au constructeur de
+ *  requêtes Supabase — de quoi le tester sans base. */
+export interface PageQuery extends PromiseLike<PageResult> {
+  gt(column: string, value: string): PageQuery;
+  gte(column: string, value: string): PageQuery;
+  lt(column: string, value: string): PageQuery;
+  limit(count: number): PageQuery;
+}
+
+/** Le strict minimum que `fetchWholeTable` demande à un client Supabase. */
 export interface PagedSource {
   from(table: string): {
     select(columns: string): {
-      order(
-        column: string,
-        opts: { ascending: boolean },
-      ): {
-        range(
-          from: number,
-          to: number,
-        ): PromiseLike<{ data: unknown[] | null; error: { message: string } | null }>;
-      };
+      order(column: string, opts: { ascending: boolean }): PageQuery;
     };
   };
 }
 
+/** Lit une tranche [from, to[ de la table, page par page, dans `rows`.
+ *  Rend `null` si tout est passé, sinon le message d'erreur. */
+async function readKeyRange(
+  supabase: PagedSource,
+  cfg: Pick<TableConfig, "table" | "select">,
+  orderColumn: string,
+  bounds: { from?: string; to?: string },
+  rows: Record<string, unknown>[],
+): Promise<string | null> {
+  let after: string | undefined;
+  for (let read = 0; read < MAX_ROWS; read += PAGE_SIZE) {
+    // Sans ce tri, deux pages peuvent se recouvrir ou s'ignorer, et la table
+    // lue n'est plus la table stockée.
+    let query = supabase.from(cfg.table).select(cfg.select).order(orderColumn, { ascending: true });
+    if (bounds.from !== undefined) query = query.gte(orderColumn, bounds.from);
+    if (bounds.to !== undefined) query = query.lt(orderColumn, bounds.to);
+    if (after !== undefined) query = query.gt(orderColumn, after);
+
+    const { data, error } = await query.limit(PAGE_SIZE);
+    if (error || !data) return error?.message ?? "no data";
+
+    const page = data as Record<string, unknown>[];
+    rows.push(...page);
+    if (page.length < PAGE_SIZE) return null;
+
+    const last = page[page.length - 1]?.[orderColumn];
+    if (typeof last !== "string" && typeof last !== "number") {
+      return `clé « ${orderColumn} » absente des lignes de ${cfg.table}`;
+    }
+    after = String(last);
+  }
+  console.error(
+    `[db] ${cfg.table} dépasse ${MAX_ROWS} lignes : lecture interrompue. ` +
+      "Les écrans qui recoupent cette table seront désactivés plutôt que faux.",
+  );
+  return `plus de ${MAX_ROWS} lignes`;
+}
+
 /**
  * Toutes les lignes d'une table, page par page.
+ *
+ * `sizeHint` : le nombre de lignes attendu (celui de la lecture précédente).
+ * Au-delà d'une page, la table est lue par tranches d'UUID en parallèle.
  *
  * Un échec de page ne rend PAS un résultat partiel : il rend `ok: false`, et
  * l'appelant conserve alors ce qu'il avait déjà. Une demi-table est pire que
@@ -753,32 +839,29 @@ export interface PagedSource {
 export async function fetchWholeTable(
   supabase: PagedSource,
   cfg: Pick<TableConfig, "table" | "select" | "orderBy">,
+  opts: { sizeHint?: number } = {},
 ): Promise<FetchOutcome> {
-  const rows: Record<string, unknown>[] = [];
   // Tri sur la clé primaire — `id` pour la plupart des tables, sa vraie clé
   // pour celles qui n'en ont pas (voir `TableConfig.orderBy`).
   const orderColumn = cfg.orderBy ?? "id";
+  const hint = Math.max(0, Math.floor(opts.sizeHint ?? 0));
+  const partitions =
+    hint > PAGE_SIZE
+      ? uuidPartitions(Math.min(MAX_PARTITIONS, Math.floor(hint / PAGE_SIZE)))
+      : [{}];
 
-  for (let from = 0; from < MAX_ROWS; from += PAGE_SIZE) {
-    const { data, error } = await supabase
-      .from(cfg.table)
-      .select(cfg.select)
-      // Sans ce tri, deux pages peuvent se recouvrir ou s'ignorer, et la table
-      // lue n'est plus la table stockée.
-      .order(orderColumn, { ascending: true })
-      .range(from, from + PAGE_SIZE - 1);
-
-    if (error || !data) return { ok: false, error: error?.message ?? "no data" };
-
-    rows.push(...(data as unknown as Record<string, unknown>[]));
-    if (data.length < PAGE_SIZE) return { ok: true, rows };
-  }
-
-  console.error(
-    `[db] ${cfg.table} dépasse ${MAX_ROWS} lignes : lecture interrompue. ` +
-      "Les écrans qui recoupent cette table seront désactivés plutôt que faux.",
+  const results = await Promise.all(
+    partitions.map(async (bounds) => {
+      const rows: Record<string, unknown>[] = [];
+      const error = await readKeyRange(supabase, cfg, orderColumn, bounds, rows);
+      return { rows, error };
+    }),
   );
-  return { ok: false, error: `plus de ${MAX_ROWS} lignes` };
+
+  const failed = results.find((r) => r.error !== null);
+  if (failed) return { ok: false, error: failed.error as string };
+  // Les tranches se suivent dans l'ordre des clés : la table sort triée.
+  return { ok: true, rows: results.flatMap((r) => r.rows) };
 }
 
 const schoolMapper = makeMapper<School>([
@@ -956,8 +1039,28 @@ interface DataActions {
    * recoupement ne doit être affiché à partir d'elle.
    */
   complete: Partial<Record<keyof typeof TABLES, boolean>>;
+  /** Un chargement COMPLET est en cours (premier chargement, filet de
+   *  sécurité périodique) — de quoi afficher un indicateur discret. */
+  syncing: boolean;
   fetchSchool: () => Promise<void>;
+  /** Relit TOUTES les tables (en conservant les objets inchangés). */
   fetchAll: () => Promise<void>;
+  /**
+   * Met l'écran à jour après une écriture : seulement ce qui a changé depuis
+   * la dernière synchronisation, en une requête (`sync_changes`). Sans la
+   * migration 20261001, retombe sur une relecture complète.
+   *
+   * Une fois la promesse résolue, le store contient l'écriture qui l'a
+   * précédée : c'est ce qu'attendent les écrans qui relisent une fiche juste
+   * après un règlement.
+   */
+  refresh: () => Promise<void>;
+  /** Synchronisation de fond (minuterie, retour sur l'onglet) : ne fait rien
+   *  si la précédente date de moins de quelques secondes. */
+  backgroundSync: () => Promise<void>;
+  /** Ouvre la session de données d'un compte : copie locale si elle existe,
+   *  puis delta ; sinon chargement complet. */
+  start: (userId: string) => Promise<void>;
   clear: () => void;
 
   scanCard: (rfidOrStudentId: string, when?: Date) => Promise<ScanResult>;
@@ -1402,15 +1505,368 @@ interface DataActions {
 
 export type DataStore = Database & DataActions;
 
+// =============================================================================
+// Synchronisation : relire seulement ce qui a changé
+// =============================================================================
+//
+// POURQUOI
+// --------
+// Chaque écriture (un scan, un versement, un pointage) se terminait par
+// `fetchAll()` : les 38 tables relues en entier, pour n'en garder que les deux
+// ou trois lignes qui venaient de bouger. Sur une école qui a quelques mois
+// d'historique, c'était plusieurs mégaoctets par clic — et le clic attendait.
+//
+// COMMENT
+// -------
+// La base date chaque ligne (`updated_at`) et garde la trace des suppressions
+// (migration 20261001). `sync_changes(curseur)` rend, en UNE requête, ce qui a
+// changé depuis la dernière synchronisation : le store le fusionne ligne par
+// ligne, et une ligne inchangée garde son objet (rien à redessiner).
+//
+// Sans la migration, rien ne casse : `refresh()` retombe sur la relecture
+// complète d'avant — plus rapide qu'avant (lecture parallèle, objets
+// conservés), mais complète.
+
+type TableKey = keyof typeof TABLES;
+const TABLE_KEYS = Object.keys(TABLES) as TableKey[];
+
+/** Nom de table Postgres -> clé du store (`reception_staff` -> `reception`). */
+const KEY_OF_TABLE = new Map<string, TableKey>(TABLE_KEYS.map((k) => [TABLES[k].table, k]));
+
+/** La clé d'une ligne affichée (`id`, ou la référence qui sert de clé). */
+const rowKeyFns = new Map<TableKey, (row: unknown) => string>(
+  TABLE_KEYS.map((k) => {
+    const field = TABLES[k].key ?? "id";
+    return [k, (row: unknown) => String((row as Record<string, unknown>)[field])];
+  }),
+);
+const rowKeyOf = (key: TableKey) => rowKeyFns.get(key) as (row: unknown) => string;
+
+/** Le curseur : l'heure du SERVEUR jusqu'à laquelle le store est à jour.
+ *  `null` = inconnu (premier chargement pas fini, ou migration absente). */
+let syncCursor: string | null = null;
+/** La fonction `sync_changes` existe-t-elle ? `null` = pas encore su. */
+let deltaSupported: boolean | null = null;
+let lastProbeAt = 0;
+let lastFullLoadAt = 0;
+let lastSyncAt = 0;
+/** Le compte dont le store contient les données. */
+let ownerId: string | null = null;
+
+let fullLoadInFlight: Promise<void> | null = null;
+let deltaInFlight: Promise<void> | null = null;
+let deltaQueued: Promise<void> | null = null;
+
+// ---- Écritures en cours ------------------------------------------------------
+// Une ligne ajoutée ou modifiée à l'écran n'est pas encore en base pendant
+// quelques centaines de millisecondes. Une synchronisation qui tomberait dans
+// cet intervalle ramènerait l'ANCIENNE version et effacerait ce que l'écran
+// vient d'afficher : ces lignes-là sont donc laissées telles quelles jusqu'à
+// la fin de leur écriture.
+const pendingWrites = new Map<string, number>();
+const pendingId = (key: TableKey, rowKey: string) => `${key}:${rowKey}`;
+function markPending(key: TableKey, rowKey: string) {
+  const id = pendingId(key, rowKey);
+  pendingWrites.set(id, (pendingWrites.get(id) ?? 0) + 1);
+}
+function unmarkPending(key: TableKey, rowKey: string) {
+  const id = pendingId(key, rowKey);
+  const n = (pendingWrites.get(id) ?? 1) - 1;
+  if (n <= 0) pendingWrites.delete(id);
+  else pendingWrites.set(id, n);
+}
+const isPendingIn = (key: TableKey) => (rowKey: string) => pendingWrites.has(pendingId(key, rowKey));
+
+// ---- Taille attendue des tables -------------------------------------------
+// Sert à lire les grosses tables en parallèle dès le premier chargement.
+const ROW_COUNTS_KEY = "benzaoui-row-counts";
+function readRowCounts(): Record<string, number> {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(ROW_COUNTS_KEY) : null;
+    return raw ? (JSON.parse(raw) as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+function writeRowCounts(counts: Record<string, number>) {
+  try {
+    localStorage.setItem(ROW_COUNTS_KEY, JSON.stringify(counts));
+  } catch {
+    /* stockage plein ou interdit : on s'en passe */
+  }
+}
+
+// ---- Copie locale (IndexedDB) ----------------------------------------------
+/** À incrémenter si la FORME d'une ligne change sans que ses colonnes
+ *  changent (un calcul de `fromRow`) : les copies existantes sont alors
+ *  ignorées et relues. */
+const SNAPSHOT_SCHEMA = 1;
+const SNAPSHOT_VERSION = hashString(
+  JSON.stringify([
+    SNAPSHOT_SCHEMA,
+    TABLE_KEYS.map((k) => [
+      k,
+      TABLES[k].table,
+      TABLES[k].select,
+      TABLES[k].key ?? "id",
+      (TABLES[k].fields ?? []).map((f) => `${f[0]}>${f[1]}`),
+    ]),
+  ]),
+);
+/** Au-delà, la copie est jugée trop vieille : chargement complet. */
+const SNAPSHOT_MAX_AGE_MS = 5 * 24 * 3600 * 1000;
+/**
+ * Tables JAMAIS écrites sur le disque : les mots de passe du portail élève
+ * n'ont rien à faire dans le profil du navigateur. Elles sont relues en
+ * entier à chaque ouverture (quelques centaines de lignes).
+ */
+const SNAPSHOT_EXCLUDED = new Set<TableKey>(["studentCredentials"]);
+/** Filet de sécurité : une relecture complète de fond de temps en temps. */
+const FULL_RELOAD_EVERY_MS = 30 * 60 * 1000;
+/** Deux synchronisations de fond ne se suivent pas à moins de ça. */
+const BACKGROUND_MIN_GAP_MS = 5000;
+
+interface StoreSnapshot {
+  version: string;
+  userId: string;
+  cursor: string;
+  savedAt: number;
+  school: School;
+  tables: Partial<Database>;
+  complete: Partial<Record<TableKey, boolean>>;
+}
+
+let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Enregistre la copie locale un peu plus tard, quand le navigateur est libre. */
+function scheduleSnapshotSave() {
+  if (typeof window === "undefined" || !ownerId || !syncCursor) return;
+  if (snapshotTimer) clearTimeout(snapshotTimer);
+  snapshotTimer = setTimeout(() => {
+    snapshotTimer = null;
+    const run = () => void saveSnapshotNow();
+    const idle = (window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+    }).requestIdleCallback;
+    if (idle) idle(run, { timeout: 5000 });
+    else run();
+  }, 2500);
+}
+
+async function saveSnapshotNow() {
+  const userId = ownerId;
+  const cursor = syncCursor;
+  if (!userId || !cursor) return;
+  // Une écriture pas encore confirmée ne doit pas être figée dans la copie.
+  if (pendingWrites.size > 0) {
+    scheduleSnapshotSave();
+    return;
+  }
+  const state = useData.getState();
+  if (!state.loaded) return;
+  const tables: Partial<Database> = {};
+  const complete: Partial<Record<TableKey, boolean>> = { ...state.complete };
+  for (const key of TABLE_KEYS) {
+    if (SNAPSHOT_EXCLUDED.has(key)) {
+      delete complete[key];
+      continue;
+    }
+    (tables as Record<string, unknown>)[key] = state[key];
+  }
+  const snapshot: StoreSnapshot = {
+    version: SNAPSHOT_VERSION,
+    userId,
+    cursor,
+    savedAt: Date.now(),
+    school: state.school,
+    tables,
+    complete,
+  };
+  try {
+    await writeSnapshot(userId, snapshot);
+  } catch {
+    /* quota, navigation privée : l'application fonctionne sans copie */
+  }
+}
+
+// ---- Relecture différée ------------------------------------------------------
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Après une écriture directe (ajout, modification, suppression), relit la
+ *  version serveur de ce qui vient d'être écrit — valeurs par défaut, dates,
+ *  déclencheurs. Groupé : dix écritures d'affilée = une seule relecture. */
+function scheduleRefresh() {
+  // Sans delta, une relecture complète après chaque ajout coûterait plus cher
+  // qu'avant : on s'abstient, comme avant.
+  if (!syncCursor || deltaSupported !== true) return;
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    void useData.getState().refresh();
+  }, 400);
+}
+
+/** La fonction RPC n'existe pas sur cette base (migration pas encore passée). */
+function isMissingFunction(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false;
+  return (
+    error.code === "PGRST202" ||
+    error.code === "42883" ||
+    /could not find the function|does not exist/i.test(error.message ?? "")
+  );
+}
+
+/** L'heure du serveur, point de départ du prochain delta — ou `null` si la
+ *  base ne sait pas encore rendre de delta. */
+async function probeServerCursor(): Promise<string | null> {
+  if (deltaSupported === false && Date.now() - lastProbeAt < 5 * 60 * 1000) return null;
+  lastProbeAt = Date.now();
+  const supabase = createClient();
+  const { data, error } = await supabase.rpc("sync_changes", { p_since: null });
+  if (error || !data) {
+    if (isMissingFunction(error)) {
+      if (deltaSupported !== false) {
+        console.warn(
+          "[sync] sync_changes absente : chaque mise à jour relit toute la base. " +
+            "Passez supabase/migrations/20261001_fast_sync_and_rls_speed.sql pour l'accélérer.",
+        );
+      }
+      deltaSupported = false;
+    }
+    return null;
+  }
+  deltaSupported = true;
+  return (data as { now?: string }).now ?? null;
+}
+
+interface SyncPayload {
+  now?: string;
+  tables?: Record<string, Record<string, unknown>[]>;
+  deleted?: Array<{ table: string; key: string }>;
+}
+
+/** Fusionne un delta dans le store. Rend `true` si une table a changé. */
+function applySyncPayload(payload: SyncPayload): boolean {
+  const state = useData.getState();
+  const deletedByTable = new Map<string, Set<string>>();
+  for (const d of payload.deleted ?? []) {
+    if (!d?.table || d.key === undefined || d.key === null) continue;
+    let keys = deletedByTable.get(d.table);
+    if (!keys) deletedByTable.set(d.table, (keys = new Set()));
+    keys.add(String(d.key));
+  }
+
+  const patch: Record<string, unknown> = {};
+  const tableNames = new Set<string>([
+    ...Object.keys(payload.tables ?? {}),
+    ...deletedByTable.keys(),
+  ]);
+
+  for (const name of tableNames) {
+    const rows = payload.tables?.[name] ?? [];
+    if (name === "school") {
+      const row = rows[0];
+      if (row) {
+        const school = schoolMapper.fromRow(row);
+        if (!sameValue(school, state.school)) patch.school = school;
+      }
+      continue;
+    }
+    const key = KEY_OF_TABLE.get(name);
+    if (!key) continue;
+    const cfg = TABLES[key];
+    const prev = state[key] as unknown[];
+    const next = applyRowDelta(
+      prev,
+      rows.map((r) => cfg.fromRow(r)),
+      deletedByTable.get(name) ?? new Set<string>(),
+      rowKeyOf(key),
+      isPendingIn(key),
+    );
+    if (next !== prev) patch[key] = next;
+  }
+
+  if (Object.keys(patch).length === 0) return false;
+  useData.setState(patch as Partial<DataStore>);
+  return true;
+}
+
+/** Relit ENTIÈREMENT quelques tables — celles que la copie locale ne garde
+ *  pas sur le disque (`SNAPSHOT_EXCLUDED`). */
+async function loadTablesFully(keys: TableKey[]): Promise<void> {
+  if (keys.length === 0) return;
+  const supabase = createClient();
+  const counts = readRowCounts();
+  const results = await Promise.all(
+    keys.map(async (key) => {
+      const cfg = TABLES[key];
+      const page = await fetchWholeTable(supabase, cfg, { sizeHint: counts[cfg.table] ?? 0 });
+      return [key, page.ok ? page.rows.map((r) => cfg.fromRow(r)) : null] as const;
+    }),
+  );
+  const state = useData.getState();
+  const patch: Record<string, unknown> = {};
+  const complete: Partial<Record<TableKey, boolean>> = { ...state.complete };
+  for (const [key, rows] of results) {
+    if (!rows) {
+      complete[key] = false;
+      continue;
+    }
+    complete[key] = true;
+    const prev = state[key] as unknown[];
+    const next = reconcileRows(prev, rows, rowKeyOf(key), isPendingIn(key));
+    if (next !== prev) patch[key] = next;
+  }
+  if (!sameValue(complete, state.complete)) patch.complete = complete;
+  if (Object.keys(patch).length > 0) useData.setState(patch as Partial<DataStore>);
+}
+
+async function runDelta(): Promise<void> {
+  // Un chargement complet en cours posera un curseur neuf : on l'attend.
+  if (fullLoadInFlight) await fullLoadInFlight;
+
+  const cursor = syncCursor;
+  if (!cursor) {
+    await useData.getState().fetchAll();
+    return;
+  }
+
+  const supabase = createClient();
+  const { data, error } = await supabase.rpc("sync_changes", { p_since: cursor });
+  if (error || !data) {
+    if (isMissingFunction(error)) {
+      // La fonction a disparu (base restaurée ?) : retour au mode complet.
+      deltaSupported = false;
+      syncCursor = null;
+      await useData.getState().fetchAll();
+    } else {
+      // Réseau : le curseur reste où il est, la prochaine synchronisation
+      // rattrapera tout ce qui a changé entre-temps.
+      console.warn(`[sync] synchronisation reportée : ${error?.message ?? "réponse vide"}`);
+    }
+    return;
+  }
+
+  const payload = data as SyncPayload;
+  const changed = applySyncPayload(payload);
+  if (payload.now) syncCursor = payload.now;
+  lastSyncAt = Date.now();
+  if (changed) scheduleSnapshotSave();
+}
+
 export const useData = create<DataStore>((set, get) => ({
   ...emptyDatabase(),
   loaded: false,
   complete: {},
+  syncing: false,
 
   fetchSchool: async () => {
     const supabase = createClient();
     const { data } = await supabase.from("school").select("*").limit(1).maybeSingle();
-    if (data) set({ school: schoolMapper.fromRow(data) });
+    if (data) {
+      const school = schoolMapper.fromRow(data);
+      if (!sameValue(school, get().school)) set({ school });
+    }
   },
 
   // A refetch must never DESTROY what the screen already holds. A single table
@@ -1418,34 +1874,170 @@ export const useData = create<DataStore>((set, get) => ({
   // used to be replaced by an empty array — which is what made a subscription
   // just saved "disappear again" a moment later, together with every timing.
   // A failed table now keeps the rows already loaded.
-  fetchAll: async () => {
-    const supabase = createClient();
-    const keys = Object.keys(TABLES) as Array<keyof typeof TABLES>;
-    const before = get();
-    const results = await Promise.all(
-      keys.map(async (key) => {
-        const cfg = TABLES[key];
-        const page = await fetchWholeTable(supabase, cfg);
-        if (!page.ok) {
-          console.error(
-            `Failed to load ${cfg.table}: ${page.error} — les lignes déjà chargées sont conservées.`,
-          );
-          return [key, (before[key] as unknown[]) ?? [], false] as const;
+  //
+  // Un seul chargement complet à la fois : un second appel attend le premier
+  // au lieu d'en lancer un autre en parallèle.
+  fetchAll: () => {
+    if (fullLoadInFlight) return fullLoadInFlight;
+    fullLoadInFlight = (async () => {
+      set({ syncing: true });
+      try {
+        const supabase = createClient();
+        // L'heure du serveur AVANT la lecture : ce qui changera pendant la
+        // lecture sera repris par le prochain delta, jamais perdu.
+        const cursor = await probeServerCursor();
+        const counts = readRowCounts();
+        const before = get();
+
+        const results = await Promise.all(
+          TABLE_KEYS.map(async (key) => {
+            const cfg = TABLES[key];
+            const sizeHint = Math.max((before[key] as unknown[]).length, counts[cfg.table] ?? 0);
+            const page = await fetchWholeTable(supabase, cfg, { sizeHint });
+            if (!page.ok) {
+              console.error(
+                `Failed to load ${cfg.table}: ${page.error} — les lignes déjà chargées sont conservées.`,
+              );
+              return [key, null] as const;
+            }
+            return [key, page.rows.map((r) => cfg.fromRow(r))] as const;
+          }),
+        );
+
+        // Relu APRÈS la lecture : une écriture a pu passer pendant ce temps.
+        const state = get();
+        const patch: Record<string, unknown> = { loaded: true };
+        const complete: Partial<Record<TableKey, boolean>> = {};
+        const nextCounts = { ...counts };
+        let allOk = true;
+        for (const [key, rows] of results) {
+          if (!rows) {
+            complete[key] = false;
+            allOk = false;
+            continue;
+          }
+          complete[key] = true;
+          nextCounts[TABLES[key].table] = rows.length;
+          const prev = state[key] as unknown[];
+          const next = reconcileRows(prev, rows, rowKeyOf(key), isPendingIn(key));
+          if (next !== prev) patch[key] = next;
         }
-        return [key, page.rows.map(cfg.fromRow), true] as const;
-      }),
-    );
-    const patch: Record<string, unknown> = { loaded: true };
-    const complete: Record<string, boolean> = {};
-    for (const [key, rows, ok] of results) {
-      patch[key] = rows;
-      complete[key] = ok;
-    }
-    patch.complete = complete;
-    set(patch as Partial<DataStore>);
+        if (!sameValue(complete, state.complete)) patch.complete = complete;
+        writeRowCounts(nextCounts);
+
+        // Le curseur n'avance que si TOUT a été lu : une table manquée garde
+        // l'ancien curseur, et le delta suivant la rattrape.
+        if (cursor && (allOk || !syncCursor)) syncCursor = cursor;
+        lastFullLoadAt = Date.now();
+        lastSyncAt = lastFullLoadAt;
+        set(patch as Partial<DataStore>);
+        scheduleSnapshotSave();
+      } finally {
+        fullLoadInFlight = null;
+        set({ syncing: false });
+      }
+    })();
+    return fullLoadInFlight;
   },
 
-  clear: () => set({ ...emptyDatabase(), school: get().school, loaded: false, complete: {} }),
+  // Une seule synchronisation à la fois, et au plus une en attente derrière
+  // elle : dix écritures rapprochées ne lancent pas dix requêtes. Celle en
+  // attente démarre APRÈS la précédente, donc après l'écriture qui l'a
+  // demandée — c'est ce qui garantit que l'appelant la voit.
+  refresh: () => {
+    if (deltaInFlight) {
+      if (!deltaQueued) {
+        deltaQueued = deltaInFlight.then(() => {
+          deltaQueued = null;
+          return get().refresh();
+        });
+      }
+      return deltaQueued;
+    }
+    deltaInFlight = runDelta()
+      .catch((err) => {
+        console.warn("[sync] échec de la synchronisation :", err);
+      })
+      .finally(() => {
+        deltaInFlight = null;
+      });
+    return deltaInFlight;
+  },
+
+  backgroundSync: async () => {
+    if (!ownerId || !get().loaded) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    // Sans delta, pas de relecture de fond : ce serait toute la base toutes
+    // les 30 secondes. Les écritures, elles, continuent de rafraîchir.
+    if (!syncCursor || deltaSupported !== true) return;
+    if (Date.now() - lastSyncAt < BACKGROUND_MIN_GAP_MS) return;
+    // Filet de sécurité : de temps en temps, une relecture complète (qui ne
+    // redessine rien si rien n'a changé).
+    if (Date.now() - lastFullLoadAt > FULL_RELOAD_EVERY_MS) {
+      await get().fetchAll();
+      return;
+    }
+    await get().refresh();
+  },
+
+  start: async (userId) => {
+    // Même compte, données déjà là (retour sur l'onglet, remontage) : un delta.
+    if (ownerId === userId && get().loaded) {
+      await get().refresh();
+      return;
+    }
+    ownerId = userId;
+    syncCursor = null;
+
+    const snapshot = await readSnapshot<StoreSnapshot>(userId);
+    // L'utilisateur a pu changer pendant la lecture de la copie.
+    if (ownerId !== userId) return;
+
+    const usable =
+      snapshot &&
+      snapshot.version === SNAPSHOT_VERSION &&
+      snapshot.userId === userId &&
+      typeof snapshot.cursor === "string" &&
+      Date.now() - snapshot.savedAt < SNAPSHOT_MAX_AGE_MS;
+
+    if (usable) {
+      const patch: Record<string, unknown> = { loaded: true, complete: snapshot.complete ?? {} };
+      for (const key of TABLE_KEYS) {
+        if (SNAPSHOT_EXCLUDED.has(key)) continue;
+        const rows = snapshot.tables?.[key];
+        if (Array.isArray(rows)) patch[key] = rows;
+      }
+      if (snapshot.school?.id && !get().school.id) patch.school = snapshot.school;
+      set(patch as Partial<DataStore>);
+      syncCursor = snapshot.cursor;
+      deltaSupported = true;
+      // Dernier chargement complet inconnu : le filet de sécurité passera
+      // dans FULL_RELOAD_EVERY_MS.
+      lastFullLoadAt = Date.now();
+      // Ce qui a changé depuis la copie, et ce que la copie ne garde pas.
+      await Promise.all([get().refresh(), loadTablesFully([...SNAPSHOT_EXCLUDED])]);
+      return;
+    }
+
+    await get().fetchAll();
+  },
+
+  clear: () => {
+    ownerId = null;
+    syncCursor = null;
+    pendingWrites.clear();
+    if (snapshotTimer) {
+      clearTimeout(snapshotTimer);
+      snapshotTimer = null;
+    }
+    if (refreshTimer) {
+      clearTimeout(refreshTimer);
+      refreshTimer = null;
+    }
+    // Déconnexion : aucune copie des données ne doit rester sur ce poste.
+    void clearSnapshots();
+    set({ ...emptyDatabase(), school: get().school, loaded: false, complete: {} });
+  },
 
   // The whole scan (window matching, debt gate, deduction, attendance,
   // balance_tx, teacher due) runs atomically in the scan_card RPC — the
@@ -1462,7 +2054,7 @@ export const useData = create<DataStore>((set, get) => ({
     const res = data as ScanResult;
     // Refresh local state whenever the RPC wrote something (a deduction, a
     // presence, a teacher due).
-    if (res.ok && res.messageKey !== "scan.alreadyPresent") await get().fetchAll();
+    if (res.ok && res.messageKey !== "scan.alreadyPresent") await get().refresh();
     return res;
   },
 
@@ -1481,7 +2073,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1495,7 +2087,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1512,7 +2104,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1526,7 +2118,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1546,7 +2138,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false };
     }
     const res = data as { ok: boolean; groups?: number; created?: number; updated?: number };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1560,7 +2152,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false };
     }
     const res = data as { ok: boolean; deleted?: number };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1597,7 +2189,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false };
     }
     const res = data as { ok: boolean; charged?: number; students?: number };
-    if (res.ok && (res.charged ?? 0) > 0) await get().fetchAll();
+    if (res.ok && (res.charged ?? 0) > 0) await get().refresh();
     return res;
   },
 
@@ -1611,7 +2203,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as TeacherSettlement;
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1624,7 +2216,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "worker.notFound" };
     }
     const res = data as WorkerScanResult;
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1633,7 +2225,7 @@ export const useData = create<DataStore>((set, get) => ({
     const { data, error } = await supabase.rpc("freeze_open_worker_shifts", {});
     if (error || !data) return { ok: false };
     const res = data as { ok: boolean; frozen?: number };
-    if (res.ok && (res.frozen ?? 0) > 0) await get().fetchAll();
+    if (res.ok && (res.frozen ?? 0) > 0) await get().refresh();
     return res;
   },
 
@@ -1650,7 +2242,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "worker.error" };
     }
     const res = data as { ok: boolean; days?: number; minutes?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1675,7 +2267,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "worker.error" };
     }
     const res = data as { ok: boolean; shiftId?: string; minutes?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1691,7 +2283,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "worker.error" };
     }
     const res = data as { ok: boolean; minutes?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1706,7 +2298,7 @@ export const useData = create<DataStore>((set, get) => ({
     // constate simplement aucune absence automatique.
     if (error || !data) return { ok: false };
     const res = data as { ok: boolean; marked?: number; workers?: number };
-    if (res.ok && (res.marked ?? 0) > 0) await get().fetchAll();
+    if (res.ok && (res.marked ?? 0) > 0) await get().refresh();
     return res;
   },
 
@@ -1723,7 +2315,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "worker.error" };
     }
     const res = data as { ok: boolean; absenceId?: string; cost?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1768,7 +2360,7 @@ export const useData = create<DataStore>((set, get) => ({
       minutes?: number;
       messageKey?: string;
     };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1783,7 +2375,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "worker.error" };
     }
     const res = data as { ok: boolean; restored?: number; amount?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1802,7 +2394,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; id?: string; students?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1818,7 +2410,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; students?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1839,7 +2431,7 @@ export const useData = create<DataStore>((set, get) => ({
       scheduledAt?: string;
       messageKey?: string;
     };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1866,7 +2458,7 @@ export const useData = create<DataStore>((set, get) => ({
       teachersPaid?: number;
       messageKey?: string;
     };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1881,7 +2473,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; id?: string; total?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1897,7 +2489,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; total?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1913,7 +2505,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; paid?: number; due?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1929,7 +2521,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; amount?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1945,7 +2537,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1961,7 +2553,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -1977,7 +2569,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "particulier.error" };
     }
     const res = data as { ok: boolean; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2021,7 +2613,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "pay.error" };
     }
     const res = data as { ok: boolean; paymentId?: string; sessions?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2037,7 +2629,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false };
     }
     const res = data as { ok: boolean; deleted?: number; amount?: number };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2057,7 +2649,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "pay.error" };
     }
     const res = data as { ok: boolean; amount?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2072,7 +2664,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "pay.error" };
     }
     const res = data as { ok: boolean; restored?: number; amount?: number; messageKey?: string };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2101,7 +2693,7 @@ export const useData = create<DataStore>((set, get) => ({
       teacherDues?: number;
       teacherDuesRemoved?: number;
     };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2126,7 +2718,7 @@ export const useData = create<DataStore>((set, get) => ({
       duesRemoved?: number;
       duesUpdated?: number;
     };
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2144,6 +2736,7 @@ export const useData = create<DataStore>((set, get) => ({
         { studentId, password, updatedAt: row.updated_at },
       ],
     }));
+    scheduleRefresh();
   },
 
   setModuleAbsenceRule: async (moduleId, enabled, daysWindow = 7) => {
@@ -2160,6 +2753,7 @@ export const useData = create<DataStore>((set, get) => ({
         { moduleId, enabled, daysWindow },
       ],
     }));
+    scheduleRefresh();
   },
 
   addBalance: async (studentId, amount, description, settleRegistration) => {
@@ -2174,7 +2768,7 @@ export const useData = create<DataStore>((set, get) => ({
       console.error("add_student_balance failed:", error.message);
       return { ok: false, error: error.message };
     }
-    await get().fetchAll();
+    await get().refresh();
     return { ok: true };
   },
 
@@ -2196,7 +2790,7 @@ export const useData = create<DataStore>((set, get) => ({
       console.error("charge_student failed:", error.message);
       return { ok: false, error: error.message };
     }
-    await get().fetchAll();
+    await get().refresh();
     const res = data as { newBalance?: number } | null;
     return { ok: true, newBalance: res?.newBalance };
   },
@@ -2212,7 +2806,7 @@ export const useData = create<DataStore>((set, get) => ({
       console.error("settle_registration_fee failed:", error.message);
       return { ok: false, error: error.message };
     }
-    await get().fetchAll();
+    await get().refresh();
     const res = data as { newBalance?: number } | null;
     return { ok: true, newBalance: res?.newBalance };
   },
@@ -2231,7 +2825,7 @@ export const useData = create<DataStore>((set, get) => ({
       console.error("pay_registration_fee_cash failed:", error.message);
       return { ok: false, error: error.message };
     }
-    await get().fetchAll();
+    await get().refresh();
     const res = data as { fee?: number; newBalance?: number } | null;
     return { ok: true, fee: res?.fee, newBalance: res?.newBalance };
   },
@@ -2246,7 +2840,7 @@ export const useData = create<DataStore>((set, get) => ({
       console.error("pay_student_debt failed:", error.message);
       return { ok: false, error: error.message };
     }
-    await get().fetchAll();
+    await get().refresh();
     const res = data as
       | { registrationPaid?: number; debtPaid?: number; credited?: number }
       | null;
@@ -2276,7 +2870,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, error: error?.message };
     }
     const res = data as BalanceTxResult;
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2291,7 +2885,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, error: error?.message };
     }
     const res = data as BalanceTxResult;
-    if (res.ok) await get().fetchAll();
+    if (res.ok) await get().refresh();
     return res;
   },
 
@@ -2304,26 +2898,38 @@ export const useData = create<DataStore>((set, get) => ({
       [key]: [...(state[key] as unknown[]), item],
     }) as Partial<DataStore>);
 
-    // auth-linked rows are created via /api/admin/users
-    if (key === "school" || AUTH_LINKED_KEYS.has(key as string)) return true;
-
-    const cfg = TABLES[key as Exclude<keyof Database, "school">];
-    const supabase = createClient();
-    const error = await writeWithSchemaFallback(cfg.toRow(item), (row) =>
-      supabase.from(cfg.table).insert(row),
-    );
-    if (!error) return true;
-
-    console.error(`Failed to insert into ${cfg.table}:`, error);
-    // Rollback: what the database refused must not linger on screen.
-    const id = (item as { id?: string }).id;
-    if (id !== undefined) {
-      set((state) => ({
-        [key]: (state[key] as Array<{ id: string }>).filter((x) => x.id !== id),
-      }) as Partial<DataStore>);
+    // auth-linked rows are created via /api/admin/users — the server row
+    // already exists; the next sync brings its canonical version.
+    if (key === "school" || AUTH_LINKED_KEYS.has(key as string)) {
+      scheduleRefresh();
+      return true;
     }
-    reportWriteFailure(cfg.table, error);
-    return false;
+
+    const tableKey = key as TableKey;
+    const cfg = TABLES[tableKey];
+    const rowKey = rowKeyOf(tableKey)(item);
+    markPending(tableKey, rowKey);
+    try {
+      const supabase = createClient();
+      const error = await writeWithSchemaFallback(cfg.toRow(item), (row) =>
+        supabase.from(cfg.table).insert(row),
+      );
+      if (!error) return true;
+
+      console.error(`Failed to insert into ${cfg.table}:`, error);
+      // Rollback: what the database refused must not linger on screen.
+      const id = (item as { id?: string }).id;
+      if (id !== undefined) {
+        set((state) => ({
+          [key]: (state[key] as Array<{ id: string }>).filter((x) => x.id !== id),
+        }) as Partial<DataStore>);
+      }
+      reportWriteFailure(cfg.table, error);
+      return false;
+    } finally {
+      unmarkPending(tableKey, rowKey);
+      scheduleRefresh();
+    }
   },
 
   updateItem: async (key, id, updatedFields) => {
@@ -2334,6 +2940,16 @@ export const useData = create<DataStore>((set, get) => ({
     }) as Partial<DataStore>);
 
     if (key === "school") return true;
+
+    const tableKey = key as TableKey;
+    // La ligne reste « en écriture » jusqu'à la fin de TOUT ce qu'elle déclenche
+    // — y compris la réécriture des inscriptions, qui continue après le retour.
+    markPending(tableKey, id);
+    let enrollmentWrite: Promise<void> | null = null;
+    const release = () => {
+      unmarkPending(tableKey, id);
+      scheduleRefresh();
+    };
 
     const supabase = createClient();
 
@@ -2355,7 +2971,7 @@ export const useData = create<DataStore>((set, get) => ({
       // rechargement suivant, alors que l'écran affichait encore les siennes.
       // On ne supprime donc l'ancien jeu que si le nouveau passe, et un échec
       // est annoncé au lieu d'être avalé.
-      void (async () => {
+      enrollmentWrite = (async () => {
         const rows = ids.map((subscription_id) => {
           // Only send the optional columns when they carry a value, so
           // cours-only enrollments still work before the migrations.
@@ -2410,18 +3026,23 @@ export const useData = create<DataStore>((set, get) => ({
       })();
     }
 
-    const cfg = TABLES[key as Exclude<keyof Database, "school">];
-    const row = cfg.toRow(updatedFields);
-    if (Object.keys(row).length === 0) return true;
-    const error = await writeWithSchemaFallback(row, (patch) =>
-      supabase.from(cfg.table).update(patch).eq("id", id),
-    );
-    if (error) {
-      console.error(`Failed to update ${cfg.table}:`, error);
-      reportWriteFailure(cfg.table, error);
-      return false;
+    try {
+      const cfg = TABLES[tableKey];
+      const row = cfg.toRow(updatedFields);
+      if (Object.keys(row).length === 0) return true;
+      const error = await writeWithSchemaFallback(row, (patch) =>
+        supabase.from(cfg.table).update(patch).eq("id", id),
+      );
+      if (error) {
+        console.error(`Failed to update ${cfg.table}:`, error);
+        reportWriteFailure(cfg.table, error);
+        return false;
+      }
+      return true;
+    } finally {
+      if (enrollmentWrite) void (enrollmentWrite as Promise<void>).finally(release);
+      else release();
     }
-    return true;
   },
 
   deleteFrom: (key, id) => {
@@ -2431,18 +3052,35 @@ export const useData = create<DataStore>((set, get) => ({
 
     if (key === "school") return;
 
+    // Tant que la suppression n'est pas confirmée, une synchronisation ne doit
+    // pas faire réapparaître la ligne.
+    const tableKey = key as TableKey;
+    markPending(tableKey, id);
+    const release = () => {
+      unmarkPending(tableKey, id);
+      scheduleRefresh();
+    };
+
     if (AUTH_LINKED_KEYS.has(key as string)) {
-      fetch(`/api/admin/users/${id}`, { method: "DELETE" }).then(async (res) => {
-        if (!res.ok) console.error(`Failed to delete user ${id}:`, await res.text());
-      });
+      fetch(`/api/admin/users/${id}`, { method: "DELETE" })
+        .then(async (res) => {
+          if (!res.ok) console.error(`Failed to delete user ${id}:`, await res.text());
+        })
+        .catch((err) => console.error(`Failed to delete user ${id}:`, err))
+        .finally(release);
       return;
     }
 
-    const cfg = TABLES[key as Exclude<keyof Database, "school">];
+    const cfg = TABLES[tableKey];
     const supabase = createClient();
-    supabase.from(cfg.table).delete().eq("id", id).then(({ error }) => {
-      if (error) console.error(`Failed to delete from ${cfg.table}:`, error.message);
-    });
+    supabase
+      .from(cfg.table)
+      .delete()
+      .eq("id", id)
+      .then(({ error }) => {
+        if (error) console.error(`Failed to delete from ${cfg.table}:`, error.message);
+      })
+      .then(release, release);
   },
 
   cashMove: (type, amount, description, date) => {
@@ -2455,10 +3093,19 @@ export const useData = create<DataStore>((set, get) => ({
 
     set((state) => ({ cash: [...state.cash, item] }));
 
+    markPending("cash", item.id);
+    const release = () => {
+      unmarkPending("cash", item.id);
+      scheduleRefresh();
+    };
     const supabase = createClient();
-    supabase.from("cash_transactions").insert(cashMapper.toRow(item)).then(({ error }) => {
-      if (error) console.error("Failed to insert cash transaction:", error.message);
-    });
+    supabase
+      .from("cash_transactions")
+      .insert(cashMapper.toRow(item))
+      .then(({ error }) => {
+        if (error) console.error("Failed to insert cash transaction:", error.message);
+      })
+      .then(release, release);
   },
 
   updateSchool: async (updatedFields) => {

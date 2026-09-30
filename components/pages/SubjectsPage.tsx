@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { uploadImage } from "@/lib/supabase/uploadImage";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -13,7 +14,25 @@ import { Trash2, Eye, Plus, CheckSquare, Square, FileText, Upload, Image as Imag
 import type { Subject } from "@/lib/types";
 
 export function SubjectsPage() {
-  const { subjects, sessions, modules, groups, classes, push, deleteFrom } = useData();
+  const {
+    subjects,
+    sessions,
+    modules,
+    groups,
+    classes,
+    push,
+    deleteFrom,
+  } = useData(
+    useShallow((s) => ({
+      subjects: s.subjects,
+      sessions: s.sessions,
+      modules: s.modules,
+      groups: s.groups,
+      classes: s.classes,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+    })),
+  );
 
   // Modals
   const [isCreateOpen, setIsCreateOpen] = useState(false);

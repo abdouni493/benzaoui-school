@@ -2,6 +2,7 @@
 
 import { useCallback } from "react";
 import { useData, uid, type ScanResult } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useSettings } from "@/lib/store/settings";
 import { useToast } from "@/lib/store/toast";
 import { formatDA } from "@/lib/utils";
@@ -98,15 +99,27 @@ async function queueBalanceAlert(opts: {
  * « RFID-0010 » instead of coming back « carte introuvable ».
  */
 export function useScanProcessor() {
-  const { scanCard, scanWorkerCard, students, subscriptions, parents, school, push } = useData();
-  const { language, autoSendWhatsapp, autoSendEmail } = useSettings();
-  const { addToast } = useToast();
+  // Les données sont lues AU MOMENT DU SCAN (`useData.getState()`), pas au
+  // rendu : le pipeline ne dépend donc d'aucune table, et le lecteur de
+  // cartes n'est plus réinstallé à chaque synchronisation. Surtout, l'élève
+  // lu après le scan est celui que la synchronisation vient de mettre à jour
+  // — son solde APRÈS la séance, celui que l'alerte doit annoncer.
+  const { language, autoSendWhatsapp, autoSendEmail } = useSettings(
+    useShallow((s) => ({
+      language: s.language,
+      autoSendWhatsapp: s.autoSendWhatsapp,
+      autoSendEmail: s.autoSendEmail,
+    })),
+  );
+  const addToast = useToast((s) => s.addToast);
 
   const processScan = useCallback(
     async (rawCode: string): Promise<ScanResult> => {
       const code = rawCode.trim();
       if (!code) return { ok: false, messageKey: "scan.notFound" };
+      const { scanCard, scanWorkerCard } = useData.getState();
       const result = await scanCard(code);
+      const { students, subscriptions, parents, school, push } = useData.getState();
 
       // Same reader for both populations: a badge unknown to the students
       // table is retried against the workers table (pointage arrivée/départ)
@@ -221,7 +234,10 @@ export function useScanProcessor() {
               ? parents.find((p) => p.id === student.parentId)
               : undefined;
             void queueBalanceAlert({
-              student,
+              // Le solde APRÈS la séance, tel que le serveur l'a écrit : c'est
+              // lui qui décide du message (dette, solde épuisé, solde faible).
+              student:
+                result.newBalance !== undefined ? { ...student, balance: result.newBalance } : student,
               parent,
               school,
               lang: language === "ar" ? "ar" : "fr",
@@ -349,7 +365,7 @@ export function useScanProcessor() {
 
       return result;
     },
-    [scanCard, scanWorkerCard, students, subscriptions, parents, school, language, autoSendWhatsapp, autoSendEmail, addToast, push],
+    [language, autoSendWhatsapp, autoSendEmail, addToast],
   );
 
   return processScan;

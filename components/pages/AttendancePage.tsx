@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -25,7 +26,14 @@ import {
   Lock,
   Timer,
 } from "lucide-react";
-import type { ScheduleSession, AttendanceStatus, Student, Day, FreePeriod } from "@/lib/types";
+import type {
+  AttendanceRecord,
+  ScheduleSession,
+  AttendanceStatus,
+  Student,
+  Day,
+  FreePeriod,
+} from "@/lib/types";
 import { useToast } from "@/lib/store/toast";
 import { useSettings, rollCallKey, type AttendanceOpenMode } from "@/lib/store/settings";
 import { formatDA } from "@/lib/utils";
@@ -57,7 +65,6 @@ const MARK_FAILURE_MESSAGES: Record<string, string> = {
 };
 
 export function AttendancePage() {
-  const data = useData();
   const {
     sessions,
     students,
@@ -72,7 +79,23 @@ export function AttendancePage() {
     push,
     markAttendance,
     cancelAttendance,
-  } = data;
+  } = useData(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      classes: s.classes,
+      modules: s.modules,
+      teachers: s.teachers,
+      salles: s.salles,
+      attendance: s.attendance,
+      freePeriods: s.freePeriods,
+      school: s.school,
+      push: s.push,
+      markAttendance: s.markAttendance,
+      cancelAttendance: s.cancelAttendance,
+    })),
+  );
   const { addToast } = useToast();
   // Politique d'ouverture de la feuille de pointage (réglée sur cet écran).
   const {
@@ -198,9 +221,34 @@ export function AttendancePage() {
   const sheetSessions = sessionsOn(sheetDate);
 
   // Presences recorded on the selected day (roll-call counters + calendar dots).
-  const attendanceOn = (iso: string) =>
-    attendance.filter((a) => new Date(a.timestamp).toLocaleDateString("fr-CA") === iso);
+  //
+  // Indexées UNE fois par jour local : la feuille demandait auparavant, pour
+  // CHAQUE élève affiché et CHAQUE séance du jour, de reparcourir tout
+  // l'historique des présences en convertissant chaque date en texte — des
+  // centaines de milliers de conversions à chaque clic et chaque tic de
+  // l'horloge (toutes les 30 s), l'écran figé pendant le pointage.
+  const attendanceByDay = useMemo(() => {
+    const map = new Map<string, AttendanceRecord[]>();
+    for (const a of attendance) {
+      const key = new Date(a.timestamp).toLocaleDateString("fr-CA");
+      const list = map.get(key);
+      if (list) list.push(a);
+      else map.set(key, [a]);
+    }
+    return map;
+  }, [attendance]);
+  const attendanceOn = (iso: string) => attendanceByDay.get(iso) ?? [];
   const sheetAttendance = attendanceOn(sheetDate);
+  /** La présence d'un élève sur un créneau, le jour de la feuille. */
+  const sheetAttendanceByKey = useMemo(() => {
+    const map = new Map<string, AttendanceRecord>();
+    for (const a of attendanceByDay.get(sheetDate) ?? []) {
+      const key = `${a.studentId}|${a.sessionId}`;
+      // La première du jour, comme le faisait `.find()`.
+      if (!map.has(key)) map.set(key, a);
+    }
+    return map;
+  }, [attendanceByDay, sheetDate]);
 
   /** The enrollment the student attends this séance under: his own one on that
    *  timing, else the one on a sibling group of the same cours (rattrapage).
@@ -333,13 +381,8 @@ export function AttendancePage() {
     const enrolled = students.filter((stu) => stu.subscriptionIds.some((id) => subIds.includes(id)));
     const enrolledIds = new Set(enrolled.map((s) => s.id));
     const visitorIds = new Set(
-      attendance
-        .filter(
-          (a) =>
-            a.sessionId === sesId &&
-            new Date(a.timestamp).toLocaleDateString("fr-CA") === sheetDate &&
-            !enrolledIds.has(a.studentId),
-        )
+      sheetAttendance
+        .filter((a) => a.sessionId === sesId && !enrolledIds.has(a.studentId))
         .map((a) => a.studentId),
     );
     return [...enrolled, ...students.filter((s) => visitorIds.has(s.id))];
@@ -385,12 +428,9 @@ export function AttendancePage() {
   // that already have a roll-call so past séances are easy to find.
   const presencesByDate = useMemo(() => {
     const map: Record<string, number> = {};
-    for (const a of attendance) {
-      const key = new Date(a.timestamp).toLocaleDateString("fr-CA");
-      map[key] = (map[key] ?? 0) + 1;
-    }
+    for (const [key, list] of attendanceByDay) map[key] = list.length;
     return map;
-  }, [attendance]);
+  }, [attendanceByDay]);
 
   const monthLabel = calendarMonth.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
 
@@ -412,14 +452,8 @@ export function AttendancePage() {
 
   // Find attendance record for a student in a session on the sheet date
   // (local calendar day — students are ABSENT by default until a record exists)
-  const getStudentSheetAttendance = (studentId: string, sesId: string) => {
-    return attendance.find(
-      (a) =>
-        a.studentId === studentId &&
-        a.sessionId === sesId &&
-        new Date(a.timestamp).toLocaleDateString("fr-CA") === sheetDate
-    );
-  };
+  const getStudentSheetAttendance = (studentId: string, sesId: string) =>
+    sheetAttendanceByKey.get(`${studentId}|${sesId}`);
 
   // Step 1 — the click on Présent / En Retard / Absent. Money never moves
   // directly here: any operation that charges or refunds opens a confirmation

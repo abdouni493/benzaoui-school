@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
@@ -35,8 +36,31 @@ const longDateFr = (iso: string) =>
  * c'est ce qui manquait pour vérifier une journée écoulée sans quitter l'écran.
  */
 export function DaySchedulePanel() {
-  const { sessions, modules, groups, teachers, salles, classes, filieres, subscriptions, students, attendance } =
-    useData();
+  const {
+    sessions,
+    modules,
+    groups,
+    teachers,
+    salles,
+    classes,
+    filieres,
+    subscriptions,
+    students,
+    attendance,
+  } = useData(
+    useShallow((s) => ({
+      sessions: s.sessions,
+      modules: s.modules,
+      groups: s.groups,
+      teachers: s.teachers,
+      salles: s.salles,
+      classes: s.classes,
+      filieres: s.filieres,
+      subscriptions: s.subscriptions,
+      students: s.students,
+      attendance: s.attendance,
+    })),
+  );
 
   const todayIso = isoDateOf(new Date());
   const [date, setDate] = useState<string>(todayIso);

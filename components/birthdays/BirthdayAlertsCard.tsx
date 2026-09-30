@@ -14,12 +14,15 @@ import { Cake, ArrowRight } from "lucide-react";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useTodayBirthdays } from "@/lib/useTodayBirthdays";
 import { sessionSalleIds } from "@/lib/helpers";
 import type { ScheduleSession } from "@/lib/types";
 
 export function BirthdayAlertsCard() {
-  const { modules, salles, teachers } = useData();
+  const { modules, salles, teachers } = useData(
+    useShallow((s) => ({ modules: s.modules, salles: s.salles, teachers: s.teachers })),
+  );
   const { expected } = useTodayBirthdays();
 
   if (expected.length === 0) return null;

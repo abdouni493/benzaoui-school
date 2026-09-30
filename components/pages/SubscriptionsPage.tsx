@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useData, uid } from "@/lib/store/data";
+import { useData, uid, type Database } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import {
   classLabel,
   courseKeyOf,
@@ -62,7 +63,23 @@ export function SubscriptionsPage() {
     deleteSubscriptionPrice,
     repriceSession,
     updateSchool,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      school: s.school,
+      subscriptions: s.subscriptions,
+      sessions: s.sessions,
+      classes: s.classes,
+      modules: s.modules,
+      teachers: s.teachers,
+      groups: s.groups,
+      salles: s.salles,
+      attendance: s.attendance,
+      setSubscriptionPrice: s.setSubscriptionPrice,
+      deleteSubscriptionPrice: s.deleteSubscriptionPrice,
+      repriceSession: s.repriceSession,
+      updateSchool: s.updateSchool,
+    })),
+  );
   /** Un compte de réception encaisse ; il ne voit pas ce que l'école gagne. */
   const canSeeGains = useCanSeeGains();
 
@@ -1143,9 +1160,9 @@ function FreePeriodsPanel() {
    *  tous ses scans à 0 DA) et combien d'élèves elle touche — pas le manque à
    *  gagner qu'elle représente. */
   const canSeeGains = useCanSeeGains();
-  const db = useData();
   const {
     classes,
+    filieres,
     students,
     sessions,
     modules,
@@ -1156,7 +1173,24 @@ function FreePeriodsPanel() {
     deleteFrom,
     fetchFreePeriodStats,
     applyOfferedRules,
-  } = db;
+  } = useData(
+    useShallow((s) => ({
+      classes: s.classes,
+      filieres: s.filieres,
+      students: s.students,
+      sessions: s.sessions,
+      modules: s.modules,
+      freePeriods: s.freePeriods,
+      attendance: s.attendance,
+      push: s.push,
+      updateItem: s.updateItem,
+      deleteFrom: s.deleteFrom,
+      fetchFreePeriodStats: s.fetchFreePeriodStats,
+      applyOfferedRules: s.applyOfferedRules,
+    })),
+  );
+  // `classLabel` ne lit que les filières.
+  const db = useMemo(() => ({ filieres }) as unknown as Database, [filieres]);
 
   const [stats, setStats] = useState<FreePeriodStat[]>([]);
   const [isFormOpen, setIsFormOpen] = useState(false);

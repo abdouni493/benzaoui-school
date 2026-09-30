@@ -1,6 +1,8 @@
 "use client";
 
-import { useData } from "@/lib/store/data";
+import { useMemo } from "react";
+import { useData, type Database } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useTranslation } from "@/lib/i18n/useTranslation";
 import { moduleName, teacherName, groupName, salleName, visibleTimetableSessions } from "@/lib/helpers";
 import { DAYS, type Day, type ScheduleSession } from "@/lib/types";
@@ -8,7 +10,15 @@ import { todayDayKey } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
 export function WeekSchedule({ sessions }: { sessions: ScheduleSession[] }) {
-  const db = useData();
+  // Seules les quatre tables de libellés : un scan au guichet ne redessine pas
+  // l'emploi du temps.
+  const { modules, teachers, groups, salles } = useData(
+    useShallow((s) => ({ modules: s.modules, teachers: s.teachers, groups: s.groups, salles: s.salles })),
+  );
+  const db = useMemo(
+    () => ({ modules, teachers, groups, salles }) as unknown as Database,
+    [modules, teachers, groups, salles],
+  );
   const { t } = useTranslation();
   const today = todayDayKey();
 

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useData } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { useSession } from "@/lib/store/session";
 import { changeOwnPassword } from "@/lib/supabase/createUser";
 import { Card, CardBody } from "@/components/ui/Card";
@@ -50,7 +51,22 @@ export function ParentPages({ slug }: PageProps) {
     subjects,
     notifications,
     updateItem,
-  } = useData();
+  } = useData(
+    useShallow((s) => ({
+      parents: s.parents,
+      students: s.students,
+      subscriptions: s.subscriptions,
+      sessions: s.sessions,
+      modules: s.modules,
+      classes: s.classes,
+      groups: s.groups,
+      announcements: s.announcements,
+      balanceTx: s.balanceTx,
+      subjects: s.subjects,
+      notifications: s.notifications,
+      updateItem: s.updateItem,
+    })),
+  );
 
   const parent = parents.find((p) => p.id === user?.entityId);
 
@@ -301,7 +317,9 @@ function ParentScheduleView({
   getSessionInfo: (id: string) => any;
   subscriptions: Subscription[];
 }) {
-  const { teachers, salles } = useData();
+  const { teachers, salles } = useData(
+    useShallow((s) => ({ teachers: s.teachers, salles: s.salles })),
+  );
   const [selectedChildId, setSelectedChildId] = useState(myChildren[0]?.id || "");
   const [filterSessionId, setFilterSessionId] = useState("");
   const [selectedSession, setSelectedSession] = useState<any | null>(null);

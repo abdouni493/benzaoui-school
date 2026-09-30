@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useData, uid } from "@/lib/store/data";
+import { useShallow } from "zustand/react/shallow";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -20,7 +21,27 @@ const AUDIENCE_LABELS: Record<Audience, string> = {
 };
 
 export function AnnouncementsPage() {
-  const { announcements, groups, sessions, subscriptions, students, push, deleteFrom, updateItem } = useData();
+  const {
+    announcements,
+    groups,
+    sessions,
+    subscriptions,
+    students,
+    push,
+    deleteFrom,
+    updateItem,
+  } = useData(
+    useShallow((s) => ({
+      announcements: s.announcements,
+      groups: s.groups,
+      sessions: s.sessions,
+      subscriptions: s.subscriptions,
+      students: s.students,
+      push: s.push,
+      deleteFrom: s.deleteFrom,
+      updateItem: s.updateItem,
+    })),
+  );
 
   // Modals
   const [isCreateOpen, setIsCreateOpen] = useState(false);
