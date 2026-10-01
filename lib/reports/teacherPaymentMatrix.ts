@@ -28,7 +28,7 @@
 
 import type { School, Teacher, TeacherPaymentDetail } from "@/lib/types";
 import type { Language } from "@/lib/store/settings";
-import { buildPayMatrix, shortDate } from "@/lib/teacherPayMatrix";
+import { buildPayMatrix, formatAmount, rowFormulaTerms, shortDate } from "@/lib/teacherPayMatrix";
 import {
   bannerHtml,
   escapeHtml,
@@ -64,13 +64,14 @@ const LABELS = {
     amount: "Montant calculé",
     totals: "TOTAL GÉNÉRAL",
     noRows: "Aucune séance détaillée sur ce règlement.",
-    formula: (unit: number, pct: number, students: number, total: number, da: string) =>
-      `${unit} ${da} × ${pct} % × ${students} élève(s) = ${total} ${da}`,
+    formula: (terms: string, pct: number, total: string, da: string) =>
+      `${terms} × ${pct} % = ${total} ${da}`,
     recapTitle: "Récapitulatif du règlement",
     gross: "Part enseignant brute :",
     acomptes: "Acomptes déjà versés :",
     retenues: "Retenues / absences :",
     paidOn: "Payé le :",
+    rounding: "Arrondi au dinar :",
     net: "MONTANT NET VERSÉ À L'ENSEIGNANT :",
     signTeacher: "Signature de l'Enseignant",
     signCashier: "La Caisse / Direction",
@@ -103,13 +104,14 @@ const LABELS = {
     amount: "المبلغ المحسوب",
     totals: "المجموع العام",
     noRows: "لا توجد حصص مفصلة في هذا الدفع.",
-    formula: (unit: number, pct: number, students: number, total: number, da: string) =>
-      `${unit} ${da} × ${pct} ٪ × ${students} تلميذ = ${total} ${da}`,
+    formula: (terms: string, pct: number, total: string, da: string) =>
+      `${terms} × ${pct} ٪ = ${total} ${da}`,
     recapTitle: "ملخص الدفع",
     gross: "نصيب الأستاذ الإجمالي :",
     acomptes: "التسبيقات المدفوعة :",
     retenues: "الخصومات / الغيابات :",
     paidOn: "تاريخ الدفع :",
+    rounding: "التقريب إلى الدينار :",
     net: "المبلغ الصافي المدفوع للأستاذ :",
     signTeacher: "إمضاء الأستاذ",
     signCashier: "الصندوق / الإدارة",
@@ -163,7 +165,9 @@ export interface TeacherPaymentMatrixData {
 export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData): string {
   const { teacher, school, lang } = data;
   const L = LABELS[lang];
-  const money = (v: number) => `${Math.round(v)} ${L.da}`;
+  // Au centime près : une part à 70 % d'une séance à 625 DA vaut 437,5 DA, et
+  // le bon doit pouvoir se refaire à la calculatrice. Seul le net est arrondi.
+  const money = (v: number) => `${formatAmount(v)} ${L.da}`;
   const receiptNo =
     data.receiptNo ??
     `PAY-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
@@ -188,9 +192,10 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
                 return `<td class="d${n === 0 ? " zero" : ""}">${c ? n : "—"}</td>`;
               })
               .join("");
+            const terms = rowFormulaTerms(r, L.da);
             const formula =
-              r.unitPrice > 0 && r.percentage > 0 && r.totalStudents > 0
-                ? `<em>${L.formula(r.unitPrice, r.percentage, r.totalStudents, r.totalShare, L.da)}</em>`
+              terms && r.percentage > 0 && r.totalStudents > 0
+                ? `<em>${L.formula(terms, r.percentage, formatAmount(r.totalShare), L.da)}</em>`
                 : "";
             return `
               <tr>
@@ -228,6 +233,12 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
         ${showFree ? `<td class="n">${money(m.freeShare)}</td>` : ""}
         <td class="n amt">${money(m.amount)}</td>
       </tr>`;
+
+  // Le net est versé en dinars entiers : l'écart d'arrondi s'imprime, pour que
+  // « brut − acomptes − retenues » retombe exactement sur le net.
+  const rounding =
+    Math.round((data.amount - (m.amount - (data.acomptes ?? 0) - (data.retenues ?? 0))) * 100) / 100;
+  const showRounding = rounding !== 0 && Math.abs(rounding) < 1;
 
   const periodLabel =
     m.dates.length > 0
@@ -309,6 +320,11 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
       ${
         (data.retenues ?? 0) > 0
           ? `<div class="summary-line"><span>${L.retenues}</span><strong style="color:#b91c1c;">-${money(data.retenues ?? 0)}</strong></div>`
+          : ""
+      }
+      ${
+        showRounding
+          ? `<div class="summary-line"><span>${L.rounding}</span><strong>${rounding > 0 ? "+" : ""}${money(rounding)}</strong></div>`
           : ""
       }
       <div class="summary-line"><span>${L.totalStudents} :</span><strong>${m.totalStudents}</strong></div>

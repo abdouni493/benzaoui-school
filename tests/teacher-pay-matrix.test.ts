@@ -1,6 +1,15 @@
 import { describe, it, expect } from "vitest";
 
-import { buildPayMatrix, shortDate } from "@/lib/teacherPayMatrix";
+import {
+  apportion,
+  apportionByGroup,
+  buildPayMatrix,
+  formatAmount,
+  priceBreakdown,
+  roundCents,
+  rowFormulaTerms,
+  shortDate,
+} from "@/lib/teacherPayMatrix";
 import type { TeacherPaymentDetail } from "@/lib/types";
 
 /** Une ligne de l'instantané figé d'un règlement, réduite à ce que le tableau
@@ -122,6 +131,100 @@ describe("buildPayMatrix — un cours par ligne, une date par colonne", () => {
       detail({ sessionId: "s2", title: "Physique", share: 900 }),
     ]);
     expect(m.rows.map((r) => r.title)).toEqual(["Physique", "Maths"]);
+  });
+});
+
+describe("la formule d'une ligne retombe sur son montant (cas Amine Mohamed)", () => {
+  // 3AS Sciences / A, vendredi 14:30, 70 % : 179 présences badgées à 625 DA et
+  // 4 passagers à 700 DA sur quatre vendredis. L'écran imprimait
+  // « 625 × 70% × 183 = 80 362 DA » — la calculatrice en donne 80 062,5.
+  const week = (dateKey: string, regular: number, passagers: number) =>
+    detail({
+      dateKey,
+      sessionId: "sci-a",
+      presents: regular + passagers,
+      passagers,
+      unitPrice: 625,
+      percentage: 70,
+      share: (regular * 625 * 70 + passagers * 700 * 70) / 100,
+      prices: [
+        { price: 625, count: regular },
+        ...(passagers ? [{ price: 700, count: passagers }] : []),
+      ],
+    });
+
+  const m = buildPayMatrix([
+    week("2026-09-04", 33, 0),
+    week("2026-09-11", 40, 0),
+    week("2026-09-18", 51, 1),
+    week("2026-09-25", 55, 3),
+  ]);
+  const row = m.rows[0];
+
+  it("regroupe les présences par tarif réellement payé", () => {
+    expect(row.prices).toEqual([
+      { price: 625, count: 179 },
+      { price: 700, count: 4 },
+    ]);
+    expect(row.totalStudents).toBe(183);
+  });
+
+  it("écrit une formule qu'on peut refaire à la main", () => {
+    expect(rowFormulaTerms(row)).toBe("(625 DA × 179 + 700 DA × 4)");
+    // (111 875 + 2 800) × 70 % = 80 272,5
+    expect(row.totalShare).toBe(80_272.5);
+    expect(formatAmount(row.totalShare)).toBe("80272,5");
+  });
+
+  it("garde l'ancienne lecture pour un règlement sans détail des tarifs", () => {
+    const old = buildPayMatrix([detail({ presents: 21, share: 9_198, unitPrice: 625, percentage: 70 })]);
+    expect(rowFormulaTerms(old.rows[0])).toBe("625 DA × 21");
+  });
+});
+
+describe("formatAmount / roundCents — le centime n'apparaît que s'il existe", () => {
+  it("affiche les entiers tels quels et les demi-dinars avec une virgule", () => {
+    expect(formatAmount(96_898)).toBe("96898");
+    expect(formatAmount(96_897.5)).toBe("96897,5");
+    expect(formatAmount(406.25)).toBe("406,25");
+    expect(formatAmount(-0.5)).toBe("-0,5");
+  });
+
+  it("efface les restes de virgule flottante", () => {
+    expect(roundCents(0.1 + 0.2)).toBe(0.3);
+    expect(priceBreakdown([625, 700, 625])).toEqual([
+      { price: 625, count: 2 },
+      { price: 700, count: 1 },
+    ]);
+  });
+});
+
+describe("apportion — un montant fixe se répartit sans perdre un dinar", () => {
+  it("10 000 DA sur trois séances égales font 10 000, pas 9 999", () => {
+    const parts = apportion([1, 1, 1], 10_000);
+    expect(parts.reduce((s, x) => s + x, 0)).toBe(10_000);
+    expect(parts.sort()).toEqual([3333, 3333, 3334]);
+  });
+
+  it("suit les poids, et partage à parts égales quand aucun poids n'existe", () => {
+    expect(apportion([3_000, 1_000], 2_000)).toEqual([1_500, 500]);
+    expect(apportion([0, 0], 101).reduce((s, x) => s + x, 0)).toBe(101);
+    expect(apportion([], 50)).toEqual([]);
+  });
+
+  it("à deux étages, chaque emploi du temps reçoit la part entière la plus proche de la sienne", () => {
+    const parts = apportionByGroup(
+      [
+        { group: "maths", weight: 1 },
+        { group: "maths", weight: 1 },
+        { group: "physique", weight: 1 },
+      ],
+      1_000,
+    );
+    expect(parts.reduce((s, x) => s + x, 0)).toBe(1_000);
+    // 2/3 de 1 000 = 666,67 → 667 pour les maths, réparties sur leurs séances.
+    expect(parts[0] + parts[1]).toBe(667);
+    expect(parts[2]).toBe(333);
   });
 });
 

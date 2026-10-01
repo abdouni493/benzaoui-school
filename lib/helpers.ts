@@ -272,21 +272,30 @@ export function freePeriodCovering<T extends FreePeriodRule>(
 // ---- Rémunération d'un enseignant au pourcentage -----------------------------
 
 /**
- * Part de l'enseignant sur une liste de présences.
+ * Part de l'enseignant sur une liste de présences — EXACTE, au centime.
  *
  * `billable` est ce qui manquait : une présence OFFERTE (créneau offert,
  * période gratuite sans rémunération, élève gratuit) ou DÉJÀ RÉGLÉE reste
  * affichée à l'écran — l'enseignant doit voir qui était là — mais l'école n'a
  * rien encaissé dessus, elle ne peut donc pas en verser un pourcentage.
- * L'arrondi se fait présence par présence, comme au scan : c'est ce qui garde
- * l'écran de règlement d'accord avec `unpaid_teacher_sessions`.
+ *
+ * AUCUN ARRONDI ICI. On arrondissait présence par présence, « comme au scan » :
+ * à 70 % d'une séance à 625 DA, chaque élève valait 438 DA au lieu de 437,5.
+ * Sur les 217 présences d'un mois, l'enseignant touchait 108,5 DA de trop, et
+ * l'écran affichait « 138 425 DA encaissés × 70 % = 97 006 DA » — une
+ * multiplication que personne ne pouvait refaire à la calculatrice. Un tarif en
+ * dinars × un pourcentage tombe toujours juste au centime : on garde la valeur
+ * exacte, et seul le versement final est arrondi au dinar, UNE fois.
  */
 export function teacherShareOf(
   rows: { fee: number; billable: boolean }[],
   percentage: number,
 ): number {
   const pct = Math.min(Math.max(percentage || 0, 0), 100);
-  return rows.reduce((sum, r) => sum + (r.billable ? Math.round((r.fee * pct) / 100) : 0), 0);
+  // En centimes entiers : additionner des 437,5 en virgule flottante finit par
+  // laisser traîner des 0,000001.
+  const cents = rows.reduce((sum, r) => sum + (r.billable ? Math.round(r.fee * pct) : 0), 0);
+  return cents / 100;
 }
 
 // ---- Ordre d'affichage des fiches --------------------------------------------
@@ -768,6 +777,45 @@ export const JS_DAY_KEYS: Day[] = [
 
 /** YYYY-MM-DD d'une Date, en heure LOCALE (jamais décalé en UTC). */
 export const isoDateOf = (d: Date): string => d.toLocaleDateString("fr-CA");
+
+/** Le fuseau de l'école — celui que la base utilise pour dater une séance
+ *  (`timezone('Africa/Algiers', …)` dans les RPC de règlement). */
+export const SCHOOL_TIME_ZONE = "Africa/Algiers";
+
+let schoolDayFormat: Intl.DateTimeFormat | null | undefined;
+
+/**
+ * Le jour (YYYY-MM-DD) d'un horodatage, À L'HEURE DE L'ÉCOLE, quel que soit
+ * le fuseau du poste qui affiche l'écran.
+ *
+ * Le règlement d'un enseignant envoie au RPC des clés « jour|créneau » que la
+ * base compare en heure d'Alger. Calculées en heure LOCALE, elles changeaient
+ * de jour sur un poste réglé sur un autre fuseau : un cours du vendredi 14 h 30
+ * devenait « samedi » (UTC+13), le tableau ajoutait des colonnes de dates
+ * fantômes, et le règlement enregistré ne soldait AUCUNE séance — elles
+ * restaient dues, prêtes à être payées une seconde fois.
+ */
+export function schoolDateKey(value: string | number | Date): string {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  if (schoolDayFormat === undefined) {
+    try {
+      schoolDayFormat = new Intl.DateTimeFormat("en-CA", {
+        timeZone: SCHOOL_TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+    } catch {
+      // Navigateur sans base de fuseaux : l'heure locale reste le seul repère.
+      schoolDayFormat = null;
+    }
+  }
+  if (!schoolDayFormat) return d.toLocaleDateString("fr-CA");
+  const parts = schoolDayFormat.formatToParts(d);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
 
 /** Le jour de semaine d'une date ISO, sans piège de fuseau : la date est lue à
  *  midi, l'heure qu'aucun décalage ne fait changer de jour. */

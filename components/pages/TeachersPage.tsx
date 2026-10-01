@@ -50,7 +50,15 @@ import { printHtmlDocument } from "@/lib/print";
 import { buildTeacherPaymentReport } from "@/lib/reports/teacherPayment";
 import { buildTeacherSettlementReceipt } from "@/lib/reports/teacherSettlement";
 import { buildTeacherPaymentMatrixReceipt } from "@/lib/reports/teacherPaymentMatrix";
-import { buildPayMatrix, shortDate } from "@/lib/teacherPayMatrix";
+import {
+  apportionByGroup,
+  buildPayMatrix,
+  formatAmount,
+  priceBreakdown,
+  roundCents,
+  rowFormulaTerms,
+  shortDate,
+} from "@/lib/teacherPayMatrix";
 import {
   DAY_LABELS_FR,
   FREE_REASON_LABELS,
@@ -58,6 +66,7 @@ import {
   formatDays,
   freeReasonOf,
   liveDueFee,
+  schoolDateKey,
   teacherShareOf,
   visibleTimetableSessions,
 } from "@/lib/helpers";
@@ -301,7 +310,7 @@ export function TeachersPage() {
   const getOpenAbsences = (tid: string) =>
     absences.filter((a) => a.teacherId === tid && !a.paymentId);
 
-  const dateKeyOf = (iso: string) => new Date(iso).toLocaleDateString("fr-CA");
+  const dateKeyOf = (iso: string) => schoolDateKey(iso);
 
   // ---- Index -------------------------------------------------------------------------
   // `attendanceFor` parcourait TOUT l'historique des présences — en convertissant
@@ -312,7 +321,7 @@ export function TeachersPage() {
   const attendanceByKey = useMemo(() => {
     const idx = new Map<string, AttendanceRecord>();
     attendance.forEach((a) => {
-      const key = `${a.studentId}|${a.sessionId}|${new Date(a.timestamp).toLocaleDateString("fr-CA")}`;
+      const key = `${a.studentId}|${a.sessionId}|${schoolDateKey(a.timestamp)}`;
       // La première présence du jour, comme le faisait `.find()`.
       if (!idx.has(key)) idx.set(key, a);
     });
@@ -357,7 +366,7 @@ export function TeachersPage() {
   const presencesByTiming = useMemo(() => {
     const idx = new Map<string, AttendanceRecord[]>();
     attendance.forEach((a) => {
-      const key = `${a.sessionId}|${new Date(a.timestamp).toLocaleDateString("fr-CA")}`;
+      const key = `${a.sessionId}|${schoolDateKey(a.timestamp)}`;
       const list = idx.get(key);
       if (list) list.push(a);
       else idx.set(key, [a]);
@@ -370,7 +379,7 @@ export function TeachersPage() {
     const keys = new Set<string>();
     unpaidTeacher.forEach((u) => {
       if (!u.paid) return;
-      keys.add(`${u.studentId}|${u.sessionId}|${new Date(u.date).toLocaleDateString("fr-CA")}`);
+      keys.add(`${u.studentId}|${u.sessionId}|${schoolDateKey(u.date)}`);
     });
     return keys;
   }, [unpaidTeacher]);
@@ -404,7 +413,7 @@ export function TeachersPage() {
     unpaidTeacher.forEach((u) => {
       if (u.paid) return;
       const att = attIdx.get(
-        `${u.studentId}|${u.sessionId}|${new Date(u.date).toLocaleDateString("fr-CA")}`,
+        `${u.studentId}|${u.sessionId}|${schoolDateKey(u.date)}`,
       );
       // « Valeur de la présence » figée : le débit de l'élève, ou — séance
       // offerte mais rémunérée — le prix mis de côté. Sert de repli quand
@@ -415,9 +424,9 @@ export function TeachersPage() {
           : att.waivedAmount ?? 0
         : u.amount;
       const fee = liveDueFee(subBySession.get(u.sessionId), stuById.get(u.studentId), frozen);
-      const pct = Math.min(Math.max(pctByTeacher.get(u.teacherId) ?? 0, 0), 100);
       feeById.set(u.id, fee);
-      shareById.set(u.id, Math.round((fee * pct) / 100));
+      // Part EXACTE (437,5 DA à 70 % de 625) : seul le versement est arrondi.
+      shareById.set(u.id, teacherShareOf([{ fee, billable: true }], pctByTeacher.get(u.teacherId) ?? 0));
     });
     return { feeById, shareById };
   }, [unpaidTeacher, attendanceByKey, subscriptions, students, teachers]);
@@ -430,6 +439,10 @@ export function TeachersPage() {
   /** Part enseignant d'une présence : recalculée au tarif courant tant qu'elle
    *  n'est pas réglée, figée sur son montant historique une fois payée. */
   const dueShare = (u: UnpaidTeacherSession) => liveDues.shareById.get(u.id) ?? u.amount;
+
+  /** Somme de parts, au centime. */
+  const sumShares = (list: UnpaidTeacherSession[]) =>
+    roundCents(list.reduce((s, u) => s + dueShare(u), 0));
 
   /**
    * Les présences d'un créneau qui ne rémunèrent PAS l'enseignant.
@@ -503,7 +516,7 @@ export function TeachersPage() {
     }> = {};
 
     rows.forEach((u) => {
-      const dateKey = new Date(u.date).toLocaleDateString("fr-CA");
+      const dateKey = schoolDateKey(u.date);
       const key = `${dateKey}_${u.sessionId}`;
       const sess = sessionById.get(u.sessionId);
       if (!map[key]) {
@@ -542,6 +555,7 @@ export function TeachersPage() {
 
     // Le reste de la salle : présent, mais rien à payer dessus.
     Object.values(map).forEach((t) => {
+      t.totalPayout = roundCents(t.totalPayout);
       const seen = new Set(t.students.map((st) => st.studentId));
       t.students.push(...unbilledPresencesOf(t.sessionId, t.dateKey, seen));
     });
@@ -675,6 +689,9 @@ export function TeachersPage() {
 
   const buildUnpaidTimings = (tid: string): UnpaidTiming[] => {
     const map = new Map<string, UnpaidTiming>();
+    /** Le taux du contrat : c'est lui que « X DA dus » annonce, avant que
+     *  l'écran de règlement ne permette d'en choisir un autre. */
+    const contractPct = teachers.find((x) => x.id === tid)?.percentage ?? 0;
 
     const timingFor = (sessionId: string, dateKey: string): UnpaidTiming => {
       const key = `${dateKey}|${sessionId}`;
@@ -717,7 +734,7 @@ export function TeachersPage() {
     // n'y figure jamais : personne n'est payé dessus.
     getPayableDues(tid)
       .forEach((u) => {
-        const dateKey = new Date(u.date).toLocaleDateString("fr-CA");
+        const dateKey = schoolDateKey(u.date);
         const t = timingFor(u.sessionId, dateKey);
         const stu = studentById.get(u.studentId);
         const att = attendanceFor(u.studentId, u.sessionId, dateKey);
@@ -734,7 +751,6 @@ export function TeachersPage() {
           billable: true,
         });
         t.totalFees += dueFee(u, att?.amountDeducted ?? 0);
-        t.totalShare += dueShare(u);
       });
 
     // ---- Les séances libres du même créneau -------------------------------
@@ -761,7 +777,7 @@ export function TeachersPage() {
     );
     const seenDues = new Set(
       getPayableDues(tid).map(
-        (u) => `${u.studentId}|${u.sessionId}|${new Date(u.date).toLocaleDateString("fr-CA")}`,
+        (u) => `${u.studentId}|${u.sessionId}|${schoolDateKey(u.date)}`,
       ),
     );
     independent
@@ -791,15 +807,16 @@ export function TeachersPage() {
 
         if (dedicated) {
           const pct = Math.min(Math.max(ind.teacherPercentage ?? 0, 0), 100);
+          const share = teacherShareOf([{ fee: ind.price, billable: true }], pct);
           t.freeSeances.push({
             id: ind.id,
             name: person,
             price: ind.price,
             percentage: pct,
-            share: Math.round((ind.price * pct) / 100),
+            share,
             time: ind.startTime ?? "-",
           });
-          t.freeShare += Math.round((ind.price * pct) / 100);
+          t.freeShare = roundCents(t.freeShare + share);
           t.freeFees += ind.price;
           if (!ind.studentId) t.passagers += 1;
           return;
@@ -812,13 +829,21 @@ export function TeachersPage() {
           time: ind.startTime ?? "-",
           status: "Présent",
           fee: ind.price,
-          share: 0,
+          share: teacherShareOf([{ fee: ind.price, billable: true }], contractPct),
           isPassager: !ind.studentId,
           billable: true,
         });
         if (!ind.studentId) t.passagers += 1;
         t.totalFees += ind.price;
       });
+
+    // Ce que le créneau-jour doit à l'enseignant, à son taux : TOUTES les
+    // présences rémunérées, passagers compris. Les passagers en étaient
+    // absents (part 0) — l'étape 1 annonçait « 95 046 DA dus » et l'étape 2
+    // en calculait 97 006 sur les mêmes séances.
+    map.forEach((t) => {
+      t.totalShare = teacherShareOf(t.students, contractPct);
+    });
 
     // Le reste de la salle : présent, mais rien à payer dessus. Ces lignes ne
     // touchent NI totalFees NI totalShare — elles ne font que rendre le créneau
@@ -838,7 +863,7 @@ export function TeachersPage() {
   const payTimings = useMemo(
     () => (selectedTeacher ? buildUnpaidTimings(selectedTeacher.id) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedTeacher, unpaidTeacher, independent, attendance, sessions, students, groups, modules, classes, freePeriods, liveDues, subscriptions],
+    [selectedTeacher, teachers, unpaidTeacher, independent, attendance, sessions, students, groups, modules, classes, freePeriods, liveDues, subscriptions],
   );
 
   /**
@@ -900,7 +925,7 @@ export function TeachersPage() {
       }
       row.timings.push(t);
       row.seances += 1;
-      row.due += t.totalShare;
+      row.due = roundCents(row.due + t.totalShare);
       row.revenue += t.totalFees;
     });
 
@@ -966,18 +991,28 @@ export function TeachersPage() {
    * Une présence NON rémunérée (séance offerte, période gratuite sans paie,
    * présence déjà réglée) est affichée mais ne pèse rien ici : l'école n'a rien
    * encaissé dessus, il n'y a donc pas de pourcentage à en tirer.
+   *
+   * Au pourcentage, la valeur est EXACTE (au centime) : « 138 425 DA × 70 % »
+   * vaut 96 897,5 DA, et c'est ce que l'écran affiche. Seul le versement est
+   * arrondi au dinar, une fois (`grossPayout`).
    */
   const computedPayout = useMemo(() => {
     if (payMethod === "fixed") return Math.max(0, Math.round(payFixedAmount || 0));
-    return chosenTimings.reduce(
-      (sum, t) => sum + teacherShareOf(t.students, payPercentage) + t.freeShare,
-      0,
+    return roundCents(
+      chosenTimings.reduce(
+        (sum, t) => sum + teacherShareOf(t.students, payPercentage) + t.freeShare,
+        0,
+      ),
     );
   }, [payMethod, payFixedAmount, payPercentage, chosenTimings]);
 
+  /** Ce qui sort de la caisse se compte en dinars entiers : le total exact est
+   *  arrondi ICI, une seule fois — jamais présence par présence. */
+  const grossPayout = Math.round(computedPayout);
+
   /** Ce que les séances libres à pourcentage dédié rapportent sur les créneaux
    *  cochés. La colonne qui les porte n'existe QUE s'il y en a. */
-  const chosenFreeShare = chosenTimings.reduce((s, t) => s + t.freeShare, 0);
+  const chosenFreeShare = roundCents(chosenTimings.reduce((s, t) => s + t.freeShare, 0));
 
   // Acomptes déjà versés et retenues d'absence encore exigibles : ce sont eux
   // que le règlement déduit. Ils ne sont PAS supprimés en payant — ils sont
@@ -989,26 +1024,40 @@ export function TeachersPage() {
   const appliedAcomptes = deductAcomptes ? totalOpenAcomptes : 0;
   const appliedAbsences = deductAbsences ? totalOpenAbsences : 0;
   /** Ce qui sort réellement de la caisse. */
-  const netPayout = Math.max(0, computedPayout - appliedAcomptes - appliedAbsences);
+  const netPayout = Math.max(0, grossPayout - appliedAcomptes - appliedAbsences);
+
+  /**
+   * Montant fixe : la somme saisie, répartie sur les séances au prorata de ce
+   * que chacune a rapporté, pour que le bon imprimé additionne EXACTEMENT la
+   * somme versée. Chaque séance arrondissait sa part de son côté : 10 000 DA
+   * sur trois séances égales en faisaient 9 999 sur le bon. Les séances libres
+   * à taux dédié gardent leur montant propre, on ne répartit que le reste.
+   */
+  const fixedShares = useMemo(() => {
+    const out = new Map<string, number>();
+    if (payMethod !== "fixed") return out;
+    const spread = roundCents(Math.max(0, computedPayout - chosenFreeShare));
+    // En dinars entiers quand le reste en est un (le cas courant), sinon au
+    // centime : la somme des parts doit retomber pile sur le versement.
+    const unit = Number.isInteger(spread) ? 1 : 100;
+    const parts = apportionByGroup(
+      chosenTimings.map((t) => ({ group: t.sessionId, weight: t.totalFees })),
+      Math.round(spread * unit),
+    );
+    chosenTimings.forEach((t, i) => out.set(t.key, parts[i] / unit));
+    return out;
+  }, [payMethod, computedPayout, chosenFreeShare, chosenTimings]);
 
   /** Part « cours » d'une séance (hors séances libres à taux dédié, qui se
    *  chiffrent toutes seules), répartie comme le total l'est. */
-  const shareForTiming = (t: UnpaidTiming) => {
-    if (payMethod === "percent") return teacherShareOf(t.students, payPercentage);
-    // Montant fixe : réparti au prorata de ce que chaque séance a rapporté,
-    // pour que le bon imprimé additionne bien la somme réellement versée. Les
-    // séances libres à taux dédié gardent leur montant propre, on ne répartit
-    // donc que le reste.
-    const spread = Math.max(0, computedPayout - chosenFreeShare);
-    if (chosenRevenue <= 0) {
-      return chosenTimings.length > 0 ? Math.round(spread / chosenTimings.length) : 0;
-    }
-    return Math.round((spread * t.totalFees) / chosenRevenue);
-  };
+  const shareForTiming = (t: UnpaidTiming) =>
+    payMethod === "percent"
+      ? teacherShareOf(t.students, payPercentage)
+      : fixedShares.get(t.key) ?? 0;
 
   /** Ce que la séance rapporte en tout : les présences + les séances libres à
    *  taux dédié. */
-  const totalForTiming = (t: UnpaidTiming) => shareForTiming(t) + t.freeShare;
+  const totalForTiming = (t: UnpaidTiming) => roundCents(shareForTiming(t) + t.freeShare);
 
   /** L'instantané figé que le règlement emporte : une ligne par séance réglée,
    *  avec le créneau dont elle vient. C'est lui que le bon de paiement imprime,
@@ -1035,6 +1084,10 @@ export function TeachersPage() {
       freeShare: t.freeShare,
       freeCount: t.freeSeances.length,
       independentIds: t.independentIds,
+      // Le tarif que chaque présent a RÉELLEMENT payé : c'est ce qui laisse la
+      // formule du bon retomber sur le montant quand un passager a payé 700 DA
+      // un cours à 625.
+      prices: priceBreakdown(t.students.filter((st) => st.billable).map((st) => st.fee)),
     }));
 
   /** Le tableau Niveau × dates de l'étape 2 — construit par le MÊME code que
@@ -1043,7 +1096,7 @@ export function TeachersPage() {
   const payMatrix = useMemo(
     () => buildPayMatrix(buildPayDetails()),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chosenTimings, payMethod, payPercentage, payFixedAmount, subscriptions, sessions],
+    [chosenTimings, payMethod, payPercentage, payFixedAmount, fixedShares, subscriptions, sessions],
   );
 
   /** Imprimer le détail AVANT de valider : l'enseignant signe ce qu'il a sous
@@ -1113,7 +1166,7 @@ export function TeachersPage() {
   const handleRemoveDues = async () => {
     if (!selectedTeacher || selectedDueIds.length === 0) return;
     const rows = buildDueRows(selectedTeacher.id).filter((r) => selectedDueIds.includes(r.id));
-    const total = rows.reduce((sum, r) => sum + r.amount, 0);
+    const total = formatAmount(rows.reduce((sum, r) => sum + r.amount, 0));
     if (
       !confirm(
         `Retirer ${rows.length} séance(s) due(s) — ${total} DA — de ce qui reste à payer à ` +
@@ -1408,14 +1461,21 @@ export function TeachersPage() {
   const cardStats = useMemo(
     () =>
       new Map(
-        teachers.map((t) => [
-          t.id,
-          {
-            unpaidSess: getPayableDues(t.id),
-            unpaidMonths: getUnpaidMonthsList(t),
-            unpaidTimingsCount: buildUnpaidTimings(t.id).length,
-          },
-        ]),
+        teachers.map((t) => {
+          const timings = buildUnpaidTimings(t.id);
+          return [
+            t.id,
+            {
+              unpaidSess: getPayableDues(t.id),
+              unpaidMonths: getUnpaidMonthsList(t),
+              unpaidTimingsCount: timings.length,
+              // Le MÊME total que l'écran de règlement (étapes 1 et 2) : passagers
+              // compris, au centime. La carte additionnait les seules présences
+              // badgées, arrondies une par une.
+              dueAmount: roundCents(timings.reduce((s, x) => s + x.totalShare + x.freeShare, 0)),
+            },
+          ];
+        }),
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [teachers, unpaidTeacher, independent, attendanceByKey, sessions, students, groups, modules, classes, freePeriods, liveDues, subscriptions, cash],
@@ -1665,7 +1725,7 @@ export function TeachersPage() {
     const allShownSelected =
       shownIds.length > 0 && shownIds.every((id) => selectedDueIds.includes(id));
     const selectedRows = rows.filter((r) => selectedDueIds.includes(r.id));
-    const selectedTotal = selectedRows.reduce((sum, r) => sum + r.amount, 0);
+    const selectedTotal = roundCents(selectedRows.reduce((sum, r) => sum + r.amount, 0));
 
     const toggle = (id: string) =>
       setSelectedDueIds(
@@ -1686,7 +1746,7 @@ export function TeachersPage() {
             <span className="block text-[10px] font-semibold uppercase text-muted">Réellement dues</span>
             <strong className="font-mono text-lg text-warning">{payable.length}</strong>
             <span className="block text-[10px] text-muted">
-              {payable.reduce((sum, r) => sum + r.amount, 0)} DA
+              {formatAmount(payable.reduce((sum, r) => sum + r.amount, 0))} DA
             </span>
           </div>
           <div className="rounded-2xl border border-success/30 bg-success/5 p-3">
@@ -1697,7 +1757,7 @@ export function TeachersPage() {
           <div className="rounded-2xl border border-primary/30 bg-primary-50/40 p-3">
             <span className="block text-[10px] font-semibold uppercase text-muted">Sélection</span>
             <strong className="font-mono text-lg text-primary">{selectedRows.length}</strong>
-            <span className="block text-[10px] text-muted">{selectedTotal} DA</span>
+            <span className="block text-[10px] text-muted">{formatAmount(selectedTotal)} DA</span>
           </div>
         </div>
 
@@ -1823,7 +1883,7 @@ export function TeachersPage() {
                             <span className="block text-[9px] text-success">offert : {r.waived} DA</span>
                           )}
                         </td>
-                        <td className="p-3 text-right font-mono font-bold text-primary">{r.amount} DA</td>
+                        <td className="p-3 text-right font-mono font-bold text-primary">{formatAmount(r.amount)} DA</td>
                         <td className="p-3 text-right">
                           {r.offeredReason ? (
                             <Badge tone="success" className="text-[9px]" title={r.offeredReason}>
@@ -2031,6 +2091,7 @@ export function TeachersPage() {
           const unpaidSess = stats?.unpaidSess ?? getPayableDues(t.id);
           const unpaidMonths = stats?.unpaidMonths ?? getUnpaidMonthsList(t);
           const unpaidTimingsCount = stats?.unpaidTimingsCount ?? buildUnpaidTimings(t.id).length;
+          const dueAmount = stats?.dueAmount ?? sumShares(unpaidSess);
 
           return (
             <Card
@@ -2211,7 +2272,7 @@ export function TeachersPage() {
                       ? `${unpaidSess.length} présence(s)`
                       : t.paymentType === "monthly"
                         ? `${unpaidMonths.length * (t.monthlyAmount ?? 0)} DA`
-                        : `${unpaidSess.reduce((sum, s) => sum + dueShare(s), 0)} DA`}
+                        : `${formatAmount(dueAmount)} DA`}
                   </Badge>
                 </div>
               </CardBody>
@@ -2427,7 +2488,7 @@ export function TeachersPage() {
               });
               attendance.forEach((a) => {
                 if (!myTimingIds.has(a.sessionId)) return;
-                const dateKey = new Date(a.timestamp).toLocaleDateString("fr-CA");
+                const dateKey = schoolDateKey(a.timestamp);
                 const key = `${dateKey}|${a.sessionId}`;
                 const row = heldTimings.get(key) ?? emptyRow(dateKey, a.sessionId);
                 row.presents += 1;
@@ -2447,7 +2508,7 @@ export function TeachersPage() {
                 heldTimings.set(key, row);
               });
               myDues.forEach((u) => {
-                const dateKey = new Date(u.date).toLocaleDateString("fr-CA");
+                const dateKey = schoolDateKey(u.date);
                 const row = heldTimings.get(`${dateKey}|${u.sessionId}`);
                 if (row && !u.paid) row.paid = false;
               });
@@ -2805,7 +2866,11 @@ export function TeachersPage() {
                     <div className="bg-canvas border border-line p-3 rounded-xl text-center">
                       <span className="text-muted text-[10px] uppercase block font-semibold">Séances dues</span>
                       <strong className="text-primary text-base font-mono">
-                        {getPayableDues(selectedTeacher.id).reduce((s, u) => s + dueShare(u), 0)} DA
+                        {formatAmount(
+                          cardStats.get(selectedTeacher.id)?.dueAmount ??
+                            sumShares(getPayableDues(selectedTeacher.id)),
+                        )}{" "}
+                        DA
                       </strong>
                       <span className="text-[9px] text-muted block">
                         {getPayableDues(selectedTeacher.id).length} présence(s)
@@ -2891,7 +2956,7 @@ export function TeachersPage() {
                         <span className="text-muted text-[10px] uppercase block font-semibold">En attente</span>
                         <strong className="text-warning text-base font-mono">{unpaidSessions.length}</strong>
                       </div>
-                      <Badge tone="warning">Dues ({unpaidSessions.reduce((s, a) => s + dueShare(a), 0)} DA)</Badge>
+                      <Badge tone="warning">Dues ({formatAmount(sumShares(unpaidSessions))} DA)</Badge>
                     </div>
                   </div>
 
@@ -2947,7 +3012,7 @@ export function TeachersPage() {
                                     <span className="font-bold text-ink block">{moduleName}</span>
                                     <span className="text-[10px] text-muted">{groupName}</span>
                                   </td>
-                                  <td className="p-3 font-bold text-primary font-mono">{dueShare(u)} DA</td>
+                                  <td className="p-3 font-bold text-primary font-mono">{formatAmount(dueShare(u))} DA</td>
                                   <td className="p-3 text-right">
                                     <Badge tone={u.paid ? "success" : "warning"} className="font-bold">
                                       {u.paid ? "Payée" : "En attente"}
@@ -3057,7 +3122,7 @@ export function TeachersPage() {
                     <div className="flex justify-between">
                       <span>Rémunération séances brute:</span>
                       <strong className="text-primary">
-                        {getPayableDues(selectedTeacher.id).reduce((sum, s) => sum + dueShare(s), 0)} DA
+                        {formatAmount(sumShares(getPayableDues(selectedTeacher.id)))} DA
                       </strong>
                     </div>
                     <div className="flex justify-between text-danger">
@@ -3075,9 +3140,11 @@ export function TeachersPage() {
                     <div className="flex justify-between border-t border-line pt-2 font-bold text-sm text-success">
                       <span>Net à Payer:</span>
                       <span>
-                        {getPayableDues(selectedTeacher.id).reduce((sum, s) => sum + dueShare(s), 0) -
-                          getTeacherAcomptes(selectedTeacher.id).reduce((sum, a) => sum + a.amount, 0) -
-                          getTeacherAbsences(selectedTeacher.id).reduce((sum, ab) => sum + ab.cost, 0)}{" "}
+                        {formatAmount(
+                          sumShares(getPayableDues(selectedTeacher.id)) -
+                            getTeacherAcomptes(selectedTeacher.id).reduce((sum, a) => sum + a.amount, 0) -
+                            getTeacherAbsences(selectedTeacher.id).reduce((sum, ab) => sum + ab.cost, 0),
+                        )}{" "}
                         DA
                       </span>
                     </div>
@@ -3132,7 +3199,7 @@ export function TeachersPage() {
       >
         {selectedTeacher && (() => {
           const detail = buildUnpaidDetail(selectedTeacher.id);
-          const totalShare = detail.reduce((s, d) => s + d.totalPayout, 0);
+          const totalShare = roundCents(detail.reduce((s, d) => s + d.totalPayout, 0));
           const totalFees = detail.reduce((s, d) => s + d.totalFees, 0);
           const totalPresences = detail.reduce((s, d) => s + d.students.length, 0);
           const totalBillable = detail.reduce(
@@ -3161,7 +3228,7 @@ export function TeachersPage() {
                 </div>
                 <div className="bg-canvas border border-line p-3 rounded-xl text-center">
                   <span className="text-muted text-[10px] uppercase block font-semibold">Part enseignant</span>
-                  <strong className="text-primary text-base font-mono">{totalShare} DA</strong>
+                  <strong className="text-primary text-base font-mono">{formatAmount(totalShare)} DA</strong>
                 </div>
               </div>
 
@@ -3183,7 +3250,7 @@ export function TeachersPage() {
                             <span className="font-mono">{d.startTime} - {d.endTime}</span>
                           </span>
                         </div>
-                        <Badge tone="primary" className="font-mono font-bold">+{d.totalPayout} DA</Badge>
+                        <Badge tone="primary" className="font-mono font-bold">+{formatAmount(d.totalPayout)} DA</Badge>
                       </div>
                       <table className="w-full text-xs">
                         <thead>
@@ -3223,7 +3290,7 @@ export function TeachersPage() {
                                   st.billable ? "text-primary" : "text-muted"
                                 }`}
                               >
-                                {st.share} DA
+                                {formatAmount(st.share)} DA
                               </td>
                             </tr>
                           ))}
@@ -3240,7 +3307,7 @@ export function TeachersPage() {
                     Part enseignant brute ({detail.length} séance(s), {totalBillable} présence(s)
                     rémunérée(s){totalPresences > totalBillable ? ` sur ${totalPresences}` : ""}) :
                   </span>
-                  <strong className="text-primary">{totalShare} DA</strong>
+                  <strong className="text-primary">{formatAmount(totalShare)} DA</strong>
                 </div>
                 <div className="flex justify-between text-danger">
                   <span>Acomptes à déduire :</span>
@@ -3252,14 +3319,14 @@ export function TeachersPage() {
                 </div>
                 <div className="flex justify-between border-t border-line pt-1.5 font-bold text-sm text-success">
                   <span>NET À PAYER :</span>
-                  <span>{net} DA</span>
+                  <span>{formatAmount(net)} DA</span>
                 </div>
               </div>
 
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setIsUnpaidDetailOpen(false)}>Fermer</Button>
                 <Button onClick={() => handlePaymentSubmit()} disabled={net <= 0}>
-                  Payer {net} DA maintenant
+                  Payer {formatAmount(net)} DA maintenant
                 </Button>
               </div>
             </div>
@@ -3324,7 +3391,7 @@ export function TeachersPage() {
         size="full"
       >
         {selectedTeacher && (() => {
-          const totalDue = payTimings.reduce((s, t) => s + t.totalShare + t.freeShare, 0);
+          const totalDue = roundCents(payTimings.reduce((s, t) => s + t.totalShare + t.freeShare, 0));
           /** Toutes les séances libres à pourcentage dédié encore dues. */
           const allFreeSeances = payTimings.flatMap((t) => t.freeSeances);
 
@@ -3372,7 +3439,7 @@ export function TeachersPage() {
                     </span>
                   ))}
                   <Badge tone="primary" className="font-mono font-bold">
-                    {totalDue} DA dus
+                    {formatAmount(totalDue)} DA dus
                   </Badge>
                 </div>
               </div>
@@ -3412,7 +3479,7 @@ export function TeachersPage() {
                     {payCreneaux.map((c) => {
                       const checked = paySessionIds.includes(c.sessionId);
                       const freeOnCreneau = c.timings.reduce((s, t) => s + t.freeSeances.length, 0);
-                      const freeShareOnCreneau = c.timings.reduce((s, t) => s + t.freeShare, 0);
+                      const freeShareOnCreneau = roundCents(c.timings.reduce((s, t) => s + t.freeShare, 0));
                       const dates = [...new Set(c.timings.map((t) => t.dateKey))].sort();
                       const presents = c.timings.reduce(
                         (s, t) => s + t.students.filter((st) => st.billable).length,
@@ -3477,7 +3544,7 @@ export function TeachersPage() {
                               </Badge>
                             )}
                             <Badge tone="success" className="font-mono text-[9px] font-bold">
-                              {c.due + freeShareOnCreneau} DA dus
+                              {formatAmount(c.due + freeShareOnCreneau)} DA dus
                             </Badge>
                           </span>
 
@@ -3600,10 +3667,10 @@ export function TeachersPage() {
                                   <span className="block text-[10px] text-muted">
                                     Gr: {r.groupName} · {r.seances} séance(s)
                                   </span>
-                                  {r.unitPrice > 0 && r.percentage > 0 && r.totalStudents > 0 && (
+                                  {r.percentage > 0 && r.totalStudents > 0 && rowFormulaTerms(r) && (
                                     <span className="mt-0.5 block font-mono text-[9px] text-muted">
-                                      {r.unitPrice} × {r.percentage}% × {r.totalStudents} ={" "}
-                                      <strong className="text-primary">{r.totalShare} DA</strong>
+                                      {rowFormulaTerms(r)} × {r.percentage} % ={" "}
+                                      <strong className="text-primary">{formatAmount(r.totalShare)} DA</strong>
                                     </span>
                                   )}
                                 </td>
@@ -3642,7 +3709,7 @@ export function TeachersPage() {
                                   <td className="p-2 text-end font-mono">
                                     {r.freeCount > 0 ? (
                                       <>
-                                        <strong className="text-warning">{r.freeShare} DA</strong>
+                                        <strong className="text-warning">{formatAmount(r.freeShare)} DA</strong>
                                         <span className="block text-[9px] text-muted">
                                           {r.freeCount} séance(s)
                                         </span>
@@ -3653,7 +3720,7 @@ export function TeachersPage() {
                                   </td>
                                 )}
                                 <td className="bg-success/5 p-2 text-end font-mono text-sm font-black text-success">
-                                  {r.amount} DA
+                                  {formatAmount(r.amount)} DA
                                 </td>
                               </tr>
                             ))}
@@ -3679,11 +3746,11 @@ export function TeachersPage() {
                                 </td>
                                 {payMatrix.hasFreeColumn && (
                                   <td className="p-2 text-end font-mono text-warning">
-                                    {payMatrix.freeShare} DA
+                                    {formatAmount(payMatrix.freeShare)} DA
                                   </td>
                                 )}
                                 <td className="bg-success/10 p-2 text-end font-mono text-base font-black text-success">
-                                  {payMatrix.amount} DA
+                                  {formatAmount(payMatrix.amount)} DA
                                 </td>
                               </tr>
                             </tfoot>
@@ -3700,6 +3767,14 @@ export function TeachersPage() {
                           </strong>
                           . Une case vide signifie qu&apos;aucune séance de ce cours n&apos;a eu
                           lieu ce jour-là.
+                        </p>
+                      )}
+                      {payMethod === "percent" && grossPayout !== computedPayout && (
+                        <p className="mt-1 text-[10px] leading-relaxed text-muted">
+                          Les montants du tableau sont exacts, au centime. Seul le versement
+                          est arrondi au dinar, une fois :{" "}
+                          <strong className="text-ink">{formatAmount(computedPayout)} DA</strong> →{" "}
+                          <strong className="text-ink">{grossPayout} DA</strong>.
                         </p>
                       )}
                       {payMatrix.hasFreeColumn && (
@@ -3795,11 +3870,11 @@ export function TeachersPage() {
                                     )}
                                     {t.freeSeances.length > 0 && (
                                       <Badge tone="neutral" className="font-mono text-[10px] font-bold">
-                                        🎯 {t.freeSeances.length} · {t.freeShare} DA
+                                        🎯 {t.freeSeances.length} · {formatAmount(t.freeShare)} DA
                                       </Badge>
                                     )}
                                     <Badge tone="success" className="font-mono text-[10px] font-bold">
-                                      → {totalForTiming(t)} DA
+                                      → {formatAmount(totalForTiming(t))} DA
                                     </Badge>
                                     <Button
                                       size="sm"
@@ -3889,7 +3964,7 @@ export function TeachersPage() {
                                               {!st.billable
                                                 ? "0 DA"
                                                 : payMethod === "percent"
-                                                  ? `${Math.round((st.fee * payPercentage) / 100)} DA`
+                                                  ? `${formatAmount(teacherShareOf([st], payPercentage))} DA`
                                                   : "—"}
                                             </td>
                                           </tr>
@@ -3918,7 +3993,7 @@ export function TeachersPage() {
                                               {f.price} DA
                                             </td>
                                             <td className="py-1.5 text-right font-mono font-bold text-primary">
-                                              {f.share} DA
+                                              {formatAmount(f.share)} DA
                                               <span className="block text-[9px] font-normal text-muted">
                                                 {f.percentage} %
                                               </span>
@@ -4058,7 +4133,7 @@ export function TeachersPage() {
                           {chosenFreeShare > 0 && (
                             <p className="mt-1.5 text-[10px] text-muted">
                               Dont{" "}
-                              <strong className="text-warning">{chosenFreeShare} DA</strong> de
+                              <strong className="text-warning">{formatAmount(chosenFreeShare)} DA</strong> de
                               séances libres à pourcentage dédié, gardées à leur montant propre.
                             </p>
                           )}
@@ -4078,14 +4153,21 @@ export function TeachersPage() {
                           <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
                             {chosenRevenue} DA encaissés × {payPercentage} % ={" "}
                             <strong className="text-primary">
-                              {computedPayout - chosenFreeShare} DA
+                              {formatAmount(computedPayout - chosenFreeShare)} DA
                             </strong>
                             {chosenFreeShare > 0 && (
                               <>
                                 {" "}
-                                + <strong className="text-warning">{chosenFreeShare} DA</strong> de
+                                + <strong className="text-warning">{formatAmount(chosenFreeShare)} DA</strong> de
                                 séances libres à taux dédié ={" "}
-                                <strong className="text-primary">{computedPayout} DA</strong>
+                                <strong className="text-primary">{formatAmount(computedPayout)} DA</strong>
+                              </>
+                            )}
+                            {grossPayout !== computedPayout && (
+                              <>
+                                {" "}
+                                — arrondi au dinar :{" "}
+                                <strong className="text-primary">{grossPayout} DA</strong>
                               </>
                             )}
                           </p>
@@ -4148,8 +4230,14 @@ export function TeachersPage() {
                     <div className="space-y-1.5 rounded-2xl border-2 border-success/40 bg-success/5 p-4 text-xs">
                       <div className="flex justify-between">
                         <span className="text-muted">Part enseignant brute</span>
-                        <strong className="font-mono text-ink">{computedPayout} DA</strong>
+                        <strong className="font-mono text-ink">{formatAmount(computedPayout)} DA</strong>
                       </div>
+                      {grossPayout !== computedPayout && (
+                        <div className="flex justify-between text-muted">
+                          <span>Arrondi au dinar</span>
+                          <strong className="font-mono">{grossPayout} DA</strong>
+                        </div>
+                      )}
                       {appliedAcomptes > 0 && (
                         <div className="flex justify-between text-danger">
                           <span>Acomptes</span>

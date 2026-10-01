@@ -171,6 +171,18 @@ export interface TeacherPaymentDetail {
   /** Les séances libres (independent_sessions.id) que ce règlement solde sur
    *  cette ligne : c'est par elles que l'annulation les rend à nouveau dues. */
   independentIds?: string[];
+  /** Les présences rémunérées, regroupées par tarif réellement payé — un
+   *  passager à 700 DA sur un cours à 625 DA, un élève remisé. Sans elles la
+   *  formule « tarif × % × élèves » du tableau supposait que tout le monde
+   *  avait payé le tarif du cours, et ne retombait plus sur le montant.
+   *  Absent des règlements écrits avant. */
+  prices?: PriceCount[];
+}
+
+/** « 179 présences à 625 DA ». */
+export interface PriceCount {
+  price: number;
+  count: number;
 }
 
 export type ReceptionPaymentType = "daily" | "monthly" | "half_day" | "hourly";

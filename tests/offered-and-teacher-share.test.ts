@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { freePeriodCovering, liveDueFee, teacherShareOf } from "@/lib/helpers";
+import { freePeriodCovering, liveDueFee, schoolDateKey, teacherShareOf } from "@/lib/helpers";
 import type { Student, Subscription } from "@/lib/types";
 
 /** Une période gratuite réduite à ce que la règle regarde. */
@@ -74,8 +74,9 @@ describe("teacherShareOf — le pourcentage ne porte que sur ce qui a été enca
     ).toBe(300);
   });
 
-  it("arrondit chaque présence, comme le scan", () => {
-    // 3 × round(325 × 0,5) = 3 × 163 = 489, et non round(975 × 0,5) = 488.
+  it("n'arrondit PAS présence par présence : la part reste exacte, au centime", () => {
+    // 975 × 50 % = 487,5 — et non 3 × round(162,5) = 489, qui gonflait la paie
+    // d'un demi-dinar par élève.
     expect(
       teacherShareOf(
         [
@@ -85,7 +86,26 @@ describe("teacherShareOf — le pourcentage ne porte que sur ce qui a été enca
         ],
         50,
       ),
-    ).toBe(489);
+    ).toBe(487.5);
+  });
+
+  it("retombe sur « encaissé × % » du cas Amine Mohamed (70 %, 625 DA, 4 passagers à 700)", () => {
+    // Sauvegarde du 01/10/2026 : 217 présences badgées à 625 DA et 4 passagers
+    // à 700 DA. 138 425 DA × 70 % = 96 897,5 DA. L'écran en annonçait 97 006
+    // (438 DA par élève au lieu de 437,5).
+    const rows = [
+      ...Array.from({ length: 217 }, () => ({ fee: 625, billable: true })),
+      ...Array.from({ length: 4 }, () => ({ fee: 700, billable: true })),
+    ];
+    expect(teacherShareOf(rows, 70)).toBe(96_897.5);
+    expect(Math.round(teacherShareOf(rows, 70))).toBe(96_898);
+  });
+
+  it("garde le centime juste sur de longues sommes (pas de 0,000001 qui traîne)", () => {
+    const rows = Array.from({ length: 1000 }, () => ({ fee: 450, billable: true }));
+    // 450 × 65 % = 292,5 ; × 1000 = 292 500 tout rond.
+    expect(teacherShareOf(rows, 65)).toBe(292_500);
+    expect(teacherShareOf([{ fee: 625, billable: true }], 65)).toBe(406.25);
   });
 
   it("borne le pourcentage entre 0 et 100", () => {
@@ -152,7 +172,25 @@ describe("liveDueFee — une séance non réglée suit le tarif ACTUEL, pas celu
       fee: liveDueFee(sub(200), student(), 100),
       billable: true,
     }));
-    // 3 × round(200 × 0,5) = 300, et non 3 × round(100 × 0,5) = 150.
+    // 3 × 200 × 0,5 = 300, et non 3 × 100 × 0,5 = 150.
     expect(teacherShareOf(rows, 50)).toBe(300);
+  });
+});
+
+describe("schoolDateKey — le jour d'une séance se lit à l'heure de l'école", () => {
+  it("date un cours du vendredi 14 h 30 (Alger) au vendredi, quel que soit le poste", () => {
+    // 13:45 UTC = 14:45 à Alger, mais déjà samedi 02:45 sur un poste en UTC+13.
+    // Le RPC de règlement compare en heure d'Alger : la clé doit dire vendredi.
+    expect(schoolDateKey("2026-09-18T13:45:28.824868+00:00")).toBe("2026-09-18");
+  });
+
+  it("bascule à minuit d'Alger, pas à minuit UTC", () => {
+    // 23:30 UTC = 00:30 le lendemain à Alger (UTC+1).
+    expect(schoolDateKey("2026-09-18T23:30:00Z")).toBe("2026-09-19");
+    expect(schoolDateKey("2026-09-18T22:59:00Z")).toBe("2026-09-18");
+  });
+
+  it("rend une chaîne vide plutôt que « Invalid Date »", () => {
+    expect(schoolDateKey("pas une date")).toBe("");
   });
 });
