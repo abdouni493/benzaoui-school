@@ -60,7 +60,6 @@ import {
 } from "@/lib/teacherPayMatrix";
 import {
   DAY_LABELS_FR,
-  FREE_REASON_LABELS,
   formatDateFr,
   formatDays,
   freeReasonOf,
@@ -348,10 +347,15 @@ export function TeachersPage() {
    * La base n'écrit plus de ligne de rémunération dans ces cas (migration
    * 20260902) ; ce filtre neutralise en plus celles déjà écrites, pour qu'une
    * base pas encore migrée n'affiche jamais ces séances comme « à payer ».
+   *
+   * L'ÉLÈVE GRATUIT en est une troisième : le badge ne lui débite rien et la
+   * base ne lui écrit qu'une part de 0 DA. Il n'a rien à faire sur l'écran de
+   * règlement — il n'y apparaît plus.
    */
   const offeredReasonFor = (u: UnpaidTeacherSession): string | null => {
     const sess = sessionById.get(u.sessionId);
     if (sess?.isFree) return "Créneau offert";
+    if (studentById.get(u.studentId)?.isFree) return "Élève gratuit";
     const att = attendanceFor(u.studentId, u.sessionId, dateKeyOf(u.date));
     if (att?.freePeriodId) {
       const period = freePeriodById.get(att.freePeriodId);
@@ -418,7 +422,6 @@ export function TeachersPage() {
     const pctByTeacher = new Map(teachers.map((t) => [t.id, t.percentage ?? 0]));
     const feeById = new Map<string, number>();
     const shareById = new Map<string, number>();
-    const freeStudentIds = new Set<string>();
     unpaidTeacher.forEach((u) => {
       if (u.paid) return;
       const dateKey = schoolDateKey(u.date);
@@ -440,7 +443,6 @@ export function TeachersPage() {
         // Le badge ne débite rien à un élève gratuit, et la base n'écrit pour
         // lui qu'une part de 0 DA : l'écran ne doit pas en inventer une.
         fee = 0;
-        freeStudentIds.add(u.id);
       } else {
         fee = seancePriceFor(stu, sess, subscriptions, sessions, dateKey);
       }
@@ -448,7 +450,7 @@ export function TeachersPage() {
       // Part EXACTE (437,5 DA à 70 % de 625) : seul le versement est arrondi.
       shareById.set(u.id, teacherShareOf([{ fee, billable: true }], pctByTeacher.get(u.teacherId) ?? 0));
     });
-    return { feeById, shareById, freeStudentIds };
+    return { feeById, shareById };
   }, [unpaidTeacher, attendanceByKey, subscriptions, sessions, students, teachers]);
 
   /** Tarif élève d'une présence encore due, au prix courant (montant figé en
@@ -474,6 +476,11 @@ export function TeachersPage() {
    * affichait « 3 présents » quand la salle en avait vu 11. On les liste
    * maintenant, avec la raison, à 0 DA de part enseignant.
    *
+   * SAUF les cas GRATUITS — élève gratuit, créneau offert, période gratuite,
+   * tarif à 0 : l'écran de règlement ne montre que ce qui se paie, et ces
+   * élèves n'y ont pas leur place. Restent visibles les présences payées par
+   * l'élève mais pas (ou plus) dues à l'enseignant : déjà réglée, retirée.
+   *
    * `seen` contient les élèves déjà posés par les séances dues, pour ne jamais
    * afficher deux fois la même présence.
    */
@@ -487,13 +494,14 @@ export function TeachersPage() {
 
     return (presencesByTiming.get(`${sessionId}|${dateKey}`) ?? [])
       .filter((a) => !seen.has(a.studentId))
+      .filter((a) => {
+        const stu = studentById.get(a.studentId);
+        if (stu?.isFree || sess?.isFree) return false;
+        return freeReasonOf(a, { studentIsFree: stu?.isFree, sessionIsFree: !!sess?.isFree }) === null;
+      })
       .map((a) => {
         const stu = studentById.get(a.studentId);
         const settled = settledDueKeys.has(`${a.studentId}|${sessionId}|${dateKey}`);
-        const reason = freeReasonOf(a, {
-          studentIsFree: stu?.isFree,
-          sessionIsFree: !!sess?.isFree,
-        });
         return {
           studentId: a.studentId,
           name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
@@ -504,11 +512,7 @@ export function TeachersPage() {
           share: 0,
           isPassager: false,
           billable: false,
-          note: settled
-            ? "déjà réglée"
-            : reason
-              ? FREE_REASON_LABELS[reason]
-              : "non rémunérée",
+          note: settled ? "déjà réglée" : "non rémunérée",
         };
       });
   };
@@ -760,9 +764,6 @@ export function TeachersPage() {
         const stu = studentById.get(u.studentId);
         const att = attendanceFor(u.studentId, u.sessionId, dateKey);
         const sess = sessionById.get(u.sessionId);
-        // Élève gratuit : présent, affiché, mais il ne rapporte rien — ni à
-        // l'école, ni donc à l'enseignant (la base lui écrit une part de 0).
-        const freeStudent = liveDues.freeStudentIds.has(u.id);
         t.students.push({
           studentId: u.studentId,
           name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
@@ -772,10 +773,9 @@ export function TeachersPage() {
           fee: dueFee(u, att?.amountDeducted ?? 0),
           share: dueShare(u),
           isPassager: false,
-          billable: !freeStudent,
-          note: freeStudent ? FREE_REASON_LABELS.freeStudent : undefined,
+          billable: true,
         });
-        if (!freeStudent) t.totalFees += dueFee(u, att?.amountDeducted ?? 0);
+        t.totalFees += dueFee(u, att?.amountDeducted ?? 0);
       });
 
     // ---- Les séances libres du même créneau -------------------------------
@@ -3330,7 +3330,7 @@ export function TeachersPage() {
                                 {st.name}
                                 {!st.billable && (
                                   <span className="ml-1.5 text-[9px] font-normal text-warning">
-                                    🎁 {st.note}
+                                    — {st.note}
                                   </span>
                                 )}
                               </td>
@@ -3921,7 +3921,7 @@ export function TeachersPage() {
                                     </Badge>
                                     {t.students.some((st) => !st.billable) && (
                                       <Badge tone="warning" className="font-mono text-[10px] font-bold">
-                                        🎁 {t.students.filter((st) => !st.billable).length} offerte(s)
+                                        {t.students.filter((st) => !st.billable).length} non rémunérée(s)
                                       </Badge>
                                     )}
                                     {t.freeSeances.length > 0 && (
@@ -3997,7 +3997,7 @@ export function TeachersPage() {
                                               )}
                                               {!st.billable && (
                                                 <span className="ml-1.5 text-[9px] font-normal text-warning">
-                                                  🎁 {st.note}
+                                                  — {st.note}
                                                 </span>
                                               )}
                                             </td>
