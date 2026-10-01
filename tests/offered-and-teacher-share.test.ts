@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 
-import { freePeriodCovering, liveDueFee, schoolDateKey, teacherShareOf } from "@/lib/helpers";
+import {
+  freePeriodCovering,
+  liveDueFee,
+  schoolDateKey,
+  seancePriceFor,
+  seanceValueOf,
+  teacherShareOf,
+} from "@/lib/helpers";
 import type { Student, Subscription } from "@/lib/types";
 
 /** Une période gratuite réduite à ce que la règle regarde. */
@@ -192,5 +199,66 @@ describe("schoolDateKey — le jour d'une séance se lit à l'heure de l'école"
 
   it("rend une chaîne vide plutôt que « Invalid Date »", () => {
     expect(schoolDateKey("pas une date")).toBe("");
+  });
+});
+
+describe("séances libres — même méthode et mêmes valeurs qu'une séance normale", () => {
+  // Un cours de maths 3AS Sciences (groupe A) à 625 DA, la séance libre du
+  // même module et de la même classe à 500 DA.
+  const sessions = [
+    { id: "cours", moduleId: "math", classId: "3as", openPrice: 0 },
+    { id: "libre", moduleId: "math", classId: "3as", openPrice: 500 },
+    { id: "physique", moduleId: "phys", classId: "3as", openPrice: 0 },
+  ];
+  const subscriptions = [
+    { id: "sub-cours", sessionId: "cours", pricePerSession: 625 },
+    { id: "sub-libre", sessionId: "libre", pricePerSession: 500 },
+    { id: "sub-phys", sessionId: "physique", pricePerSession: 450 },
+  ];
+  const student = (o: Partial<Student> = {}) => ({
+    subscriptionIds: ["sub-cours"],
+    subscriptionDates: {},
+    subscriptionDiscounts: {},
+    ...o,
+  });
+
+  it("l'élève inscrit au cours paie — et rapporte — le prix de SON cours sur une séance libre", () => {
+    // Comme le badge (`student_session_price`) : son inscription au même
+    // module, même classe — pas le tarif de la séance libre.
+    expect(seancePriceFor(student(), sessions[1], subscriptions, sessions, "2026-09-20")).toBe(625);
+  });
+
+  it("garde sa remise", () => {
+    const s = student({ subscriptionDiscounts: { "sub-cours": { type: "percent", value: 20 } } });
+    expect(seancePriceFor(s, sessions[1], subscriptions, sessions, "2026-09-20")).toBe(500);
+  });
+
+  it("ignore une inscription expirée et retombe sur le tarif du créneau", () => {
+    const s = student({ subscriptionDates: { "sub-cours": { expiryDate: "2026-09-01" } } });
+    expect(seancePriceFor(s, sessions[1], subscriptions, sessions, "2026-09-20")).toBe(500);
+  });
+
+  it("un autre module ne compte pas : tarif du créneau", () => {
+    const s = student({ subscriptionIds: ["sub-phys"] });
+    expect(seancePriceFor(s, sessions[1], subscriptions, sessions, "2026-09-20")).toBe(500);
+  });
+
+  it("un passager vaut le tarif d'une séance normale du cours, pas ce qu'il a payé", () => {
+    // Le cas Amine Mohamed : passager à 700 DA sur un cours à 625.
+    const normal = seancePriceFor(undefined, sessions[0], subscriptions, sessions, "2026-09-25");
+    expect(normal).toBe(625);
+    expect(seanceValueOf(normal, 700)).toBe(625);
+    // 179 élèves badgés + 4 passagers = 183 présences × 625 × 70 %.
+    const rows = [
+      ...Array.from({ length: 179 }, () => ({ fee: 625, billable: true })),
+      ...Array.from({ length: 4 }, () => ({ fee: 700, base: seanceValueOf(normal, 700), billable: true })),
+    ];
+    expect(teacherShareOf(rows, 70)).toBe(80_062.5);
+  });
+
+  it("sans aucun tarif connu, retombe sur ce qui a été payé", () => {
+    const bare = { id: "x", moduleId: "m", classId: "c", openPrice: 0 };
+    expect(seancePriceFor(undefined, bare, [], [bare], "2026-09-25")).toBe(0);
+    expect(seanceValueOf(0, 700)).toBe(700);
   });
 });

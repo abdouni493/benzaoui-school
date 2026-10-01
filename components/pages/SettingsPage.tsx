@@ -91,6 +91,14 @@ export function SettingsPage() {
   const [absencePenaltySince, setAbsencePenaltySince] = useState<string>(school?.absencePenaltySince || "");
   const [absenceWeekStartDay, setAbsenceWeekStartDay] = useState<number>(school?.absenceWeekStartDay ?? 5);
 
+  /** Le frais d'inscription a-t-il été retouché SUR CET ÉCRAN ? Sinon il n'est
+   *  pas renvoyé : « Enregistrer » sur la fiche de l'école réécrivait le tarif
+   *  lu à l'ouverture de la page et effaçait celui posé depuis dans
+   *  « Abonnements » — le prix revenait à l'ancien. */
+  const [registrationFeeDirty, setRegistrationFeeDirty] = useState(false);
+  /** Le champ suit le tarif EN VIGUEUR tant qu'on ne le touche pas. */
+  const shownRegistrationFee = registrationFeeDirty ? registrationFee : school?.registrationFee || 0;
+
   // `school` loads asynchronously (fetched from Supabase after mount), so
   // the useState initializers above only capture whatever was there at the
   // first render — usually still empty. Re-sync once the real row arrives.
@@ -106,7 +114,6 @@ export function SettingsPage() {
     setRegistreCommerce(school.registreCommerce || "");
     setNif(school.nif || "");
     setNis(school.nis || "");
-    setRegistrationFee(school.registrationFee || 0);
     setAbsencePenaltyEnabled(school.absencePenaltyEnabled ?? true);
     setAbsencePenaltySince(school.absencePenaltySince || "");
     setAbsenceWeekStartDay(school.absenceWeekStartDay ?? 5);
@@ -138,12 +145,12 @@ export function SettingsPage() {
   const [restoreJsonText, setRestoreJsonText] = useState("");
   const [restoreError, setRestoreError] = useState("");
 
-  const handleSaveSchool = () => {
+  const handleSaveSchool = async () => {
     if (!schoolName.trim()) {
       alert("Le nom de l'établissement est requis.");
       return;
     }
-    updateSchool({
+    const res = await updateSchool({
       name: schoolName,
       description: schoolDesc,
       logo: schoolLogo,
@@ -154,8 +161,13 @@ export function SettingsPage() {
       registreCommerce,
       nif,
       nis,
-      registrationFee: Number(registrationFee) || 0,
+      ...(registrationFeeDirty ? { registrationFee: Math.max(0, Math.round(Number(registrationFee) || 0)) } : {}),
     });
+    if (!res.ok) {
+      alert(`Les informations de l'école n'ont PAS été enregistrées : ${res.error ?? "erreur inconnue"}.`);
+      return;
+    }
+    setRegistrationFeeDirty(false);
   };
 
   const handleSaveAdmin = async () => {
@@ -343,8 +355,11 @@ export function SettingsPage() {
                       </label>
                       <Input
                         type="number"
-                        value={registrationFee || ""}
-                        onChange={(e) => setRegistrationFee(Number(e.target.value))}
+                        value={shownRegistrationFee || ""}
+                        onChange={(e) => {
+                          setRegistrationFee(Number(e.target.value));
+                          setRegistrationFeeDirty(true);
+                        }}
                         placeholder="Ex: 1000"
                         className="rounded-xl"
                       />

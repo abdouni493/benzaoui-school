@@ -1499,6 +1499,13 @@ interface DataActions {
    *  — a column missing on a database that has not run the latest migration
    *  rejects the WHOLE update, and the optimistic state would otherwise lie. */
   updateSchool: (updatedFields: Partial<School>) => Promise<{ ok: boolean; error?: string }>;
+  /** Un tarif d'inscription vient de changer : les élèves qui doivent ENCORE
+   *  l'ancien montant, en entier, passent au nouveau. Un reste partiel ou un
+   *  frais réglé n'est jamais touché. */
+  repriceRegistrationDues: (
+    fromAmount: number,
+    toAmount: number,
+  ) => Promise<{ ok: boolean; count?: number; error?: string }>;
   restoreState: (dump: Partial<Database>) => void;
   reset: () => void;
 }
@@ -1550,6 +1557,10 @@ let deltaSupported: boolean | null = null;
 let lastProbeAt = 0;
 let lastFullLoadAt = 0;
 let lastSyncAt = 0;
+/** Dernière écriture de la ligne `school` depuis ce poste (ms). Une lecture de
+ *  l'école lancée AVANT n'a pas le droit d'écraser ce qui vient d'être saisi :
+ *  elle rapporterait l'ancien tarif d'inscription. */
+let schoolWrittenAt = 0;
 /** Le compte dont le store contient les données. */
 let ownerId: string | null = null;
 
@@ -1745,8 +1756,10 @@ interface SyncPayload {
   deleted?: Array<{ table: string; key: string }>;
 }
 
-/** Fusionne un delta dans le store. Rend `true` si une table a changé. */
-function applySyncPayload(payload: SyncPayload): boolean {
+/** Fusionne un delta dans le store. Rend `true` si une table a changé.
+ *  `requestedAt` : quand la lecture est partie — une ligne `school` lue avant
+ *  une écriture faite depuis ce poste est périmée et n'est pas appliquée. */
+function applySyncPayload(payload: SyncPayload, requestedAt?: number): boolean {
   const state = useData.getState();
   const deletedByTable = new Map<string, Set<string>>();
   for (const d of payload.deleted ?? []) {
@@ -1766,7 +1779,7 @@ function applySyncPayload(payload: SyncPayload): boolean {
     const rows = payload.tables?.[name] ?? [];
     if (name === "school") {
       const row = rows[0];
-      if (row) {
+      if (row && !(requestedAt !== undefined && requestedAt < schoolWrittenAt)) {
         const school = schoolMapper.fromRow(row);
         if (!sameValue(school, state.school)) patch.school = school;
       }
@@ -1832,6 +1845,7 @@ async function runDelta(): Promise<void> {
   }
 
   const supabase = createClient();
+  const requestedAt = Date.now();
   const { data, error } = await supabase.rpc("sync_changes", { p_since: cursor });
   if (error || !data) {
     if (isMissingFunction(error)) {
@@ -1848,7 +1862,7 @@ async function runDelta(): Promise<void> {
   }
 
   const payload = data as SyncPayload;
-  const changed = applySyncPayload(payload);
+  const changed = applySyncPayload(payload, requestedAt);
   if (payload.now) syncCursor = payload.now;
   lastSyncAt = Date.now();
   if (changed) scheduleSnapshotSave();
@@ -1862,7 +1876,10 @@ export const useData = create<DataStore>((set, get) => ({
 
   fetchSchool: async () => {
     const supabase = createClient();
+    const requestedAt = Date.now();
     const { data } = await supabase.from("school").select("*").limit(1).maybeSingle();
+    // Une écriture de l'école partie pendant la lecture l'emporte.
+    if (requestedAt < schoolWrittenAt) return;
     if (data) {
       const school = schoolMapper.fromRow(data);
       if (!sameValue(school, get().school)) set({ school });
@@ -1888,6 +1905,13 @@ export const useData = create<DataStore>((set, get) => ({
         const cursor = await probeServerCursor();
         const counts = readRowCounts();
         const before = get();
+        // La ligne `school` n'est pas une table du chargement complet : sans
+        // cette relecture, un poste resté ouvert gardait pendant des jours les
+        // frais d'inscription lus à son ouverture — et les facturait. Un échec
+        // garde la ligne déjà là, comme pour toute autre table.
+        get()
+          .fetchSchool()
+          .catch((err) => console.warn("[sync] école non relue :", err));
 
         const results = await Promise.all(
           TABLE_KEYS.map(async (key) => {
@@ -3109,22 +3133,77 @@ export const useData = create<DataStore>((set, get) => ({
   },
 
   updateSchool: async (updatedFields) => {
+    // Toute relecture de l'école partie AVANT cette écriture rapporterait
+    // l'ancienne ligne et effacerait à l'écran ce qui vient d'être saisi.
+    schoolWrittenAt = Date.now();
     set((state) => ({ school: { ...state.school, ...updatedFields } }));
 
     const schoolId = get().school.id;
     if (!schoolId) return { ok: false, error: "école introuvable" };
     const supabase = createClient();
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("school")
       .update(schoolMapper.toRow(updatedFields))
-      .eq("id", schoolId);
-    if (error) {
-      console.error("Failed to update school:", error.message);
+      .eq("id", schoolId)
+      .select("id");
+    schoolWrittenAt = Date.now();
+    // Un compte qui n'a pas le droit d'écrire ne reçoit PAS d'erreur : la
+    // base répond « 0 ligne modifiée ». L'écran affichait « Enregistré », puis
+    // l'ancien tarif revenait au rechargement suivant.
+    const refused = !error && Array.isArray(data) && data.length === 0;
+    if (error || refused) {
+      const message = error
+        ? error.message
+        : "seul un compte administrateur peut modifier les réglages de l'école";
+      console.error("Failed to update school:", message);
       // The optimistic state now disagrees with the database: put it back.
+      schoolWrittenAt = 0;
       await get().fetchSchool();
-      return { ok: false, error: error.message };
+      return { ok: false, error: message };
     }
     return { ok: true };
+  },
+
+  repriceRegistrationDues: async (fromAmount, toAmount) => {
+    const from = Math.max(0, Math.round(fromAmount || 0));
+    const to = Math.max(0, Math.round(toAmount || 0));
+    if (from <= 0 || from === to) return { ok: true, count: 0 };
+    const ids = get()
+      .students.filter((s) => !s.isFree && (s.registrationDue ?? 0) === from)
+      .map((s) => s.id);
+    if (ids.length === 0) return { ok: true, count: 0 };
+
+    set((state) => ({
+      students: state.students.map((s) => (ids.includes(s.id) ? { ...s, registrationDue: to } : s)),
+    }));
+    ids.forEach((id) => markPending("students", id));
+    try {
+      const supabase = createClient();
+      // La condition est relue côté base : un élève qui a réglé entre-temps
+      // (son reste dû a bougé) n'est pas re-tarifé. Pas de liste d'identifiants
+      // — des centaines d'élèves feraient une adresse de requête trop longue.
+      const { data, error } = await supabase
+        .from("students")
+        .update({ registration_due: to })
+        .eq("registration_due", from)
+        .eq("is_free", false)
+        .select("id");
+      if (error) {
+        console.error("Failed to reprice registration dues:", error.message);
+        reportWriteFailure("students", error.message);
+        // Rien n'a bougé en base : l'écran revient à ce qu'elle porte.
+        set((state) => ({
+          students: state.students.map((s) =>
+            ids.includes(s.id) ? { ...s, registrationDue: from } : s,
+          ),
+        }));
+        return { ok: false, error: error.message };
+      }
+      return { ok: true, count: Array.isArray(data) ? data.length : ids.length };
+    } finally {
+      ids.forEach((id) => unmarkPending("students", id));
+      scheduleRefresh();
+    }
   },
 
   restoreState: (dump) => set(() => ({ ...dump })),

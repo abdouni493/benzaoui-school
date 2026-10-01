@@ -288,14 +288,83 @@ export function freePeriodCovering<T extends FreePeriodRule>(
  * exacte, et seul le versement final est arrondi au dinar, UNE fois.
  */
 export function teacherShareOf(
-  rows: { fee: number; billable: boolean }[],
+  rows: { fee: number; base?: number; billable: boolean }[],
   percentage: number,
 ): number {
   const pct = Math.min(Math.max(percentage || 0, 0), 100);
   // En centimes entiers : additionner des 437,5 en virgule flottante finit par
-  // laisser traîner des 0,000001.
-  const cents = rows.reduce((sum, r) => sum + (r.billable ? Math.round(r.fee * pct) : 0), 0);
+  // laisser traîner des 0,000001. `base` — la valeur d'UNE séance du cours —
+  // l'emporte sur ce que la personne a payé quand les deux diffèrent (voir
+  // `seanceValueOf`).
+  const cents = rows.reduce(
+    (sum, r) => sum + (r.billable ? Math.round((r.base ?? r.fee) * pct) : 0),
+    0,
+  );
   return cents / 100;
+}
+
+/**
+ * Le prix d'UNE séance de ce créneau pour CET élève — la même règle, dans le
+ * même ordre, que `student_session_price` côté base, c'est-à-dire ce que le
+ * badge débite :
+ *
+ *   1. son inscription sur ce créneau (remise comprise) ;
+ *   2. sinon son inscription au même module, dans la même classe, encore
+ *      valable à cette date (remise comprise) — c'est le cas de l'élève qui
+ *      vient sur une SÉANCE LIBRE ou en rattrapage sur un autre groupe ;
+ *   3. sinon le tarif du créneau ;
+ *   4. sinon le prix affiché de la séance libre.
+ *
+ * L'écran de règlement prenait directement le tarif du créneau (3) : un élève
+ * venu sur une séance libre à 500 DA alors que son cours en vaut 450 rapportait
+ * à l'enseignant un pourcentage de 500 — pas celui d'une séance normale.
+ */
+export function seancePriceFor(
+  student: Pick<Student, "subscriptionIds" | "subscriptionDates" | "subscriptionDiscounts"> | undefined,
+  session: Pick<ScheduleSession, "id" | "moduleId" | "classId" | "openPrice"> | undefined,
+  subscriptions: Pick<Subscription, "id" | "sessionId" | "pricePerSession">[],
+  sessions: Pick<ScheduleSession, "id" | "moduleId" | "classId">[],
+  date: string,
+): number {
+  if (!session) return 0;
+  const enrolled = new Set(student?.subscriptionIds ?? []);
+  const discountOf = (subId: string) => student?.subscriptionDiscounts?.[subId];
+
+  if (student) {
+    const own = subscriptions.find((su) => su.sessionId === session.id && enrolled.has(su.id));
+    if (own) return netPriceFor(own.pricePerSession, discountOf(own.id));
+
+    const sessionById = new Map(sessions.map((s) => [s.id, s]));
+    for (const subId of student.subscriptionIds ?? []) {
+      const sub = subscriptions.find((su) => su.id === subId);
+      const enr = sub ? sessionById.get(sub.sessionId) : undefined;
+      if (!sub || !enr) continue;
+      if (enr.moduleId !== session.moduleId || enr.classId !== session.classId) continue;
+      const expiry = student.subscriptionDates?.[subId]?.expiryDate;
+      if (expiry && expiry < date) continue;
+      return netPriceFor(sub.pricePerSession, discountOf(subId));
+    }
+  }
+
+  const slot = subscriptions.find((su) => su.sessionId === session.id);
+  if (slot && slot.pricePerSession > 0) return Math.round(slot.pricePerSession);
+  return Math.max(0, Math.round(session.openPrice ?? 0));
+}
+
+/**
+ * Ce que vaut, pour l'enseignant, la présence d'une personne venue sur une
+ * SÉANCE LIBRE encaissée au guichet : le prix d'une séance NORMALE de ce cours
+ * — pas ce que le guichet lui a fait payer.
+ *
+ * Un passager payait 700 DA un cours à 625 : l'enseignant touchait 70 % de 700
+ * et la ligne du règlement se lisait « (625 DA × 179 + 700 DA × 4) × 70 % ».
+ * La règle de l'école est la même pour tous les présents : tarif de la séance
+ * × pourcentage. Le supplément du passager reste à l'école.
+ *
+ * Sans tarif connu pour le créneau, on retombe sur ce qui a été payé.
+ */
+export function seanceValueOf(normalPrice: number, paid: number): number {
+  return normalPrice > 0 ? normalPrice : Math.max(0, Math.round(paid || 0));
 }
 
 // ---- Ordre d'affichage des fiches --------------------------------------------
@@ -479,6 +548,49 @@ function allRegistrationFees(school?: Partial<School>): RegistrationFeeOption[] 
       amount: Math.max(0, Math.round(school?.registrationFee2 || 0)),
     },
   ];
+}
+
+/** Un tarif d'inscription qui change, et ce que deviennent les frais encore
+ *  dus à l'ancien montant. */
+export interface RegistrationFeeChange {
+  key: RegistrationFeeKey;
+  from: number;
+  to: number;
+  /**
+   * Impossible de savoir quels élèves relèvent de CE type : l'autre type vaut
+   * (ou valait) le même montant. Une fiche ne garde que le montant dû, pas le
+   * type choisi — on ne re-tarife donc rien plutôt que de toucher les
+   * élèves de l'autre type.
+   */
+  ambiguous: boolean;
+}
+
+/**
+ * Les tarifs d'inscription qui changent entre deux réglages.
+ *
+ * Changer le « type 2 » de 1 000 à 500 DA ne changeait que le prochain élève
+ * créé : ceux qui devaient encore 1 000 DA continuaient de les devoir, et leur
+ * fiche affichait toujours l'ancien prix. Ce sont eux que cette liste désigne.
+ */
+export function registrationFeeChanges(
+  before: { fee1: number; fee2: number },
+  after: { fee1: number; fee2: number },
+): RegistrationFeeChange[] {
+  const amount = (v: number) => Math.max(0, Math.round(v || 0));
+  const out: RegistrationFeeChange[] = [];
+  (["fee1", "fee2"] as const).forEach((key) => {
+    const other = key === "fee1" ? "fee2" : "fee1";
+    const from = amount(before[key]);
+    const to = amount(after[key]);
+    if (from === to || from <= 0) return;
+    out.push({
+      key,
+      from,
+      to,
+      ambiguous: amount(before[other]) === from || amount(after[other]) === from,
+    });
+  });
+  return out;
 }
 
 /** Only the tariffs the school actually charges — what the création screen

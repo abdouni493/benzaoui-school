@@ -39,7 +39,6 @@ import type {
   AttendanceRecord,
   Day,
   ScheduleSession,
-  Subscription,
   Teacher,
   TeacherPayment,
   TeacherPaymentDetail,
@@ -65,8 +64,9 @@ import {
   formatDateFr,
   formatDays,
   freeReasonOf,
-  liveDueFee,
   schoolDateKey,
+  seancePriceFor,
+  seanceValueOf,
   teacherShareOf,
   visibleTimetableSessions,
 } from "@/lib/helpers";
@@ -89,6 +89,10 @@ interface TimingStudent {
   status: string;
   /** ce que la présence a valu à l'école (débité, ou offert) */
   fee: number;
+  /** ce que vaut la présence POUR L'ENSEIGNANT quand ce n'est pas `fee` : le
+   *  prix d'une séance normale du cours, pour une séance libre payée au
+   *  guichet (un passager à 700 DA sur un cours à 625 compte 625). */
+  base?: number;
   /** part de l'enseignant — 0 dès que `billable` est faux */
   share: number;
   isPassager: boolean;
@@ -113,9 +117,11 @@ interface UnpaidTiming {
   endTime: string;
   students: TimingStudent[];
   passagers: number;
-  /** encaissé par l'école sur les seules présences rémunérées : c'est la base
-   *  du calcul au pourcentage et de la répartition d'un montant fixe */
+  /** encaissé par l'école sur les seules présences rémunérées */
   totalFees: number;
+  /** la valeur de ces présences au tarif normal de la séance : c'est la base
+   *  du calcul au pourcentage et de la répartition d'un montant fixe */
+  totalBase: number;
   totalShare: number;
   /**
    * Les séances libres de ce créneau-jour qui portent LEUR PROPRE pourcentage.
@@ -394,42 +400,56 @@ export function TeachersPage() {
    * On recalcule ici, pour chaque présence NON réglée, ce qu'elle vaut au prix
    * courant :
    *
-   *     part enseignant = tarif actuel de l'élève (remise comprise) × % du prof
+   *     part enseignant = prix de la séance pour l'élève (remise comprise) × % du prof
    *
-   * Le tarif suit l'abonnement du créneau, exactement comme au guichet. Une
-   * séance DÉJÀ réglée garde son montant historique (jamais recalculé), et on
-   * retombe sur le montant figé quand l'abonnement ou l'élève a disparu.
+   * Le prix se lit EXACTEMENT comme le badge le débite (`seancePriceFor`, le
+   * miroir de `student_session_price`) — sur un cours comme sur une SÉANCE
+   * LIBRE. L'écran prenait le tarif du créneau : sur une séance libre, l'élève
+   * qui paie 450 DA son cours était compté au tarif de la séance libre, et
+   * l'élève gratuit — à qui le badge ne débite rien et pour qui l'enseignant ne
+   * touche rien — était payé plein tarif. Une séance DÉJÀ réglée garde son
+   * montant historique (jamais recalculé), et on retombe sur le montant figé
+   * quand l'élève ou le créneau a disparu.
    */
   const liveDues = useMemo(() => {
     const attIdx = attendanceByKey;
-    const subBySession = new Map<string, Subscription>();
-    subscriptions.forEach((su) => {
-      if (!subBySession.has(su.sessionId)) subBySession.set(su.sessionId, su);
-    });
     const stuById = new Map(students.map((s) => [s.id, s]));
+    const sessById = new Map(sessions.map((s) => [s.id, s]));
     const pctByTeacher = new Map(teachers.map((t) => [t.id, t.percentage ?? 0]));
     const feeById = new Map<string, number>();
     const shareById = new Map<string, number>();
+    const freeStudentIds = new Set<string>();
     unpaidTeacher.forEach((u) => {
       if (u.paid) return;
-      const att = attIdx.get(
-        `${u.studentId}|${u.sessionId}|${schoolDateKey(u.date)}`,
-      );
+      const dateKey = schoolDateKey(u.date);
+      const att = attIdx.get(`${u.studentId}|${u.sessionId}|${dateKey}`);
       // « Valeur de la présence » figée : le débit de l'élève, ou — séance
       // offerte mais rémunérée — le prix mis de côté. Sert de repli quand
-      // l'abonnement n'existe plus.
+      // l'élève ou le créneau n'existe plus.
       const frozen = att
         ? att.amountDeducted > 0
           ? att.amountDeducted
           : att.waivedAmount ?? 0
         : u.amount;
-      const fee = liveDueFee(subBySession.get(u.sessionId), stuById.get(u.studentId), frozen);
+      const stu = stuById.get(u.studentId);
+      const sess = sessById.get(u.sessionId);
+      let fee: number;
+      if (!stu || !sess) {
+        fee = Math.max(0, Math.round(frozen || 0));
+      } else if (stu.isFree) {
+        // Le badge ne débite rien à un élève gratuit, et la base n'écrit pour
+        // lui qu'une part de 0 DA : l'écran ne doit pas en inventer une.
+        fee = 0;
+        freeStudentIds.add(u.id);
+      } else {
+        fee = seancePriceFor(stu, sess, subscriptions, sessions, dateKey);
+      }
       feeById.set(u.id, fee);
       // Part EXACTE (437,5 DA à 70 % de 625) : seul le versement est arrondi.
       shareById.set(u.id, teacherShareOf([{ fee, billable: true }], pctByTeacher.get(u.teacherId) ?? 0));
     });
-    return { feeById, shareById };
-  }, [unpaidTeacher, attendanceByKey, subscriptions, students, teachers]);
+    return { feeById, shareById, freeStudentIds };
+  }, [unpaidTeacher, attendanceByKey, subscriptions, sessions, students, teachers]);
 
   /** Tarif élève d'une présence encore due, au prix courant (montant figé en
    *  repli quand la présence est déjà réglée ou l'abonnement supprimé). */
@@ -719,6 +739,7 @@ export function TeachersPage() {
           students: [],
           passagers: 0,
           totalFees: 0,
+          totalBase: 0,
           totalShare: 0,
           freeSeances: [],
           freeShare: 0,
@@ -739,6 +760,9 @@ export function TeachersPage() {
         const stu = studentById.get(u.studentId);
         const att = attendanceFor(u.studentId, u.sessionId, dateKey);
         const sess = sessionById.get(u.sessionId);
+        // Élève gratuit : présent, affiché, mais il ne rapporte rien — ni à
+        // l'école, ni donc à l'enseignant (la base lui écrit une part de 0).
+        const freeStudent = liveDues.freeStudentIds.has(u.id);
         t.students.push({
           studentId: u.studentId,
           name: stu ? `${stu.firstName} ${stu.lastName}` : "Élève inconnu",
@@ -748,9 +772,10 @@ export function TeachersPage() {
           fee: dueFee(u, att?.amountDeducted ?? 0),
           share: dueShare(u),
           isPassager: false,
-          billable: true,
+          billable: !freeStudent,
+          note: freeStudent ? FREE_REASON_LABELS.freeStudent : undefined,
         });
-        t.totalFees += dueFee(u, att?.amountDeducted ?? 0);
+        if (!freeStudent) t.totalFees += dueFee(u, att?.amountDeducted ?? 0);
       });
 
     // ---- Les séances libres du même créneau -------------------------------
@@ -805,13 +830,28 @@ export function TeachersPage() {
             })()
           : ind.passagerName ?? "Passager";
 
+        // La valeur d'une séance NORMALE de ce cours pour cette personne —
+        // l'élève inscrit à son propre tarif, le passager au tarif du créneau —
+        // et non ce que le guichet lui a fait payer : le pourcentage de
+        // l'enseignant s'applique au même prix pour tous les présents.
+        const base = seanceValueOf(
+          seancePriceFor(
+            ind.studentId ? studentById.get(ind.studentId) : undefined,
+            sessionById.get(ind.sessionId!),
+            subscriptions,
+            sessions,
+            ind.date,
+          ),
+          ind.price,
+        );
+
         if (dedicated) {
           const pct = Math.min(Math.max(ind.teacherPercentage ?? 0, 0), 100);
-          const share = teacherShareOf([{ fee: ind.price, billable: true }], pct);
+          const share = teacherShareOf([{ fee: ind.price, base, billable: true }], pct);
           t.freeSeances.push({
             id: ind.id,
             name: person,
-            price: ind.price,
+            price: base,
             percentage: pct,
             share,
             time: ind.startTime ?? "-",
@@ -829,7 +869,8 @@ export function TeachersPage() {
           time: ind.startTime ?? "-",
           status: "Présent",
           fee: ind.price,
-          share: teacherShareOf([{ fee: ind.price, billable: true }], contractPct),
+          base,
+          share: teacherShareOf([{ fee: ind.price, base, billable: true }], contractPct),
           isPassager: !ind.studentId,
           billable: true,
         });
@@ -842,6 +883,7 @@ export function TeachersPage() {
     // absents (part 0) — l'étape 1 annonçait « 95 046 DA dus » et l'étape 2
     // en calculait 97 006 sur les mêmes séances.
     map.forEach((t) => {
+      t.totalBase = t.students.reduce((s, st) => s + (st.billable ? st.base ?? st.fee : 0), 0);
       t.totalShare = teacherShareOf(t.students, contractPct);
     });
 
@@ -967,6 +1009,16 @@ export function TeachersPage() {
     const sess = sessionById.get(sessionId);
     return Math.max(0, Math.round(sess?.openPrice ?? 0));
   };
+
+  /** Le tarif qui a RÉELLEMENT servi au calcul de ces séances : le plus
+   *  fréquent parmi les présences rémunérées. Sur une séance libre, les élèves
+   *  du cours comptent au prix de leur cours (625) et non au prix affiché de la
+   *  séance libre (500) — la colonne « Tarif séance » doit dire 625, sinon elle
+   *  contredit la formule juste à côté. */
+  const usedPriceOf = (timings: UnpaidTiming[], sessionId: string) =>
+    priceBreakdown(
+      timings.flatMap((t) => t.students.filter((st) => st.billable).map((st) => st.base ?? st.fee)),
+    )[0]?.price ?? unitPriceOf(sessionId);
   /** Les créneaux réellement couverts par ce règlement — ce que le bon de
    *  paiement et l'historique doivent nommer. */
   const chosenCreneaux = [...new Set(chosenTimings.map((t) => t.sessionId))];
@@ -981,6 +1033,10 @@ export function TeachersPage() {
   );
   const chosenPassagers = chosenTimings.reduce((s, t) => s + t.passagers, 0);
   const chosenRevenue = chosenTimings.reduce((s, t) => s + t.totalFees, 0);
+  /** La valeur des présences au tarif normal de la séance — ce sur quoi le
+   *  pourcentage s'applique. Elle diffère de l'encaissé quand un passager a
+   *  payé sa séance libre plus cher que le cours. */
+  const chosenBase = chosenTimings.reduce((s, t) => s + t.totalBase, 0);
 
   /**
    * What the teacher gets for the chosen timings.
@@ -1041,7 +1097,7 @@ export function TeachersPage() {
     // centime : la somme des parts doit retomber pile sur le versement.
     const unit = Number.isInteger(spread) ? 1 : 100;
     const parts = apportionByGroup(
-      chosenTimings.map((t) => ({ group: t.sessionId, weight: t.totalFees })),
+      chosenTimings.map((t) => ({ group: t.sessionId, weight: t.totalBase })),
       Math.round(spread * unit),
     );
     chosenTimings.forEach((t, i) => out.set(t.key, parts[i] / unit));
@@ -1078,7 +1134,7 @@ export function TeachersPage() {
       share: shareForTiming(t),
       // Ce qu'il faut pour que le tableau se réimprime à l'identique dans six
       // mois : le tarif et le taux qui ont servi, et les séances libres soldées.
-      unitPrice: unitPriceOf(t.sessionId),
+      unitPrice: usedPriceOf([t], t.sessionId),
       percentage: payMethod === "percent" ? payPercentage : 0,
       kind: t.isOpen ? ("libre" as const) : ("cours" as const),
       freeShare: t.freeShare,
@@ -1087,7 +1143,7 @@ export function TeachersPage() {
       // Le tarif que chaque présent a RÉELLEMENT payé : c'est ce qui laisse la
       // formule du bon retomber sur le montant quand un passager a payé 700 DA
       // un cours à 625.
-      prices: priceBreakdown(t.students.filter((st) => st.billable).map((st) => st.fee)),
+      prices: priceBreakdown(t.students.filter((st) => st.billable).map((st) => st.base ?? st.fee)),
     }));
 
   /** Le tableau Niveau × dates de l'étape 2 — construit par le MÊME code que
@@ -3524,7 +3580,7 @@ export function TeachersPage() {
                               <span className="mt-1 block text-[10px] text-muted">
                                 Tarif séance :{" "}
                                 <strong className="font-mono text-ink">
-                                  {unitPriceOf(c.sessionId)} DA
+                                  {usedPriceOf(c.timings, c.sessionId)} DA
                                 </strong>
                               </span>
                             </span>
@@ -3917,7 +3973,7 @@ export function TeachersPage() {
                                           <th className="py-1">Groupe</th>
                                           <th className="py-1">Heure</th>
                                           <th className="py-1">Statut</th>
-                                          <th className="py-1 text-right">Tarif élève</th>
+                                          <th className="py-1 text-right">Tarif séance</th>
                                           <th className="py-1 text-right">
                                             Part prof{" "}
                                             {payMethod === "percent" ? `(${payPercentage} %)` : ""}
@@ -3955,7 +4011,14 @@ export function TeachersPage() {
                                                 {st.status}
                                               </Badge>
                                             </td>
-                                            <td className="py-1.5 text-right font-mono">{st.fee} DA</td>
+                                            <td className="py-1.5 text-right font-mono">
+                                              {st.base ?? st.fee} DA
+                                              {st.base !== undefined && st.base !== st.fee && (
+                                                <span className="block text-[9px] font-normal text-muted">
+                                                  payé {st.fee} DA au guichet
+                                                </span>
+                                              )}
+                                            </td>
                                             <td
                                               className={`py-1.5 text-right font-mono font-bold ${
                                                 st.billable ? "text-primary" : "text-muted"
@@ -4151,7 +4214,7 @@ export function TeachersPage() {
                             onChange={(e) => setPayPercentage(Number(e.target.value))}
                           />
                           <p className="mt-1.5 text-[10px] leading-relaxed text-muted">
-                            {chosenRevenue} DA encaissés × {payPercentage} % ={" "}
+                            {chosenBase} DA (valeur des séances) × {payPercentage} % ={" "}
                             <strong className="text-primary">
                               {formatAmount(computedPayout - chosenFreeShare)} DA
                             </strong>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { REGISTRATION_FEE_LABELS, registrationFeeOptions } from "@/lib/helpers";
+import { REGISTRATION_FEE_LABELS, registrationFeeChanges, registrationFeeOptions } from "@/lib/helpers";
 import type { School } from "@/lib/types";
 
 const school = (patch: Partial<School>): Partial<School> => patch;
@@ -53,5 +53,29 @@ describe("registrationFeeOptions", () => {
       { key: "fee1", label: "Annuelle", amount: 2000 },
       { key: "fee2", label: "Semestrielle", amount: 1200 },
     ]);
+  });
+});
+
+describe("registrationFeeChanges — un tarif modifié descend chez ceux qui le doivent encore", () => {
+  it("repère le type 2 passé de 1000 à 500 DA", () => {
+    expect(registrationFeeChanges({ fee1: 400, fee2: 1000 }, { fee1: 400, fee2: 500 })).toEqual([
+      { key: "fee2", from: 1000, to: 500, ambiguous: false },
+    ]);
+  });
+
+  it("ne signale rien quand aucun montant ne change", () => {
+    expect(registrationFeeChanges({ fee1: 400, fee2: 500 }, { fee1: 400, fee2: 500 })).toEqual([]);
+  });
+
+  it("ignore un type qui n'était pas proposé (0 DA) : personne ne le doit", () => {
+    expect(registrationFeeChanges({ fee1: 0, fee2: 500 }, { fee1: 300, fee2: 500 })).toEqual([]);
+  });
+
+  it("refuse de deviner quand l'autre type vaut le même montant", () => {
+    // Avant : deux types à 500 DA. Un élève qui doit 500 relève de l'un ou de
+    // l'autre — la fiche ne le dit pas.
+    expect(registrationFeeChanges({ fee1: 500, fee2: 500 }, { fee1: 500, fee2: 700 })[0].ambiguous).toBe(true);
+    // Après : le type 1 prend l'ancien montant du type 2.
+    expect(registrationFeeChanges({ fee1: 400, fee2: 500 }, { fee1: 500, fee2: 600 }).find((c) => c.key === "fee2")?.ambiguous).toBe(true);
   });
 });

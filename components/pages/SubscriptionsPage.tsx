@@ -10,6 +10,7 @@ import {
   formatDays,
   studentName,
   todayIso,
+  registrationFeeChanges,
   REGISTRATION_FEE_LABELS,
 } from "@/lib/helpers";
 import { formatDA } from "@/lib/utils";
@@ -63,6 +64,8 @@ export function SubscriptionsPage() {
     deleteSubscriptionPrice,
     repriceSession,
     updateSchool,
+    students,
+    repriceRegistrationDues,
   } = useData(
     useShallow((s) => ({
       school: s.school,
@@ -78,6 +81,8 @@ export function SubscriptionsPage() {
       deleteSubscriptionPrice: s.deleteSubscriptionPrice,
       repriceSession: s.repriceSession,
       updateSchool: s.updateSchool,
+      students: s.students,
+      repriceRegistrationDues: s.repriceRegistrationDues,
     })),
   );
   /** Un compte de réception encaisse ; il ne voit pas ce que l'école gagne. */
@@ -114,45 +119,83 @@ export function SubscriptionsPage() {
   //
   // `school` is fetched after mount, so the form CANNOT hold its own copy from
   // the first render — it used to show 0 until a reload, and saving then wiped
-  // the real fee. The draft stays null until something is actually typed, so
-  // the inputs read the live school row right up to the first keystroke.
+  // the real fee. The draft holds ONLY the fields actually typed: the others
+  // keep reading the live school row.
+  //
+  // Le brouillon gardait les QUATRE champs, figés à la première frappe. Taper
+  // le tarif du type 1 sur un poste qui avait lu l'école avant qu'un autre ne
+  // change le type 2 réécrivait donc l'ANCIEN type 2 en enregistrant : « je
+  // modifie le second frais et il revient à l'ancien prix ». Seuls les champs
+  // touchés partent désormais en base.
   interface FeeDraft {
     fee1: number;
     label1: string;
     fee2: number;
     label2: string;
   }
-  const [feeDraft, setFeeDraft] = useState<FeeDraft | null>(null);
+  const [feeDraft, setFeeDraft] = useState<Partial<FeeDraft>>({});
   const [feeSaved, setFeeSaved] = useState(false);
   /** Message of the last refused save (empty when the last one went through). */
   const [feeError, setFeeError] = useState("");
+  /** Le résultat de la dernière mise à jour des frais encore dus. */
+  const [feeNotice, setFeeNotice] = useState("");
+  /** Faire suivre le nouveau tarif aux élèves qui doivent encore l'ancien. */
+  const [repriceDues, setRepriceDues] = useState(true);
 
-  const fees: FeeDraft = feeDraft ?? {
+  const liveFees: FeeDraft = {
     fee1: school?.registrationFee ?? 0,
     label1: school?.registrationFeeLabel ?? "",
     fee2: school?.registrationFee2 ?? 0,
     label2: school?.registrationFee2Label ?? "",
   };
-  const editFees = (patch: Partial<FeeDraft>) => setFeeDraft({ ...fees, ...patch });
+  const fees: FeeDraft = { ...liveFees, ...feeDraft };
+  const editFees = (patch: Partial<FeeDraft>) => setFeeDraft((prev) => ({ ...prev, ...patch }));
+  const feeDirty = Object.keys(feeDraft).length > 0;
+
+  /** Les tarifs qui changent avec ce brouillon, et les élèves qui doivent
+   *  encore, en entier, l'ancien montant. */
+  const feeChanges = registrationFeeChanges(liveFees, fees).map((c) => ({
+    ...c,
+    students: c.ambiguous
+      ? 0
+      : students.filter((st) => !st.isFree && (st.registrationDue ?? 0) === c.from).length,
+  }));
 
   const handleSaveRegistrationFee = async () => {
     setFeeError("");
-    const res = await updateSchool({
-      registrationFee: Math.max(0, Math.round(fees.fee1 || 0)),
-      registrationFeeLabel: fees.label1.trim(),
-      registrationFee2: Math.max(0, Math.round(fees.fee2 || 0)),
-      registrationFee2Label: fees.label2.trim(),
-    });
+    setFeeNotice("");
+    if (!feeDirty) return;
+    const changes = feeChanges;
+    const patch: Partial<typeof school> = {};
+    if (feeDraft.fee1 !== undefined) patch.registrationFee = Math.max(0, Math.round(feeDraft.fee1 || 0));
+    if (feeDraft.label1 !== undefined) patch.registrationFeeLabel = feeDraft.label1.trim();
+    if (feeDraft.fee2 !== undefined) patch.registrationFee2 = Math.max(0, Math.round(feeDraft.fee2 || 0));
+    if (feeDraft.label2 !== undefined) patch.registrationFee2Label = feeDraft.label2.trim();
+    const res = await updateSchool(patch);
     if (!res.ok) {
-      // Most likely cause: the database still misses the second-tariff columns.
+      // Compte non administrateur, ou base sans les colonnes du second tarif.
       setFeeError(res.error ?? "erreur inconnue");
-      setFeeDraft(null);
+      setFeeDraft({});
       return;
     }
     // Saved: drop the draft so the inputs follow the school row again.
-    setFeeDraft(null);
+    setFeeDraft({});
     setFeeSaved(true);
     setTimeout(() => setFeeSaved(false), 2000);
+
+    if (repriceDues) {
+      const notes: string[] = [];
+      for (const c of changes) {
+        if (c.ambiguous || c.students === 0) continue;
+        const r = await repriceRegistrationDues(c.from, c.to);
+        notes.push(
+          r.ok
+            ? `${r.count ?? 0} élève(s) qui devaient ${c.from} DA (${REGISTRATION_FEE_LABELS[c.key]}) doivent désormais ${c.to} DA.`
+            : `Les frais encore dus n'ont PAS été mis à jour (${r.error ?? "erreur inconnue"}).`,
+        );
+      }
+      setFeeNotice(notes.join(" "));
+    }
   };
 
   // Helpers
@@ -562,6 +605,50 @@ export function SubscriptionsPage() {
             ))}
           </div>
 
+          {/* Un tarif qui change doit aussi descendre chez les élèves qui le
+              doivent encore — sinon leur fiche garde l'ancien prix. */}
+          {feeChanges.length > 0 && (
+            <div className="space-y-1.5 rounded-xl border border-warning/30 bg-warning/5 p-3 text-xs">
+              {feeChanges.some((c) => !c.ambiguous && c.students > 0) && (
+                <label className="flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={repriceDues}
+                    onChange={(e) => setRepriceDues(e.target.checked)}
+                    className="mt-0.5 h-4 w-4"
+                  />
+                  <span className="text-ink">
+                    <strong>Appliquer aussi le nouveau montant aux frais encore dus.</strong>
+                    <span className="block text-[11px] text-muted">
+                      Seuls les élèves qui doivent encore l&apos;ancien montant EN ENTIER sont mis à
+                      jour ; un frais déjà réglé, ou réglé en partie, ne bouge pas.
+                    </span>
+                  </span>
+                </label>
+              )}
+              {feeChanges.map((c) => (
+                <p key={c.key} className="text-[11px] text-muted">
+                  <strong className="text-ink">
+                    {(c.key === "fee1" ? fees.label1 : fees.label2).trim() || REGISTRATION_FEE_LABELS[c.key]}
+                  </strong>{" "}
+                  : {c.from} DA → {c.to} DA.{" "}
+                  {c.ambiguous
+                    ? "L'autre type vaut le même montant : impossible de savoir quels élèves en relèvent, leurs frais dus ne sont pas modifiés."
+                    : c.students > 0
+                      ? `${c.students} élève(s) doivent encore ${c.from} DA${repriceDues ? ` — ils devront ${c.to} DA.` : " — ils le garderont."}`
+                      : "Aucun élève ne doit encore l'ancien montant."}
+                </p>
+              ))}
+            </div>
+          )}
+
+          {feeNotice && (
+            <div className="flex items-start gap-2 rounded-xl border border-success/30 bg-success/5 p-3 text-xs text-success">
+              <Check className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{feeNotice}</span>
+            </div>
+          )}
+
           {feeError && (
             <div className="flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/5 p-3 text-xs text-danger">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -577,7 +664,11 @@ export function SubscriptionsPage() {
           )}
 
           <div className="flex justify-end">
-            <Button onClick={handleSaveRegistrationFee} className="flex items-center gap-2">
+            <Button
+              onClick={handleSaveRegistrationFee}
+              disabled={!feeDirty && !feeSaved}
+              className="flex items-center gap-2"
+            >
               {feeSaved ? (
                 <>
                   <Check className="h-4 w-4" /> Enregistré
