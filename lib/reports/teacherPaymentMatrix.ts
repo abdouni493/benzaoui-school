@@ -61,6 +61,8 @@ const LABELS = {
     seances: "Séances",
     totalStudents: "Total élèves",
     freeCol: "Séances libres (part dédiée)",
+    freeStudentsCol: "Élèves gratuits",
+    freeStudentsShort: "grat.",
     amount: "Montant calculé",
     totals: "TOTAL GÉNÉRAL",
     noRows: "Aucune séance détaillée sur ce règlement.",
@@ -101,6 +103,8 @@ const LABELS = {
     seances: "الحصص",
     totalStudents: "مجموع التلاميذ",
     freeCol: "الحصص الحرة (نسبة خاصة)",
+    freeStudentsCol: "التلاميذ المجانيون",
+    freeStudentsShort: "مجاني",
     amount: "المبلغ المحسوب",
     totals: "المجموع العام",
     noRows: "لا توجد حصص مفصلة في هذا الدفع.",
@@ -174,9 +178,14 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
 
   const m = buildPayMatrix(data.details);
   const showFree = m.hasFreeColumn;
+  // Élèves gratuits : la colonne et la mention par séance n'apparaissent QUE
+  // s'il y en a eu au moins un.
+  const showFreeStudents = m.freeStudents > 0;
   // Nombre de colonnes fixes : Niveau, Tarif, %, Séances, Total élèves,
-  // [Séances libres], Montant.
-  const fixedCols = 6 + (showFree ? 1 : 0);
+  // [Élèves gratuits], [Séances libres], Montant.
+  const fixedCols = 6 + (showFree ? 1 : 0) + (showFreeStudents ? 1 : 0);
+  const freeTag = (k: number) =>
+    k > 0 ? `<br><span style="font-size:0.8em;color:#16a34a;">+${k} ${L.freeStudentsShort}</span>` : "";
 
   const headDates = m.dates.map((d) => `<th class="d">${shortDate(d)}</th>`).join("");
 
@@ -189,7 +198,7 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
               .map((d) => {
                 const c = r.cells.get(d);
                 const n = c?.students ?? 0;
-                return `<td class="d${n === 0 ? " zero" : ""}">${c ? n : "—"}</td>`;
+                return `<td class="d${n === 0 ? " zero" : ""}">${c ? n : "—"}${freeTag(c?.freeStudents ?? 0)}</td>`;
               })
               .join("");
             const terms = rowFormulaTerms(r, L.da);
@@ -209,6 +218,7 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
                 <td class="n">${r.seances}</td>
                 ${cells}
                 <td class="n">${r.totalStudents}</td>
+                ${showFreeStudents ? `<td class="n">${r.freeStudents > 0 ? r.freeStudents : "—"}</td>` : ""}
                 ${showFree ? `<td class="n">${r.freeCount > 0 ? `${money(r.freeShare)} <span style="font-weight:400;font-size:0.85em;">(${r.freeCount})</span>` : "—"}</td>` : ""}
                 <td class="n amt">${money(r.amount)}</td>
               </tr>`;
@@ -218,7 +228,8 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
   const totalCells = m.dates
     .map((d) => {
       const n = m.rows.reduce((s, r) => s + (r.cells.get(d)?.students ?? 0), 0);
-      return `<td class="d">${n}</td>`;
+      const k = m.rows.reduce((s, r) => s + (r.cells.get(d)?.freeStudents ?? 0), 0);
+      return `<td class="d">${n}${freeTag(k)}</td>`;
     })
     .join("");
 
@@ -230,6 +241,7 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
         <td colspan="4">${L.totals}</td>
         ${totalCells}
         <td class="n">${m.totalStudents}</td>
+        ${showFreeStudents ? `<td class="n">${m.freeStudents}</td>` : ""}
         ${showFree ? `<td class="n">${money(m.freeShare)}</td>` : ""}
         <td class="n amt">${money(m.amount)}</td>
       </tr>`;
@@ -240,8 +252,10 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
     Math.round((data.amount - (m.amount - (data.acomptes ?? 0) - (data.retenues ?? 0))) * 100) / 100;
   const showRounding = rounding !== 0 && Math.abs(rounding) < 1;
 
-  const periodLabel =
-    m.dates.length > 0
+  const chosenPeriod = data.details.find((d) => d.periodFrom || d.periodTo);
+  const periodLabel = chosenPeriod
+    ? `${chosenPeriod.periodFrom ? fmtDate(chosenPeriod.periodFrom, lang) : "…"} → ${chosenPeriod.periodTo ? fmtDate(chosenPeriod.periodTo, lang) : "…"}`
+    : m.dates.length > 0
       ? `${fmtDate(m.dates[0], lang)} → ${fmtDate(m.dates[m.dates.length - 1], lang)}`
       : "—";
 
@@ -291,6 +305,7 @@ export function buildTeacherPaymentMatrixReceipt(data: TeacherPaymentMatrixData)
               <th class="n">${L.seances}</th>
               ${headDates}
               <th class="n">${L.totalStudents}</th>
+              ${showFreeStudents ? `<th class="n">${L.freeStudentsCol}</th>` : ""}
               ${showFree ? `<th class="n">${L.freeCol}</th>` : ""}
               <th class="n">${L.amount}</th>
             </tr>

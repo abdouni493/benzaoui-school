@@ -1242,7 +1242,7 @@ function TeacherSalaryView({
                                 {item.isAcompte ? "AC" : "SL"}
                               </div>
                               <div className="min-w-0">
-                                <h4 className="text-sm font-bold text-ink truncate" title={desc}>
+                                <h4 className="text-sm font-bold text-ink line-clamp-3" title={desc}>
                                   {desc}
                                 </h4>
                                 <span className="text-[10px] text-muted block font-mono">

@@ -289,6 +289,12 @@ export function TeachersPage() {
   const [payStep, setPayStep] = useState<1 | 2>(1);
   /** Les emplois du temps cochés à l'étape 1. */
   const [paySessionIds, setPaySessionIds] = useState<string[]>([]);
+  /** Filtre OPTIONNEL « par période » : au lieu de tout l'impayé depuis
+   *  toujours, ne régler que les séances comprises entre deux dates — par
+   *  défaut, du dernier règlement à la date de fin choisie. */
+  const [payPeriodOn, setPayPeriodOn] = useState(false);
+  const [payPeriodFrom, setPayPeriodFrom] = useState("");
+  const [payPeriodTo, setPayPeriodTo] = useState("");
   // Passager teacher created straight from this page
   const [isPassagerCreateOpen, setIsPassagerCreateOpen] = useState(false);
 
@@ -902,11 +908,45 @@ export function TeachersPage() {
 
   /** The timings currently listed in the payment modal (memoised: the modal
    *  recomputes them on every keystroke of the amount field otherwise). */
-  const payTimings = useMemo(
+  const allPayTimings = useMemo(
     () => (selectedTeacher ? buildUnpaidTimings(selectedTeacher.id) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedTeacher, teachers, unpaidTeacher, independent, attendance, sessions, students, groups, modules, classes, freePeriods, liveDues, subscriptions],
   );
+
+  /** Date (YYYY-MM-DD) du dernier règlement de l'enseignant, s'il y en a un. */
+  const lastPaymentDateOf = (tid: string): string => {
+    const dates = teacherPayments
+      .filter((p) => p.teacherId === tid && p.paidAt)
+      .map((p) => schoolDateKey(p.paidAt));
+    return dates.sort().pop() ?? "";
+  };
+
+  /** Les séances proposées au règlement : toutes, ou celles de la période. */
+  const payTimings = useMemo(
+    () =>
+      payPeriodOn
+        ? allPayTimings.filter(
+            (t) =>
+              (!payPeriodFrom || t.dateKey >= payPeriodFrom) &&
+              (!payPeriodTo || t.dateKey <= payPeriodTo),
+          )
+        : allPayTimings,
+    [allPayTimings, payPeriodOn, payPeriodFrom, payPeriodTo],
+  );
+
+  /** Élèves GRATUITS présents sur une séance — comptés sur le bon, jamais payés. */
+  const freeStudentsOn = (sessionId: string, dateKey: string) =>
+    new Set(
+      (presencesByTiming.get(`${sessionId}|${dateKey}`) ?? [])
+        .filter((a) => studentById.get(a.studentId)?.isFree)
+        .map((a) => a.studentId),
+    ).size;
+
+  /** La période réellement couverte quand le filtre est actif. */
+  const payPeriod = payPeriodOn
+    ? { from: payPeriodFrom || undefined, to: payPeriodTo || undefined }
+    : null;
 
   /**
    * Les créneaux (emplois du temps) de l'enseignant qui ont des séances à
@@ -1144,6 +1184,8 @@ export function TeachersPage() {
       // formule du bon retomber sur le montant quand un passager a payé 700 DA
       // un cours à 625.
       prices: priceBreakdown(t.students.filter((st) => st.billable).map((st) => st.base ?? st.fee)),
+      freeStudents: freeStudentsOn(t.sessionId, t.dateKey),
+      ...(payPeriod ? { periodFrom: payPeriod.from, periodTo: payPeriod.to } : {}),
     }));
 
   /** Le tableau Niveau × dates de l'étape 2 — construit par le MÊME code que
@@ -1152,7 +1194,7 @@ export function TeachersPage() {
   const payMatrix = useMemo(
     () => buildPayMatrix(buildPayDetails()),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chosenTimings, payMethod, payPercentage, payFixedAmount, fixedShares, subscriptions, sessions],
+    [chosenTimings, payMethod, payPercentage, payFixedAmount, fixedShares, subscriptions, sessions, payPeriodOn, payPeriodFrom, payPeriodTo, presencesByTiming],
   );
 
   /** Imprimer le détail AVANT de valider : l'enseignant signe ce qu'il a sous
@@ -1325,6 +1367,10 @@ export function TeachersPage() {
     // règle le mois entier), et décocher est plus rapide que cocher.
     setPayStep(1);
     setPaySessionIds([...new Set(timings.map((x) => x.sessionId))]);
+    // Par défaut : tout l'impayé, comme avant. La période reste une option.
+    setPayPeriodOn(false);
+    setPayPeriodFrom(lastPaymentDateOf(t.id));
+    setPayPeriodTo(schoolDateKey(new Date().toISOString()));
     setPayMethod(t.isPassager ? "fixed" : "percent");
     setPayFixedAmount(0);
     setPayPercentage(t.percentage ?? 50);
@@ -1367,6 +1413,9 @@ export function TeachersPage() {
         details,
         description:
           `Règlement séances ${selectedTeacher.firstName} ${selectedTeacher.lastName}` +
+          (payPeriod
+            ? ` — période ${payPeriod.from ? formatDateFr(payPeriod.from) : "début"} → ${payPeriod.to ? formatDateFr(payPeriod.to) : "aujourd'hui"}`
+            : "") +
           (appliedAcomptes > 0 ? ` — acomptes -${appliedAcomptes} DA` : "") +
           (appliedAbsences > 0 ? ` — absences -${appliedAbsences} DA` : ""),
         settleDeductions: appliedAcomptes > 0 || appliedAbsences > 0,
@@ -2014,8 +2063,17 @@ export function TeachersPage() {
                     })}
                   </span>
                   {p.description && (
-                    <span className="mt-0.5 block truncate text-[10px] text-muted/80">{p.description}</span>
+                    <span className="mt-0.5 block text-[10px] text-muted/80">{p.description}</span>
                   )}
+                  {(() => {
+                    const per = (Array.isArray(p.details) ? p.details : []).find((d) => d.periodFrom || d.periodTo);
+                    if (!per) return null;
+                    return (
+                      <Badge tone="success" className="mt-1 text-[9px] font-bold">
+                        🗓 Période : {per.periodFrom ? formatDateFr(per.periodFrom) : "…"} → {per.periodTo ? formatDateFr(per.periodTo) : "…"}
+                      </Badge>
+                    );
+                  })()}
                   {/* QUEL cours ce règlement a soldé. Sans cette ligne,
                       l'historique n'était qu'une suite de montants : impossible
                       de dire lequel des trois cours d'un enseignant avait déjà
@@ -3499,6 +3557,51 @@ export function TeachersPage() {
                   </Badge>
                 </div>
               </div>
+
+              {/* ---- Période (optionnelle) ----------------------------- */}
+              {payStep === 1 && (() => {
+                const lastPay = lastPaymentDateOf(selectedTeacher.id);
+                const hiddenBefore = payPeriodOn && payPeriodFrom
+                  ? allPayTimings.filter((t) => t.dateKey < payPeriodFrom).length
+                  : 0;
+                return (
+                  <div className="space-y-3 rounded-2xl border border-line bg-surface p-4 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-muted">Période à régler :</span>
+                      <Button size="sm" variant={payPeriodOn ? "outline" : "primary"} onClick={() => setPayPeriodOn(false)}>
+                        Tout l'impayé ({allPayTimings.length} séance(s))
+                      </Button>
+                      <Button size="sm" variant={payPeriodOn ? "primary" : "outline"} onClick={() => setPayPeriodOn(true)}>
+                        <CalendarDays className="h-3.5 w-3.5" /> Filtrer par période
+                      </Button>
+                      <span className="ms-auto text-[11px] text-muted">
+                        Dernier règlement :{" "}
+                        <strong className="text-ink">{lastPay ? formatDateFr(lastPay) : "aucun"}</strong>
+                      </span>
+                    </div>
+                    {payPeriodOn && (
+                      <div className="flex flex-wrap items-end gap-3">
+                        <label className="space-y-1">
+                          <span className="block text-[10px] font-bold text-muted">Du (dernier règlement)</span>
+                          <Input type="date" value={payPeriodFrom} max={payPeriodTo || undefined} onChange={(e) => setPayPeriodFrom(e.target.value)} />
+                        </label>
+                        <label className="space-y-1">
+                          <span className="block text-[10px] font-bold text-muted">Au (date de fin)</span>
+                          <Input type="date" value={payPeriodTo} min={payPeriodFrom || undefined} onChange={(e) => setPayPeriodTo(e.target.value)} />
+                        </label>
+                        <Badge tone="primary" className="font-bold">
+                          {payTimings.length} séance(s) impayée(s) sur la période
+                        </Badge>
+                        {hiddenBefore > 0 && (
+                          <span className="text-[11px] text-warning">
+                            ⚠ {hiddenBefore} séance(s) impayée(s) antérieure(s) au {formatDateFr(payPeriodFrom)} restent dues.
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {payTimings.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-success/40 bg-success/5 py-12 text-center">

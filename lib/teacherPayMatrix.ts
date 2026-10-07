@@ -135,6 +135,8 @@ export interface MatrixCell {
   /** part due au titre des séances libres à pourcentage dédié de ce jour-là */
   freeShare: number;
   freeCount: number;
+  /** élèves gratuits présents (non rémunérés) */
+  freeStudents: number;
   /** ce que l'école a encaissé sur la séance */
   gross: number;
   startTime: string;
@@ -164,6 +166,7 @@ export interface MatrixRow {
   totalShare: number;
   freeShare: number;
   freeCount: number;
+  freeStudents: number;
   gross: number;
   /** ce que la ligne rapporte à l'enseignant, séances libres comprises */
   amount: number;
@@ -177,6 +180,7 @@ export interface PayMatrix {
   totalShare: number;
   freeShare: number;
   freeCount: number;
+  freeStudents: number;
   gross: number;
   amount: number;
   seances: number;
@@ -226,6 +230,7 @@ export function buildPayMatrix(details: TeacherPaymentDetail[]): PayMatrix {
         totalShare: 0,
         freeShare: 0,
         freeCount: 0,
+        freeStudents: 0,
         gross: 0,
         amount: 0,
       };
@@ -251,6 +256,7 @@ export function buildPayMatrix(details: TeacherPaymentDetail[]): PayMatrix {
       share: 0,
       freeShare: 0,
       freeCount: 0,
+      freeStudents: 0,
       gross: 0,
       startTime: d.startTime ?? "",
       endTime: d.endTime ?? "",
@@ -259,6 +265,7 @@ export function buildPayMatrix(details: TeacherPaymentDetail[]): PayMatrix {
     cell.share += num(d.share);
     cell.freeShare += num(d.freeShare);
     cell.freeCount += num(d.freeCount);
+    cell.freeStudents += num(d.freeStudents);
     cell.gross += num(d.gross);
     if (!cell.startTime) cell.startTime = d.startTime ?? "";
     if (!cell.endTime) cell.endTime = d.endTime ?? "";
@@ -276,6 +283,7 @@ export function buildPayMatrix(details: TeacherPaymentDetail[]): PayMatrix {
       row.totalShare += cell.share;
       row.freeShare += cell.freeShare;
       row.freeCount += cell.freeCount;
+      row.freeStudents += cell.freeStudents;
       row.gross += cell.gross;
     }
     row.totalShare = roundCents(row.totalShare);
@@ -301,11 +309,12 @@ export function buildPayMatrix(details: TeacherPaymentDetail[]): PayMatrix {
       totalShare: acc.totalShare + r.totalShare,
       freeShare: acc.freeShare + r.freeShare,
       freeCount: acc.freeCount + r.freeCount,
+      freeStudents: acc.freeStudents + r.freeStudents,
       gross: acc.gross + r.gross,
       amount: acc.amount + r.amount,
       seances: acc.seances + r.seances,
     }),
-    { totalStudents: 0, totalShare: 0, freeShare: 0, freeCount: 0, gross: 0, amount: 0, seances: 0 },
+    { totalStudents: 0, totalShare: 0, freeShare: 0, freeCount: 0, freeStudents: 0, gross: 0, amount: 0, seances: 0 },
   );
 
   return {

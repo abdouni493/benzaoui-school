@@ -177,6 +177,13 @@ export interface TeacherPaymentDetail {
    *  avait payé le tarif du cours, et ne retombait plus sur le montant.
    *  Absent des règlements écrits avant. */
   prices?: PriceCount[];
+  /** Élèves GRATUITS présents sur cette séance — rien ne leur est dû, mais le
+   *  bon les compte pour que l'effectif de la salle s'explique. */
+  freeStudents?: number;
+  /** Période choisie au règlement (filtre « par période ») — portée par
+   *  chaque ligne pour que l'historique et la réimpression la retrouvent. */
+  periodFrom?: string;
+  periodTo?: string;
 }
 
 /** « 179 présences à 625 DA ». */
