@@ -1097,6 +1097,9 @@ interface DataActions {
    *  server-side). Returns how many weekly charges were written. */
   processWeeklyAbsences: () => Promise<{ ok: boolean; charged?: number; students?: number }>;
   settleTeacherPercentage: (teacherId: string) => Promise<TeacherSettlement>;
+  /** Réécrit le montant figé de présences non réglées (part enseignant
+   *  recalculée à l'écran) avant que le serveur ne les additionne. */
+  syncTeacherDues: (rows: { id: string; amount: number }[]) => Promise<boolean>;
 
   /** Worker badge: 1st swipe of the day = clock-in, 2nd = clock-out. */
   scanWorkerCard: (code: string) => Promise<WorkerScanResult>;
@@ -2215,6 +2218,23 @@ export const useData = create<DataStore>((set, get) => ({
     const res = data as { ok: boolean; charged?: number; students?: number };
     if (res.ok && (res.charged ?? 0) > 0) await get().refresh();
     return res;
+  },
+
+  syncTeacherDues: async (rows) => {
+    if (rows.length === 0) return true;
+    const supabase = createClient();
+    const results = await Promise.all(
+      rows.map((r) =>
+        supabase
+          .from("unpaid_teacher_sessions")
+          .update({ amount: r.amount })
+          .eq("id", r.id)
+          .eq("paid", false),
+      ),
+    );
+    const failed = results.find((r) => r.error);
+    if (failed) console.error("syncTeacherDues failed:", failed.error?.message);
+    return !failed;
   },
 
   settleTeacherPercentage: async (teacherId) => {

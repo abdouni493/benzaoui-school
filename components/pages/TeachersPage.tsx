@@ -175,6 +175,7 @@ export function TeachersPage() {
     deleteFrom,
     updateItem,
     settleTeacherPercentage,
+    syncTeacherDues,
     payTeacherSessions,
     deleteUnpaidTeacherSessions,
     updateTeacherPayment,
@@ -202,6 +203,7 @@ export function TeachersPage() {
       deleteFrom: s.deleteFrom,
       updateItem: s.updateItem,
       settleTeacherPercentage: s.settleTeacherPercentage,
+      syncTeacherDues: s.syncTeacherDues,
       payTeacherSessions: s.payTeacherSessions,
       deleteUnpaidTeacherSessions: s.deleteUnpaidTeacherSessions,
       updateTeacherPayment: s.updateTeacherPayment,
@@ -1715,6 +1717,17 @@ export function TeachersPage() {
       // Atomic settlement server-side (settle_teacher_percentage RPC): marks
       // every unpaid séance as paid, consumes acomptes/absences and writes
       // the cash movement in a single transaction.
+      // Le serveur additionne les montants FIGÉS au scan, calculés sur le prix
+      // remisé. La réduction d'un élève est un geste de l'école : on réécrit
+      // d'abord chaque part due au prix normal, celle qu'affiche l'écran.
+      const fixes = unpaidTeacher
+        .filter((u) => u.teacherId === selectedTeacher.id && !u.paid)
+        .map((u) => ({ id: u.id, amount: Math.round(dueShare(u)) }))
+        .filter((r) => r.amount !== unpaidTeacher.find((u) => u.id === r.id)?.amount);
+      if (!(await syncTeacherDues(fixes))) {
+        alert("Le paiement a échoué — veuillez réessayer.");
+        return;
+      }
       const res = await settleTeacherPercentage(selectedTeacher.id);
       if (!res.ok) {
         alert(
