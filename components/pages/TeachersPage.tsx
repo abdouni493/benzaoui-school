@@ -428,6 +428,7 @@ export function TeachersPage() {
     const pctByTeacher = new Map(teachers.map((t) => [t.id, t.percentage ?? 0]));
     const feeById = new Map<string, number>();
     const shareById = new Map<string, number>();
+    const baseById = new Map<string, number>();
     unpaidTeacher.forEach((u) => {
       if (u.paid) return;
       const dateKey = schoolDateKey(u.date);
@@ -443,20 +444,27 @@ export function TeachersPage() {
       const stu = stuById.get(u.studentId);
       const sess = sessById.get(u.sessionId);
       let fee: number;
+      // Base de la part enseignant : le prix SANS la réduction de l'élève. La
+      // réduction est un geste de l'école — elle seule encaisse moins.
+      let base: number;
       if (!stu || !sess) {
         fee = Math.max(0, Math.round(frozen || 0));
+        base = fee;
       } else if (stu.isFree) {
         // Le badge ne débite rien à un élève gratuit, et la base n'écrit pour
         // lui qu'une part de 0 DA : l'écran ne doit pas en inventer une.
         fee = 0;
+        base = 0;
       } else {
         fee = seancePriceFor(stu, sess, subscriptions, sessions, dateKey);
+        base = seancePriceFor(stu, sess, subscriptions, sessions, dateKey, false);
       }
       feeById.set(u.id, fee);
+      baseById.set(u.id, base);
       // Part EXACTE (437,5 DA à 70 % de 625) : seul le versement est arrondi.
-      shareById.set(u.id, teacherShareOf([{ fee, billable: true }], pctByTeacher.get(u.teacherId) ?? 0));
+      shareById.set(u.id, teacherShareOf([{ fee, base, billable: true }], pctByTeacher.get(u.teacherId) ?? 0));
     });
-    return { feeById, shareById };
+    return { feeById, shareById, baseById };
   }, [unpaidTeacher, attendanceByKey, subscriptions, sessions, students, teachers]);
 
   /** Tarif élève d'une présence encore due, au prix courant (montant figé en
@@ -777,6 +785,7 @@ export function TeachersPage() {
           time: new Date(att?.timestamp ?? u.date).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
           status: att?.status === "late" ? "En Retard" : "Présent",
           fee: dueFee(u, att?.amountDeducted ?? 0),
+          base: liveDues.baseById.get(u.id),
           share: dueShare(u),
           isPassager: false,
           billable: true,
@@ -847,6 +856,7 @@ export function TeachersPage() {
             subscriptions,
             sessions,
             ind.date,
+            false,
           ),
           ind.price,
         );

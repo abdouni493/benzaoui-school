@@ -325,10 +325,14 @@ export function seancePriceFor(
   subscriptions: Pick<Subscription, "id" | "sessionId" | "pricePerSession">[],
   sessions: Pick<ScheduleSession, "id" | "moduleId" | "classId">[],
   date: string,
+  /** `false` : le prix SANS la réduction de l'élève — la base de la part de
+   *  l'enseignant, que la réduction (geste de l'école) ne touche pas. */
+  withDiscount = true,
 ): number {
   if (!session) return 0;
   const enrolled = new Set(student?.subscriptionIds ?? []);
-  const discountOf = (subId: string) => student?.subscriptionDiscounts?.[subId];
+  const discountOf = (subId: string) =>
+    withDiscount ? student?.subscriptionDiscounts?.[subId] : undefined;
 
   if (student) {
     const own = subscriptions.find((su) => su.sessionId === session.id && enrolled.has(su.id));
