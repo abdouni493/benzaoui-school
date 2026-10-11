@@ -337,7 +337,7 @@ function OverlayButton({
   return (
     <button
       onClick={onClick}
-      className={`flex items-center justify-center gap-1.5 rounded-xl bg-white/10 py-2 hover:bg-white/20 ${className}`}
+      className={`flex min-w-0 items-center justify-center gap-1.5 truncate rounded-lg bg-white/10 px-2 py-1.5 text-[11px] font-semibold transition-colors hover:bg-white/20 ${className}`}
     >
       {icon} {children}
     </button>

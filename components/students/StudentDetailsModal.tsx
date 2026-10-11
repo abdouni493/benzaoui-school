@@ -9,6 +9,7 @@ import {
   CreditCard,
   DollarSign,
   Edit,
+  FileBarChart,
   History,
   Phone,
   Repeat,
@@ -21,6 +22,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
+import { StudentReportPanel } from "@/components/students/StudentReportPanel";
 import {
   allocateDebtPayment,
   daysUntil,
@@ -66,7 +68,7 @@ export const TX_TYPE_LABELS: Record<BalanceTxType, string> = {
   registration: "Frais d'inscription",
 };
 
-export type StudentDetailsTab = "personal" | "subs" | "payments" | "attendance";
+export type StudentDetailsTab = "personal" | "subs" | "payments" | "attendance" | "report";
 
 /** L'historique affiché est la chaîne stockée ; la case d'édition travaille
  *  sur la même chaîne (ce que la ligne montre est ce qu'on modifie). */
@@ -438,8 +440,8 @@ function StudentDetailsBody({
   };
 
   const tabClass = (tab: StudentDetailsTab) =>
-    `pb-2.5 px-4 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 whitespace-nowrap ${
-      detailsTab === tab ? "border-primary text-primary" : "border-transparent text-muted hover:text-ink"
+    `flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold transition-colors ${
+      detailsTab === tab ? "bg-primary text-white shadow-sm" : "text-muted hover:bg-surface hover:text-ink"
     }`;
 
   return (
@@ -532,7 +534,7 @@ function StudentDetailsBody({
       )}
 
       {/* Navigation Tabs inside details modal */}
-      <div className="flex gap-2 overflow-x-auto border-b border-line">
+      <div className="flex gap-1 overflow-x-auto rounded-xl border border-line bg-canvas/60 p-1">
         <button onClick={() => setDetailsTab("personal")} className={tabClass("personal")}>
           <User className="h-4 w-4" /> Personnel
         </button>
@@ -544,6 +546,9 @@ function StudentDetailsBody({
         </button>
         <button onClick={() => setDetailsTab("attendance")} className={tabClass("attendance")}>
           <CheckCircle className="h-4 w-4" /> Présences &amp; Absences ({myAtt.length + myPen.length})
+        </button>
+        <button onClick={() => setDetailsTab("report")} className={tabClass("report")}>
+          <FileBarChart className="h-4 w-4" /> Rapport
         </button>
       </div>
 
@@ -572,6 +577,10 @@ function StudentDetailsBody({
               <Field label="Inscrit le" value={formatDateFr(student.createdAt.slice(0, 10))} />
             )}
           </div>
+        )}
+
+        {detailsTab === "report" && (
+          <StudentReportPanel student={student} moduleOptions={moduleOptions} debtTotal={debt.total} />
         )}
 
         {detailsTab === "subs" && (
