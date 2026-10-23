@@ -3264,24 +3264,6 @@ export function StudentsPage({ focusStudentId }: { focusStudentId?: string } = {
 
   const parentById = useMemo(() => new Map(parents.map((p) => [p.id, p])), [parents]);
 
-  // Formations expirées ou sur le point de l'être — calculé quand les élèves
-  // changent, pas à chaque frappe.
-  const expiryAlerts = useMemo(
-    () =>
-      students
-        .flatMap((stu) =>
-          stu.subscriptionIds.flatMap((subId) => {
-            const dates = stu.subscriptionDates?.[subId];
-            if (!dates?.expiryDate) return [];
-            const daysLeft = daysUntil(dates.expiryDate);
-            if (daysLeft > EXPIRY_WARNING_DAYS) return [];
-            return [{ stu, subId, label: getModuleLabel(subId), expiryDate: dates.expiryDate, daysLeft }];
-          }),
-        )
-        .sort((a, b) => a.daysLeft - b.daysLeft),
-    [students, getModuleLabel],
-  );
-
   return (
     <div>
       {!focusStudentId && (
@@ -3340,51 +3322,6 @@ export function StudentsPage({ focusStudentId }: { focusStudentId?: string } = {
         }}
       />
 
-      {/* Formations expirées ou sur le point de l'être : repliées en une ligne,
-          ouvertes d'office dès qu'une formation a DÉJÀ expiré. */}
-      {expiryAlerts.length > 0 && (
-        <details
-          open={expiryAlerts.some((a) => a.daysLeft < 0)}
-          className="group mb-6 overflow-hidden rounded-2xl border border-amber-500/30 bg-amber-500/5"
-        >
-          <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3">
-            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-300">
-              <AlertTriangle className="h-4 w-4" />
-            </span>
-            <span className="min-w-0 flex-1">
-              <strong className="block text-sm text-ink">
-                {expiryAlerts.length} formation(s) expirée(s) ou bientôt expirée(s)
-              </strong>
-              <span className="block text-[11px] text-muted">
-                Expirées, ou qui expirent dans les {EXPIRY_WARNING_DAYS} prochains jours — cliquez pour le détail.
-              </span>
-            </span>
-            <span className="text-xs font-semibold text-muted transition-transform group-open:rotate-180">▾</span>
-          </summary>
-          <div className="grid grid-cols-1 gap-1.5 border-t border-amber-500/20 p-3 md:grid-cols-2">
-            {expiryAlerts.map((a) => (
-              <div
-                key={`${a.stu.id}-${a.subId}`}
-                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs"
-              >
-                <span className="min-w-0">
-                  <strong className="capitalize text-ink">
-                    {a.stu.firstName} {a.stu.lastName}
-                  </strong>
-                  <span className="text-muted"> — {a.label}</span>
-                </span>
-                <Badge tone={a.daysLeft < 0 ? "danger" : "warning"} className="text-[10px]">
-                  {a.daysLeft < 0
-                    ? `Expirée le ${formatDateFr(a.expiryDate)}`
-                    : a.daysLeft === 0
-                      ? "Expire aujourd'hui"
-                      : `Expire dans ${a.daysLeft} j (${formatDateFr(a.expiryDate)})`}
-                </Badge>
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
 
       </>
       )}
