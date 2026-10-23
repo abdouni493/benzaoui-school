@@ -15,6 +15,7 @@ import {
   Repeat,
   Trash2,
   User,
+  Wrench,
 } from "lucide-react";
 import { useData } from "@/lib/store/data";
 import { useToast } from "@/lib/store/toast";
@@ -23,6 +24,15 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { StudentReportPanel } from "@/components/students/StudentReportPanel";
+import { StudentRepairModal } from "@/components/students/StudentRepairModal";
+import {
+  DeleteAttendanceDialog,
+  DeletePenaltyDialog,
+  DeleteTxDialog,
+  EditAttendanceDialog,
+  EditTxDialog,
+  TX_TYPE_LABELS,
+} from "@/components/students/LedgerDialogs";
 import {
   allocateDebtPayment,
   daysUntil,
@@ -32,18 +42,11 @@ import {
   freeReasonOf,
   FREE_REASON_HINTS,
   FREE_REASON_LABELS,
+  schoolDateTimeLabel,
   studentDebtOf,
   type StudentDebt,
 } from "@/lib/helpers";
-import type {
-  AbsencePenalty,
-  AttendanceRecord,
-  AttendanceStatus,
-  BalanceTransaction,
-  BalanceTxType,
-  Student,
-  Subscription,
-} from "@/lib/types";
+import type { AbsencePenalty, AttendanceRecord, BalanceTransaction, Student, Subscription } from "@/lib/types";
 
 /**
  * LA FICHE ÉTUDIANT, partagée.
@@ -61,20 +64,9 @@ import type {
  */
 
 /** Libellés des types de ligne du solde (onglet « Transactions »). */
-export const TX_TYPE_LABELS: Record<BalanceTxType, string> = {
-  topup: "Versement / Recharge",
-  deduction: "Débit (séance, absence…)",
-  debt_payment: "Règlement de dette",
-  registration: "Frais d'inscription",
-};
+export { TX_TYPE_LABELS };
 
 export type StudentDetailsTab = "personal" | "subs" | "payments" | "attendance" | "report";
-
-/** L'historique affiché est la chaîne stockée ; la case d'édition travaille
- *  sur la même chaîne (ce que la ligne montre est ce qu'on modifie). */
-const txDateToInput = (iso: string) => iso.substring(0, 16);
-const txInputToIso = (value: string) =>
-  value.length === 16 ? `${value}:00.000Z` : new Date(value).toISOString();
 
 /** La dette d'UN élève, écart solde ↔ historique compris (0 si l'historique
  *  n'est pas complet : on ne signale rien sur une table amputée). */
@@ -143,11 +135,6 @@ function StudentDetailsBody({
     parents,
     filieres,
     updateItem,
-    updateBalanceTx,
-    deleteBalanceTx,
-    cancelAttendance,
-    updateAttendance,
-    deleteAbsencePenalty,
   } = useData(
     useShallow((s) => ({
       students: s.students,
@@ -164,14 +151,8 @@ function StudentDetailsBody({
       parents: s.parents,
       filieres: s.filieres,
       updateItem: s.updateItem,
-      updateBalanceTx: s.updateBalanceTx,
-      deleteBalanceTx: s.deleteBalanceTx,
-      cancelAttendance: s.cancelAttendance,
-      updateAttendance: s.updateAttendance,
-      deleteAbsencePenalty: s.deleteAbsencePenalty,
     })),
   );
-  const addToast = useToast((s) => s.addToast);
 
   const student = students.find((s) => s.id === studentId);
   const debt = useStudentDebt(student);
@@ -209,26 +190,16 @@ function StudentDetailsBody({
   const [attEnd, setAttEnd] = useState("");
   const [attKindFilter, setAttKindFilter] = useState<"all" | "present" | "absent">("all");
 
-  // ---- Corriger une présence / retirer une absence facturée --------------------
+  // ---- Corriger une ligne : transaction, présence, absence facturée ------------
+  // (les fenêtres sont celles de « Régulariser », partagées)
+  const [editingTx, setEditingTx] = useState<BalanceTransaction | null>(null);
+  const [deletingTx, setDeletingTx] = useState<BalanceTransaction | null>(null);
   const [editingAtt, setEditingAtt] = useState<AttendanceRecord | null>(null);
   const [deletingAtt, setDeletingAtt] = useState<AttendanceRecord | null>(null);
   const [deletingPen, setDeletingPen] = useState<AbsencePenalty | null>(null);
-  const [attEditStatus, setAttEditStatus] = useState<AttendanceStatus>("present");
-  const [attEditDate, setAttEditDate] = useState("");
-  const [attEditAmount, setAttEditAmount] = useState<number>(0);
-  const [attBusy, setAttBusy] = useState(false);
-
-  // ---- Corriger une ligne de l'historique du solde -----------------------------
-  const [editingTx, setEditingTx] = useState<BalanceTransaction | null>(null);
-  const [deletingTx, setDeletingTx] = useState<BalanceTransaction | null>(null);
-  const [txAmount, setTxAmount] = useState<number>(0);
-  const [txDescription, setTxDescription] = useState("");
-  const [txDate, setTxDate] = useState("");
-  const [txType, setTxType] = useState<BalanceTxType>("topup");
-  const [txAdjustCash, setTxAdjustCash] = useState(true);
-  const [txBusy, setTxBusy] = useState(false);
 
   const [payDebtOpen, setPayDebtOpen] = useState(false);
+  const [repairOpen, setRepairOpen] = useState(false);
 
   if (!student || !debt) {
     return (
@@ -290,155 +261,6 @@ function StudentDetailsBody({
     .filter((t) => t.type === "topup" || t.type === "debt_payment")
     .reduce((sum, t) => sum + Math.max(0, t.amount), 0);
 
-  // ---- Transactions --------------------------------------------------------------
-  const openEditTx = (tx: BalanceTransaction) => {
-    setEditingTx(tx);
-    setTxAmount(tx.amount);
-    setTxDescription(tx.description);
-    setTxDate(txDateToInput(tx.date));
-    setTxType(tx.type);
-    setTxAdjustCash(true);
-  };
-
-  const openDeleteTx = (tx: BalanceTransaction) => {
-    setDeletingTx(tx);
-    setTxAdjustCash(true);
-  };
-
-  const closeTxModals = () => {
-    setEditingTx(null);
-    setDeletingTx(null);
-    setTxBusy(false);
-  };
-
-  const handleUpdateTx = async () => {
-    if (!editingTx || !txDate) return;
-    setTxBusy(true);
-    const res = await updateBalanceTx(editingTx.id, {
-      amount: Math.round(txAmount),
-      description: txDescription,
-      date: txInputToIso(txDate),
-      type: txType,
-      adjustCash: txAdjustCash,
-    });
-    setTxBusy(false);
-    if (!res.ok) {
-      addToast({
-        type: "danger",
-        title: "Modification impossible",
-        message: res.error ?? "La transaction n'a pas pu être modifiée.",
-      });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Transaction modifiée",
-      message: `Nouveau solde: ${res.newBalance} DA${res.cashAdjusted ? " — caisse corrigée." : ""}`,
-    });
-    closeTxModals();
-  };
-
-  const handleDeleteTx = async () => {
-    if (!deletingTx) return;
-    setTxBusy(true);
-    const res = await deleteBalanceTx(deletingTx.id, txAdjustCash);
-    setTxBusy(false);
-    if (!res.ok) {
-      addToast({
-        type: "danger",
-        title: "Suppression impossible",
-        message: res.error ?? "La transaction n'a pas pu être supprimée.",
-      });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Transaction supprimée",
-      message: `Nouveau solde: ${res.newBalance} DA${res.cashAdjusted ? " — caisse corrigée." : ""}`,
-    });
-    closeTxModals();
-  };
-
-  // ---- Présences -----------------------------------------------------------------
-  // A presence carries money (it debited the séance), so editing/removing one
-  // has to move the balance back by the same amount — both live in a
-  // server-side RPC (update_attendance / cancel_attendance) for that reason.
-  const openEditAtt = (att: AttendanceRecord) => {
-    setEditingAtt(att);
-    setAttEditStatus(att.status);
-    setAttEditDate(att.timestamp.substring(0, 16));
-    setAttEditAmount(att.amountDeducted);
-  };
-
-  const closeAttModals = () => {
-    setEditingAtt(null);
-    setDeletingAtt(null);
-    setDeletingPen(null);
-    setAttBusy(false);
-  };
-
-  const handleUpdateAtt = async () => {
-    if (!editingAtt || !attEditDate) return;
-    setAttBusy(true);
-    const res = await updateAttendance(editingAtt.id, {
-      status: attEditStatus,
-      occurredAt: txInputToIso(attEditDate),
-      amount: Math.max(0, Math.round(attEditAmount || 0)),
-    });
-    setAttBusy(false);
-    if (!res.ok) {
-      addToast({
-        type: "danger",
-        title: "Modification impossible",
-        message:
-          res.messageKey === "attendance.duplicateDay"
-            ? "Une présence existe déjà pour cet élève sur ce créneau à cette date."
-            : "La présence n'a pas pu être modifiée.",
-      });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Présence modifiée",
-      message: `Montant: ${res.cost ?? 0} DA — nouveau solde: ${res.newBalance ?? 0} DA.`,
-    });
-    closeAttModals();
-  };
-
-  const handleDeleteAtt = async () => {
-    if (!deletingAtt) return;
-    setAttBusy(true);
-    const res = await cancelAttendance(deletingAtt.id);
-    setAttBusy(false);
-    if (!res.ok) {
-      addToast({ type: "danger", title: "Suppression impossible", message: "La présence n'a pas pu être supprimée." });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Présence supprimée",
-      message: `${res.refunded ? `${res.refunded} DA remboursés — ` : ""}nouveau solde: ${res.newBalance ?? 0} DA.`,
-    });
-    closeAttModals();
-  };
-
-  const handleDeletePenalty = async () => {
-    if (!deletingPen) return;
-    setAttBusy(true);
-    const res = await deleteAbsencePenalty(deletingPen.id);
-    setAttBusy(false);
-    if (!res.ok) {
-      addToast({ type: "danger", title: "Suppression impossible", message: "L'absence n'a pas pu être supprimée." });
-      return;
-    }
-    addToast({
-      type: "success",
-      title: "Absence supprimée",
-      message: `${res.refunded ?? 0} DA remboursés — nouveau solde: ${res.newBalance ?? 0} DA.`,
-    });
-    closeAttModals();
-  };
-
   const tabClass = (tab: StudentDetailsTab) =>
     `flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold transition-colors ${
       detailsTab === tab ? "bg-primary text-white shadow-sm" : "text-muted hover:bg-surface hover:text-ink"
@@ -468,12 +290,17 @@ function StudentDetailsBody({
               </span>
             </div>
           </div>
-          <Badge
-            tone={debt.alert ? "danger" : student.isFree ? "success" : "primary"}
-            className="px-3 py-1 text-sm"
-          >
-            {student.isFree ? "Études gratuites" : `${student.balance} DA`}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge
+              tone={debt.alert ? "danger" : student.isFree ? "success" : "primary"}
+              className="px-3 py-1 text-sm"
+            >
+              {student.isFree ? "Études gratuites" : `${student.balance} DA`}
+            </Badge>
+            <Button size="sm" variant="secondary" onClick={() => setRepairOpen(true)}>
+              <Wrench className="h-3.5 w-3.5" /> Régulariser
+            </Button>
+          </div>
         </div>
 
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
@@ -517,19 +344,23 @@ function StudentDetailsBody({
           chose. Une dette s'encaisse au guichet ; un solde qui s'écarte de son
           propre historique se répare en base. */}
       {debt.drift !== 0 && (
-        <div className="flex items-start gap-2 rounded-xl border border-warning/50 bg-warning/10 p-3">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-          <div>
-            <strong className="block text-xs font-bold text-warning">
-              SOLDE À VÉRIFIER : {Math.abs(debt.drift)} DA d&apos;écart avec l&apos;historique
-            </strong>
-            <span className="text-[10px] text-warning/90">
-              Le solde affiché ({student.balance} DA) ne vaut pas la somme des lignes de l&apos;onglet
-              Transactions ({student.balance - debt.drift} DA). Ce n&apos;est pas un montant à encaisser :
-              c&apos;est une écriture qui a manqué sa cible. À corriger en base avec{" "}
-              <code className="font-mono">reconcile_student_balances(true)</code>.
-            </span>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warning/50 bg-warning/10 p-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+            <div>
+              <strong className="block text-xs font-bold text-warning">
+                SOLDE À VÉRIFIER : {Math.abs(debt.drift)} DA d&apos;écart avec l&apos;historique
+              </strong>
+              <span className="text-[10px] text-warning/90">
+                Le solde affiché ({student.balance} DA) ne vaut pas la somme des lignes de l&apos;onglet
+                Transactions ({student.balance - debt.drift} DA). Ce n&apos;est pas un montant à encaisser :
+                c&apos;est une écriture qui a manqué sa cible — « Régulariser » l&apos;aligne sur l&apos;historique.
+              </span>
+            </div>
           </div>
+          <Button size="sm" variant="outline" onClick={() => setRepairOpen(true)}>
+            <Wrench className="h-3.5 w-3.5" /> Corriger
+          </Button>
         </div>
       )}
 
@@ -708,7 +539,7 @@ function StudentDetailsBody({
                               {tx.description}
                             </strong>
                             <span className="text-[10px] text-muted">
-                              {tx.date.substring(0, 16).replace("T", " ")} · {TX_TYPE_LABELS[tx.type]}
+                              {schoolDateTimeLabel(tx.date)} · {TX_TYPE_LABELS[tx.type]}
                             </span>
                           </div>
                           <div className="flex shrink-0 items-center gap-1.5">
@@ -717,14 +548,14 @@ function StudentDetailsBody({
                             </strong>
                             {/* Correction manuelle d'une ligne (montant saisi de travers, doublon…) */}
                             <button
-                              onClick={() => openEditTx(tx)}
+                              onClick={() => setEditingTx(tx)}
                               title="Modifier cette transaction"
                               className="rounded-lg p-1.5 text-muted transition-colors hover:bg-primary-50 hover:text-primary"
                             >
                               <Edit className="h-3.5 w-3.5" />
                             </button>
                             <button
-                              onClick={() => openDeleteTx(tx)}
+                              onClick={() => setDeletingTx(tx)}
                               title="Supprimer cette transaction"
                               className="rounded-lg p-1.5 text-muted transition-colors hover:bg-danger/10 hover:text-danger"
                             >
@@ -907,7 +738,7 @@ function StudentDetailsBody({
                                 )}
                               </strong>
                               <span className="text-[10px] text-muted">
-                                {att.timestamp.substring(0, 16).replace("T", " ")}
+                                {schoolDateTimeLabel(att.timestamp)}
                                 {s ? ` · ${s.startTime}-${s.endTime}` : ""}
                                 {salleName ? ` · Salle ${salleName}` : ""}
                               </span>
@@ -928,7 +759,7 @@ function StudentDetailsBody({
                                 </span>
                               )}
                               <button
-                                onClick={() => openEditAtt(att)}
+                                onClick={() => setEditingAtt(att)}
                                 title="Modifier cette présence"
                                 className="rounded-lg p-1.5 text-muted transition-colors hover:bg-primary-50 hover:text-primary"
                               >
@@ -992,320 +823,13 @@ function StudentDetailsBody({
         <Button onClick={onClose}>Fermer</Button>
       </div>
 
-      {/* Edit one line of the balance history — the RPC moves students.balance
-          by the same delta, so history and balance can never drift apart. */}
-      <Modal open={!!editingTx} onClose={closeTxModals} title="Modifier la transaction">
-        {editingTx &&
-          (() => {
-            const previewBalance = student.balance - editingTx.amount + Math.round(txAmount || 0);
-            const delta = Math.round(txAmount || 0) - editingTx.amount;
-            return (
-              <div className="space-y-4">
-                <div className="space-y-0.5 rounded-xl border border-line bg-canvas p-3 text-xs">
-                  <strong className="block text-ink">
-                    {student.firstName} {student.lastName}
-                  </strong>
-                  <span className="block text-muted">
-                    Ligne d&apos;origine : {editingTx.amount > 0 ? `+${editingTx.amount}` : editingTx.amount} DA ·{" "}
-                    {editingTx.date.substring(0, 16).replace("T", " ")}
-                  </span>
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-muted">Type</label>
-                  <Select value={txType} onChange={(e) => setTxType(e.target.value as BalanceTxType)} className="w-full">
-                    {(Object.keys(TX_TYPE_LABELS) as BalanceTxType[]).map((t) => (
-                      <option key={t} value={t}>
-                        {TX_TYPE_LABELS[t]}
-                      </option>
-                    ))}
-                  </Select>
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-muted">Montant (DA)</label>
-                  <Input type="number" value={txAmount} onChange={(e) => setTxAmount(Number(e.target.value))} />
-                  <p className="mt-1 text-[10px] text-muted">
-                    Montant signé : <strong>positif</strong> pour un versement/crédit, <strong>négatif</strong> pour un
-                    débit.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-muted">Description</label>
-                  <Input value={txDescription} onChange={(e) => setTxDescription(e.target.value)} />
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-muted">Date</label>
-                  <Input type="datetime-local" value={txDate} onChange={(e) => setTxDate(e.target.value)} />
-                </div>
-
-                {editingTx.type === "topup" && (
-                  <label className="flex cursor-pointer items-center justify-between rounded-xl border border-line bg-canvas p-3">
-                    <span className="text-xs font-bold text-ink">
-                      Corriger aussi la caisse
-                      <span className="block text-[10px] font-normal text-muted">
-                        Écrit une écriture de correction de {delta > 0 ? `+${delta}` : delta} DA dans la caisse (le
-                        versement d&apos;origine y avait été enregistré).
-                      </span>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={txAdjustCash}
-                      onChange={(e) => setTxAdjustCash(e.target.checked)}
-                      className="h-5 w-5 shrink-0"
-                    />
-                  </label>
-                )}
-
-                <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                  <span className="font-semibold text-muted">Solde après correction</span>
-                  <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <Button variant="outline" onClick={closeTxModals} disabled={txBusy}>
-                    Annuler
-                  </Button>
-                  <Button onClick={handleUpdateTx} disabled={txBusy || !txDate}>
-                    {txBusy ? "Enregistrement…" : "Enregistrer"}
-                  </Button>
-                </div>
-              </div>
-            );
-          })()}
-      </Modal>
-
-      {/* Delete one line of the balance history */}
-      <Modal open={!!deletingTx} onClose={closeTxModals} title="Supprimer la transaction">
-        {deletingTx &&
-          (() => {
-            const previewBalance = student.balance - deletingTx.amount;
-            return (
-              <div className="space-y-4">
-                <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
-                  <p className="text-xs leading-relaxed text-ink">
-                    Cette transaction sera définitivement supprimée et son effet sur le solde annulé.
-                    {deletingTx.type === "deduction" && (
-                      <span className="mt-1 block text-muted">
-                        La présence liée (onglet « Présences ») n&apos;est pas supprimée pour autant.
-                      </span>
-                    )}
-                  </p>
-                </div>
-
-                <div className="space-y-0.5 rounded-xl border border-line bg-canvas p-3 text-xs">
-                  <strong className="block text-ink">{deletingTx.description}</strong>
-                  <span className="block text-muted">
-                    {student.firstName} {student.lastName} · {deletingTx.date.substring(0, 16).replace("T", " ")} ·{" "}
-                    {TX_TYPE_LABELS[deletingTx.type]}
-                  </span>
-                  <strong className={deletingTx.amount > 0 ? "text-success" : "text-danger"}>
-                    {deletingTx.amount > 0 ? `+${deletingTx.amount}` : deletingTx.amount} DA
-                  </strong>
-                </div>
-
-                {deletingTx.type === "topup" && (
-                  <label className="flex cursor-pointer items-center justify-between rounded-xl border border-line bg-canvas p-3">
-                    <span className="text-xs font-bold text-ink">
-                      Corriger aussi la caisse
-                      <span className="block text-[10px] font-normal text-muted">
-                        Écrit une écriture d&apos;annulation de {-deletingTx.amount} DA dans la caisse.
-                      </span>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={txAdjustCash}
-                      onChange={(e) => setTxAdjustCash(e.target.checked)}
-                      className="h-5 w-5 shrink-0"
-                    />
-                  </label>
-                )}
-
-                <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                  <span className="font-semibold text-muted">Solde après suppression</span>
-                  <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <Button variant="outline" onClick={closeTxModals} disabled={txBusy}>
-                    Annuler
-                  </Button>
-                  <Button variant="danger" onClick={handleDeleteTx} disabled={txBusy}>
-                    {txBusy ? "Suppression…" : "Supprimer"}
-                  </Button>
-                </div>
-              </div>
-            );
-          })()}
-      </Modal>
-
-      {/* Correct one presence — the RPC moves the balance by the same delta */}
-      <Modal open={!!editingAtt} onClose={closeAttModals} title="Modifier la présence">
-        {editingAtt &&
-          (() => {
-            const s = lookups.session.get(editingAtt.sessionId);
-            const modName = s ? lookups.module.get(s.moduleId)?.name ?? "Module" : "Module";
-            const grpName = s ? lookups.group.get(s.groupId)?.name ?? "-" : "-";
-            const delta = Math.max(0, Math.round(attEditAmount || 0)) - editingAtt.amountDeducted;
-            const previewBalance = student.balance - delta;
-            return (
-              <div className="space-y-4">
-                <div className="space-y-0.5 rounded-xl border border-line bg-canvas p-3 text-xs">
-                  <strong className="block text-ink">
-                    {modName} — {grpName}
-                    {editingAtt.substituteGroup && (
-                      <Badge tone="primary" className="ms-1.5 px-1.5 py-0 text-[9px]">
-                        Autre groupe
-                      </Badge>
-                    )}
-                  </strong>
-                  <span className="block text-muted">
-                    {student.firstName} {student.lastName}
-                    {s ? ` · ${formatDays(s.days)} · ${s.startTime}-${s.endTime}` : ""}
-                  </span>
-                  <span className="block text-muted">Débit d&apos;origine : {editingAtt.amountDeducted} DA</span>
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-muted">Statut</label>
-                  <Select
-                    value={attEditStatus}
-                    onChange={(e) => setAttEditStatus(e.target.value as AttendanceStatus)}
-                    className="w-full"
-                  >
-                    <option value="present">Présent</option>
-                    <option value="late">En retard</option>
-                    <option value="absent">Absent</option>
-                  </Select>
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-muted">Date et heure</label>
-                  <Input type="datetime-local" value={attEditDate} onChange={(e) => setAttEditDate(e.target.value)} />
-                </div>
-
-                <div>
-                  <label className="mb-1 block text-xs font-semibold text-muted">Montant débité (DA)</label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={attEditAmount}
-                    onChange={(e) => setAttEditAmount(Number(e.target.value))}
-                  />
-                  <p className="mt-1 text-[10px] text-muted">
-                    La différence est reportée sur le solde de l&apos;élève et tracée dans ses transactions. Mettez{" "}
-                    <strong>0</strong> pour une séance offerte.
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                  <span className="font-semibold text-muted">Solde après correction</span>
-                  <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>
-                    Annuler
-                  </Button>
-                  <Button onClick={handleUpdateAtt} disabled={attBusy || !attEditDate}>
-                    {attBusy ? "Enregistrement…" : "Enregistrer"}
-                  </Button>
-                </div>
-              </div>
-            );
-          })()}
-      </Modal>
-
-      {/* Delete one presence — refunds the séance and clears the teacher due */}
-      <Modal open={!!deletingAtt} onClose={closeAttModals} title="Supprimer la présence">
-        {deletingAtt &&
-          (() => {
-            const s = lookups.session.get(deletingAtt.sessionId);
-            const modName = s ? lookups.module.get(s.moduleId)?.name ?? "Module" : "Module";
-            const grpName = s ? lookups.group.get(s.groupId)?.name ?? "-" : "-";
-            const previewBalance = student.balance + deletingAtt.amountDeducted;
-            return (
-              <div className="space-y-4">
-                <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
-                  <p className="text-xs leading-relaxed text-ink">
-                    La présence sera supprimée, les {deletingAtt.amountDeducted} DA débités seront remboursés et la
-                    part due à l&apos;enseignant pour cette séance sera annulée.
-                  </p>
-                </div>
-
-                <div className="space-y-0.5 rounded-xl border border-line bg-canvas p-3 text-xs">
-                  <strong className="block text-ink">
-                    {modName} — {grpName}
-                  </strong>
-                  <span className="block text-muted">
-                    {student.firstName} {student.lastName} · {deletingAtt.timestamp.substring(0, 16).replace("T", " ")}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                  <span className="font-semibold text-muted">Solde après suppression</span>
-                  <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>
-                    Annuler
-                  </Button>
-                  <Button variant="danger" onClick={handleDeleteAtt} disabled={attBusy}>
-                    {attBusy ? "Suppression…" : "Supprimer"}
-                  </Button>
-                </div>
-              </div>
-            );
-          })()}
-      </Modal>
-
-      {/* Delete one automatic weekly-absence charge */}
-      <Modal open={!!deletingPen} onClose={closeAttModals} title="Supprimer l'absence facturée">
-        {deletingPen &&
-          (() => {
-            const modName = (deletingPen.moduleId && lookups.module.get(deletingPen.moduleId)?.name) || "Module";
-            const previewBalance = student.balance + deletingPen.amount;
-            const fmt = (d: string) => d.split("-").reverse().join("/");
-            return (
-              <div className="space-y-4">
-                <div className="flex items-start gap-2.5 rounded-xl border border-danger/30 bg-danger/5 p-3">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
-                  <p className="text-xs leading-relaxed text-ink">
-                    L&apos;absence hebdomadaire sera supprimée, les {deletingPen.amount} DA facturés seront remboursés et
-                    la ligne correspondante disparaîtra de l&apos;historique du solde.
-                  </p>
-                </div>
-
-                <div className="space-y-0.5 rounded-xl border border-line bg-canvas p-3 text-xs">
-                  <strong className="block text-ink">{modName}</strong>
-                  <span className="block text-muted">
-                    {student.firstName} {student.lastName} · Semaine du {fmt(deletingPen.periodStart)} au{" "}
-                    {fmt(deletingPen.periodEnd)}
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between rounded-xl border border-primary/25 bg-primary-50/40 p-3 text-xs">
-                  <span className="font-semibold text-muted">Solde après suppression</span>
-                  <strong className={previewBalance < 0 ? "text-danger" : "text-success"}>{previewBalance} DA</strong>
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2">
-                  <Button variant="outline" onClick={closeAttModals} disabled={attBusy}>
-                    Annuler
-                  </Button>
-                  <Button variant="danger" onClick={handleDeletePenalty} disabled={attBusy}>
-                    {attBusy ? "Suppression…" : "Supprimer"}
-                  </Button>
-                </div>
-              </div>
-            );
-          })()}
-      </Modal>
+      {/* Corrections d'une ligne : mêmes fenêtres que dans « Régulariser ». */}
+      <EditTxDialog tx={editingTx} student={student} onClose={() => setEditingTx(null)} />
+      <DeleteTxDialog tx={deletingTx} student={student} onClose={() => setDeletingTx(null)} />
+      <EditAttendanceDialog att={editingAtt} student={student} onClose={() => setEditingAtt(null)} />
+      <DeleteAttendanceDialog att={deletingAtt} student={student} onClose={() => setDeletingAtt(null)} />
+      <DeletePenaltyDialog pen={deletingPen} student={student} onClose={() => setDeletingPen(null)} />
+      <StudentRepairModal studentId={repairOpen ? student.id : null} open={repairOpen} onClose={() => setRepairOpen(false)} />
 
       <PayDebtModal studentId={payDebtOpen ? student.id : null} onClose={() => setPayDebtOpen(false)} />
     </div>
@@ -1432,7 +956,7 @@ function PayDebtBody({ studentId, onClose }: { studentId: string; onClose: () =>
               Solde à vérifier : {Math.abs(debt.drift)} DA d&apos;écart avec l&apos;historique.
             </strong>
             Le « Total dû » ci-dessus est calculé sur le solde stocké, qui ne correspond pas à la somme de ses
-            transactions. Faites corriger la base (<code className="font-mono">reconcile_student_balances</code>) avant
+            transactions. Alignez-le d&apos;abord (« Régulariser » sur la carte ou la fiche de l&apos;élève) avant
             d&apos;encaisser.
           </div>
         )}

@@ -719,7 +719,22 @@ export function PlannerPage() {
   };
 
   const handleDelete = (id: string) => {
-    if (confirm("Êtes-vous sûr de vouloir supprimer cet emploi du temps ?")) {
+    // Supprimer un créneau emporte ses présences et la part enseignant non
+    // réglée (cascade en base) — mais pas les paiements des élèves. C'est
+    // ainsi que la séance du 26/09 du groupe B a disparu des rapports alors
+    // que 14 élèves l'avaient payée. On le dit AVANT, chiffres à l'appui.
+    const { attendance, unpaidTeacher } = useData.getState();
+    const presences = attendance.filter((a) => a.sessionId === id).length;
+    const dues = unpaidTeacher.filter((u) => u.sessionId === id && !u.paid);
+    const duesTotal = dues.reduce((sum, u) => sum + u.amount, 0);
+    const warning =
+      presences > 0 || dues.length > 0
+        ? `\n\n⚠ ${presences} présence(s) enregistrée(s) sur ce créneau seront effacées` +
+          (dues.length > 0 ? `, ainsi que ${duesTotal} DA de part enseignant non réglée` : "") +
+          ". Les paiements des élèves restent, mais ces séances disparaîtront de leurs présences." +
+          "\nPour changer de jour, d'heure ou de groupe, MODIFIEZ plutôt l'emploi du temps."
+        : "";
+    if (confirm(`Êtes-vous sûr de vouloir supprimer cet emploi du temps ?${warning}`)) {
       // The auto-created subscription of a séance libre would otherwise be left
       // behind (Postgres cascades the row, but the local store must follow).
       subscriptions

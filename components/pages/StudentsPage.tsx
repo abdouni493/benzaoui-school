@@ -87,6 +87,7 @@ import {
   TX_TYPE_LABELS,
 } from "@/components/students/StudentDetailsModal";
 import { StudentCardGrid, type StudentCardActions } from "@/components/students/StudentCard";
+import { StudentRepairModal } from "@/components/students/StudentRepairModal";
 
 /** Domaine des identifiants du portail. Les comptes élèves ne servent qu'à se
  *  connecter à l'application : l'adresse est fabriquée, jamais une vraie boîte
@@ -173,6 +174,7 @@ export function StudentsPage() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [detailsStudentId, setDetailsStudentId] = useState<string | null>(null);
+  const [repairStudentId, setRepairStudentId] = useState<string | null>(null);
   const [isAssignOpen, setIsAssignOpen] = useState(false);
   const [isTopupOpen, setIsTopupOpen] = useState(false);
   const [payDebtStudentId, setPayDebtStudentId] = useState<string | null>(null);
@@ -335,6 +337,7 @@ export function StudentsPage() {
   /** Libellé « Module (classe - niveau - filière) » de chaque abonnement. */
   const moduleLabels = useMemo(() => {
     const labels = new Map<string, string>();
+    const groupById = new Map(groups.map((g) => [g.id, g.name]));
     for (const cw of coursework) labels.set(cw.id, `Stage: ${cw.name}`);
     for (const sub of subscriptions) {
       const s = lookups.session.get(sub.sessionId);
@@ -342,7 +345,9 @@ export function StudentsPage() {
         labels.set(sub.id, "Séance inconnue");
         continue;
       }
-      const mod = lookups.module.get(s.moduleId)?.name ?? "Module";
+      // Le groupe distingue deux inscriptions au même cours (groupes A et D).
+      const grp = s.groupId ? groupById.get(s.groupId) : undefined;
+      const mod = `${lookups.module.get(s.moduleId)?.name ?? "Module"}${grp ? ` · ${grp}` : ""}`;
       const cls = lookups.classe.get(s.classId);
       if (!cls) {
         labels.set(sub.id, mod);
@@ -364,7 +369,7 @@ export function StudentsPage() {
       labels.set(sub.id, `${mod} (${parts.join(" - ")})`);
     }
     return labels;
-  }, [subscriptions, coursework, lookups]);
+  }, [subscriptions, coursework, lookups, groups]);
 
   const getModuleLabel = useCallback(
     (subId: string) => moduleLabels.get(subId) ?? "Abonnement inconnu",
@@ -1087,6 +1092,11 @@ export function StudentsPage() {
 
   const openDetails = (stu: Student) => {
     setDetailsStudentId(stu.id);
+    setOverlayStudentId(null);
+  };
+
+  const openRepair = (stu: Student) => {
+    setRepairStudentId(stu.id);
     setOverlayStudentId(null);
   };
 
@@ -3193,6 +3203,7 @@ export function StudentsPage() {
     latestActions.current = {
       openWhatsApp,
       openDetails,
+      openRepair,
       openAssign,
       openTopup,
       openPayDebt,
@@ -3207,6 +3218,7 @@ export function StudentsPage() {
     () => ({
       openWhatsApp: (stu, focus) => latestActions.current?.openWhatsApp(stu, focus),
       openDetails: (stu) => latestActions.current?.openDetails(stu),
+      openRepair: (stu) => latestActions.current?.openRepair(stu),
       openAssign: (stu) => latestActions.current?.openAssign(stu),
       openTopup: (stu) => latestActions.current?.openTopup(stu),
       openPayDebt: (stu) => latestActions.current?.openPayDebt(stu),
@@ -3566,6 +3578,14 @@ export function StudentsPage() {
         studentId={detailsStudentId}
         open={!!detailsStudentId}
         onClose={() => setDetailsStudentId(null)}
+      />
+
+      {/* « Régulariser la situation » : paiements, transactions, présences et
+          absences de l'élève, corrigeables et complétables à la date voulue. */}
+      <StudentRepairModal
+        studentId={repairStudentId}
+        open={!!repairStudentId}
+        onClose={() => setRepairStudentId(null)}
       />
 
       {/* Inscriptions Modal — les créneaux se choisissent ici exactement comme

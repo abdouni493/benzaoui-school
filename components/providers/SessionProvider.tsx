@@ -16,6 +16,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const startData = useData((s) => s.start);
   const clearData = useData((s) => s.clear);
   const processWeeklyAbsences = useData((s) => s.processWeeklyAbsences);
+  const reconcileAbsencePenalties = useData((s) => s.reconcileAbsencePenalties);
 
   useEffect(() => {
     fetchSchool();
@@ -34,7 +35,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         // debits show up without an extra refresh here. It runs AFTER the
         // data is in place so it never competes with the first load.
         if (user.role === "admin" || user.role === "reception") {
-          void processWeeklyAbsences();
+          // Puis le filet : une absence facturée sur une semaine où l'appel,
+          // saisi après coup, a posé une présence est annulée et remboursée.
+          void processWeeklyAbsences().then(() => reconcileAbsencePenalties());
         }
       });
     } else {

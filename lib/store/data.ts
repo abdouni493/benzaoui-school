@@ -3,6 +3,15 @@
 import { create } from "zustand";
 import { createClient } from "@/lib/supabase/client";
 import { useToast } from "@/lib/store/toast";
+import { useSession } from "@/lib/store/session";
+import { isoFromSchoolInput } from "@/lib/helpers";
+import {
+  ABSENCE_TX_PREFIX,
+  contradictedPenalties,
+  frDay,
+  isAbsenceTx,
+  pairAbsenceLines,
+} from "@/lib/studentRepair";
 import {
   applyRowDelta,
   hashString,
@@ -1002,6 +1011,8 @@ export interface BalanceTxResult {
   newBalance?: number;
   /** a compensating cash entry was written (the row was a "topup") */
   cashAdjusted?: boolean;
+  /** the line written (creation only) */
+  txId?: string;
   error?: string;
 }
 
@@ -1077,8 +1088,26 @@ interface DataActions {
     attendanceId: string,
     fields: { status?: "present" | "late" | "absent"; occurredAt?: string; amount?: number },
   ) => Promise<ScanResult>;
-  /** Removes one automatic weekly-absence charge and refunds it. */
+  /** Removes one weekly-absence charge. Refunds it only while its balance line
+   *  still exists — an absence whose line was already deleted (and therefore
+   *  already refunded) is removed without a second refund. */
   deleteAbsencePenalty: (penaltyId: string) => Promise<ScanResult>;
+  /** Annule les absences hebdomadaires qu'une présence de la MÊME semaine
+   *  contredit (appel saisi après la facturation du vendredi) et rembourse
+   *  chacune. Personnel seulement ; ne fait rien sur une copie incomplète. */
+  reconcileAbsencePenalties: (opts?: { studentId?: string }) => Promise<{ cancelled: number; refunded: number }>;
+  /** Facture à la main l'absence d'une semaine sur un créneau de l'élève. */
+  addAbsencePenalty: (args: {
+    studentId: string;
+    subscriptionId?: string;
+    sessionId: string;
+    moduleId: string;
+    periodStart: string;
+    periodEnd: string;
+    amount: number;
+    /** « science (D) » — repris dans la ligne du solde */
+    label: string;
+  }) => Promise<{ ok: boolean; error?: string; newBalance?: number }>;
   /** Writes ONE tariff for every group of a course (same class + module +
    *  teacher), creating the missing ones. Returns how many groups were priced. */
   setSubscriptionPrice: (
@@ -1474,6 +1503,22 @@ interface DataActions {
   ) => Promise<BalanceTxResult>;
   /** Deletes one balance_tx row and undoes its effect on the balance. */
   deleteBalanceTx: (txId: string, adjustCash?: boolean) => Promise<BalanceTxResult>;
+  /** Écrit une ligne du solde DATÉE (versement, débit, avoir), solde et
+   *  historique ensemble ; `cash` porte aussi un versement en caisse. */
+  addLedgerLine: (args: {
+    studentId: string;
+    /** signé : + versement / avoir, - débit */
+    amount: number;
+    type: BalanceTxType;
+    description: string;
+    /** ISO */
+    date: string;
+    moduleId?: string;
+    cash?: boolean;
+  }) => Promise<BalanceTxResult>;
+  /** Ramène le solde stocké d'UN élève à la somme de son historique — ce que
+   *  `reconcile_student_balances` fait pour toute l'école d'un coup. */
+  alignStudentBalance: (studentId: string) => Promise<{ ok: boolean; from?: number; to?: number; error?: string }>;
   deleteFrom: <K extends keyof Database>(key: K, id: string) => void;
   /** Ajoute la ligne (localement d'abord, puis en base). Résout à `true` quand
    *  la base l'a acceptée, `false` quand elle l'a refusée — ce que doit
@@ -1871,6 +1916,124 @@ async function runDelta(): Promise<void> {
   if (changed) scheduleSnapshotSave();
 }
 
+// ---- Absences hebdomadaires : retirer sans jamais rembourser deux fois -------
+//
+// Le remboursement d'une absence, c'est la suppression de SA ligne au solde
+// (`delete_balance_tx`) — et rien d'autre. `delete_absence_penalty` remboursait
+// le montant de l'absence même quand cette ligne avait déjà été supprimée à la
+// main (donc déjà remboursée) : deux remboursements pour une absence, et un
+// solde qui ne valait plus la somme de son historique. Plus aucun écran ne
+// l'appelle.
+
+/** Le nom du groupe d'une absence, pour la reconnaître parmi plusieurs lignes. */
+function penaltyGroupResolver(state: Pick<Database, "sessions" | "groups">) {
+  const sessionById = new Map(state.sessions.map((s) => [s.id, s]));
+  const groupById = new Map(state.groups.map((g) => [g.id, g.name]));
+  return (pen: AbsencePenalty) => {
+    const se = pen.sessionId ? sessionById.get(pen.sessionId) : undefined;
+    return se ? groupById.get(se.groupId) : undefined;
+  };
+}
+
+/** Les absences d'un élève, ses lignes « Absence hebdomadaire », et quelle
+ *  ligne revient à quelle absence — lus EN BASE, jamais dans une copie qui
+ *  pourrait dater d'avant la suppression faite sur un autre poste. */
+async function readAbsenceLedger(
+  supabase: ReturnType<typeof createClient>,
+  studentId: string,
+  groupOf: (pen: AbsencePenalty) => string | undefined,
+): Promise<{ penalties: AbsencePenalty[]; lines: BalanceTransaction[]; pairs: Map<string, string> } | { error: string }> {
+  const [pens, lines] = await Promise.all([
+    supabase.from("absence_penalties").select("*").eq("student_id", studentId),
+    supabase.from("balance_tx").select("*").eq("student_id", studentId).like("description", `${ABSENCE_TX_PREFIX}%`),
+  ]);
+  if (pens.error || lines.error) return { error: (pens.error ?? lines.error)?.message ?? "lecture impossible" };
+  const penalties = (pens.data ?? []).map((r) => absencePenaltiesMapper.fromRow(r));
+  const txs = (lines.data ?? []).map((r) => balanceTxMapper.fromRow(r));
+  return { penalties, lines: txs, pairs: pairAbsenceLines(penalties, txs, groupOf) };
+}
+
+/** Retire une absence. Rembourse seulement si sa ligne au solde existe encore. */
+async function cancelAbsencePenaltyInDb(
+  supabase: ReturnType<typeof createClient>,
+  penaltyId: string,
+  groupOf: (pen: AbsencePenalty) => string | undefined,
+): Promise<{ ok: boolean; studentId?: string; refunded: number; newBalance?: number; error?: string }> {
+  const { data: row, error: readError } = await supabase
+    .from("absence_penalties")
+    .select("*")
+    .eq("id", penaltyId)
+    .maybeSingle();
+  if (readError) return { ok: false, refunded: 0, error: readError.message };
+  // Déjà retirée (depuis un autre poste) : il n'y a plus rien à faire.
+  if (!row) return { ok: true, refunded: 0 };
+  const pen = absencePenaltiesMapper.fromRow(row);
+
+  const ledger = await readAbsenceLedger(supabase, pen.studentId, groupOf);
+  if ("error" in ledger) return { ok: false, studentId: pen.studentId, refunded: 0, error: ledger.error };
+
+  let refunded = 0;
+  let newBalance: number | undefined;
+  const lineId = ledger.pairs.get(pen.id);
+  const line = lineId ? ledger.lines.find((t) => t.id === lineId) : undefined;
+  if (line) {
+    const { data, error } = await supabase.rpc("delete_balance_tx", { p_tx_id: line.id, p_adjust_cash: false });
+    if (error) {
+      // Supprimée entre-temps par un autre poste : remboursée par lui.
+      if (!/not found/i.test(error.message)) {
+        return { ok: false, studentId: pen.studentId, refunded: 0, error: error.message };
+      }
+    } else {
+      refunded = -line.amount;
+      newBalance = (data as { newBalance?: number } | null)?.newBalance;
+    }
+  }
+
+  const { error: deleteError } = await supabase.from("absence_penalties").delete().eq("id", pen.id);
+  if (deleteError) return { ok: false, studentId: pen.studentId, refunded, newBalance, error: deleteError.message };
+  return { ok: true, studentId: pen.studentId, refunded, newBalance };
+}
+
+/**
+ * Écrit une ligne du solde à la date voulue, solde et historique ensemble.
+ *
+ * Aucune RPC ne sait dater une écriture : la ligne est donc posée à 0 DA, à sa
+ * date, puis `update_balance_tx` lui donne son montant — et déplace le solde
+ * d'autant, dans sa transaction. Le solde ne s'écrit toujours que par une RPC.
+ */
+async function writeLedgerLine(
+  supabase: ReturnType<typeof createClient>,
+  args: { studentId: string; amount: number; type: BalanceTxType; description: string; date: string; moduleId?: string },
+): Promise<{ ok: boolean; txId?: string; newBalance?: number; error?: string }> {
+  const id = uid();
+  const { error: insertError } = await supabase.from("balance_tx").insert({
+    id,
+    student_id: args.studentId,
+    amount: 0,
+    date: args.date,
+    type: args.type,
+    description: args.description,
+    module_id: args.moduleId ?? null,
+  });
+  if (insertError) return { ok: false, error: insertError.message };
+  const { data, error } = await supabase.rpc("update_balance_tx", {
+    p_tx_id: id,
+    p_amount: Math.round(args.amount),
+    p_description: null,
+    p_date: null,
+    p_type: null,
+    p_adjust_cash: false,
+  });
+  if (error || !data) {
+    // Rien n'a bougé sur le solde : la ligne à 0 DA ne doit pas rester.
+    await supabase.from("balance_tx").delete().eq("id", id);
+    return { ok: false, error: error?.message ?? "update_balance_tx n'a rien rendu" };
+  }
+  return { ok: true, txId: id, newBalance: (data as { newBalance?: number }).newBalance };
+}
+
+let reconcileChain: Promise<unknown> = Promise.resolve();
+
 export const useData = create<DataStore>((set, get) => ({
   ...emptyDatabase(),
   loaded: false,
@@ -2100,7 +2263,12 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
-    if (res.ok) await get().refresh();
+    if (res.ok) {
+      await get().refresh();
+      // Une présence saisie après coup peut tomber dans une semaine déjà
+      // facturée comme absence : elle l'annule sur-le-champ.
+      if (status !== "absent") await get().reconcileAbsencePenalties({ studentId });
+    }
     return res;
   },
 
@@ -2131,22 +2299,146 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
-    if (res.ok) await get().refresh();
+    if (res.ok) {
+      await get().refresh();
+      // Déplacée dans une semaine facturée comme absence : l'absence tombe.
+      const studentId = get().attendance.find((a) => a.id === attendanceId)?.studentId;
+      if (studentId) await get().reconcileAbsencePenalties({ studentId });
+    }
     return res;
   },
 
   deleteAbsencePenalty: async (penaltyId) => {
     const supabase = createClient();
-    const { data, error } = await supabase.rpc("delete_absence_penalty", {
-      p_penalty_id: penaltyId,
-    });
-    if (error || !data) {
-      console.error("delete_absence_penalty failed:", error?.message);
+    const res = await cancelAbsencePenaltyInDb(supabase, penaltyId, penaltyGroupResolver(get()));
+    if (!res.ok) {
+      console.error("Retrait de l'absence impossible:", res.error);
       return { ok: false, messageKey: "scan.error" };
     }
-    const res = data as ScanResult;
-    if (res.ok) await get().refresh();
-    return res;
+    await get().refresh();
+    const balance = res.studentId ? get().students.find((s) => s.id === res.studentId)?.balance : undefined;
+    return {
+      ok: true,
+      refunded: res.refunded,
+      newBalance: res.newBalance ?? balance,
+      messageKey: "absence.deleted",
+    };
+  },
+
+  // Le filet de sécurité de la règle « une seule présence dans la semaine, et
+  // pas d'absence » : la facturation du vendredi ne voit pas l'appel saisi le
+  // lundi suivant. Tourne au chargement du personnel (toute l'école) et après
+  // chaque présence saisie ou déplacée (un élève).
+  reconcileAbsencePenalties: (opts = {}) => {
+    const run = async () => {
+      const none = { cancelled: 0, refunded: 0 };
+      const role = useSession.getState().user?.role;
+      if (role !== "admin" && role !== "reception") return none;
+      const state = get();
+      // Une table à moitié lue ferait annuler… ou garder à tort.
+      if (
+        !state.loaded ||
+        state.complete.attendance === false ||
+        state.complete.absencePenalties === false ||
+        state.complete.sessions === false
+      ) {
+        return none;
+      }
+      const found = contradictedPenalties({
+        penalties: opts.studentId
+          ? state.absencePenalties.filter((p) => p.studentId === opts.studentId)
+          : state.absencePenalties,
+        attendance: opts.studentId
+          ? state.attendance.filter((a) => a.studentId === opts.studentId)
+          : state.attendance,
+        sessions: state.sessions,
+      });
+      if (found.length === 0) return none;
+
+      const supabase = createClient();
+      const groupOf = penaltyGroupResolver(state);
+      let cancelled = 0;
+      let refunded = 0;
+      const names = new Set<string>();
+      for (const { penalty } of found) {
+        const res = await cancelAbsencePenaltyInDb(supabase, penalty.id, groupOf);
+        if (!res.ok) {
+          console.error("Absence contredite par une présence, non annulée:", res.error);
+          continue;
+        }
+        cancelled += 1;
+        refunded += res.refunded;
+        const stu = state.students.find((s) => s.id === penalty.studentId);
+        if (stu) names.add(`${stu.firstName} ${stu.lastName}`);
+      }
+      if (cancelled > 0) {
+        await get().refresh();
+        const list = [...names];
+        useToast.getState().addToast({
+          type: "success",
+          title: "Absences annulées : l'élève était présent",
+          message:
+            `${cancelled} absence(s) facturée(s) sur une semaine où une présence existe — ` +
+            `${refunded} DA remboursés (${list.slice(0, 4).join(", ")}${list.length > 4 ? "…" : ""}).`,
+        });
+      }
+      return { cancelled, refunded };
+    };
+    // Une passe à la fois : deux passes simultanées liraient la même absence.
+    const next = reconcileChain.then(run, run);
+    reconcileChain = next.catch(() => undefined);
+    return next;
+  },
+
+  addAbsencePenalty: async ({ studentId, subscriptionId, sessionId, moduleId, periodStart, periodEnd, amount, label }) => {
+    const supabase = createClient();
+    const penaltyId = uid();
+    const cost = Math.max(0, Math.round(amount));
+    // L'absence d'abord : l'index unique (élève, inscription, fin de semaine)
+    // refuse un doublon AVANT qu'un dinar ne bouge.
+    const { error: penaltyError } = await supabase.from("absence_penalties").insert({
+      id: penaltyId,
+      student_id: studentId,
+      subscription_id: subscriptionId ?? null,
+      session_id: sessionId,
+      module_id: moduleId,
+      period_start: periodStart,
+      period_end: periodEnd,
+      amount: cost,
+      balance_after: 0,
+    });
+    if (penaltyError) {
+      return {
+        ok: false,
+        error: /duplicate|unique/i.test(penaltyError.message)
+          ? "Une absence est déjà facturée sur cette semaine pour ce créneau."
+          : penaltyError.message,
+      };
+    }
+
+    let newBalance = get().students.find((s) => s.id === studentId)?.balance;
+    if (cost > 0) {
+      const line = await writeLedgerLine(supabase, {
+        studentId,
+        amount: -cost,
+        type: "deduction",
+        description:
+          `${ABSENCE_TX_PREFIX} — ${label} — semaine du ${frDay(periodStart)} au ${frDay(periodEnd)}` +
+          " — saisie manuelle",
+        date: isoFromSchoolInput(`${periodEnd}T20:00`),
+        moduleId,
+      });
+      if (!line.ok) {
+        await supabase.from("absence_penalties").delete().eq("id", penaltyId);
+        return { ok: false, error: line.error };
+      }
+      newBalance = line.newBalance;
+    }
+    if (newBalance !== undefined) {
+      await supabase.from("absence_penalties").update({ balance_after: newBalance }).eq("id", penaltyId);
+    }
+    await get().refresh();
+    return { ok: true, newBalance };
   },
 
   // One tariff per COURSE, not per group: the RPC writes/updates the
@@ -2901,6 +3193,16 @@ export const useData = create<DataStore>((set, get) => ({
   // writes could leave the balance out of sync with its own history.
   updateBalanceTx: async (txId, fields) => {
     const supabase = createClient();
+    // La ligne d'une absence et son absence disent le même montant : on
+    // retrouve celle-ci AVANT d'écrire, pendant que la description l'identifie.
+    const before = get().balanceTx.find((t) => t.id === txId);
+    let penaltyId: string | undefined;
+    if (before && isAbsenceTx(before)) {
+      const ledger = await readAbsenceLedger(supabase, before.studentId, penaltyGroupResolver(get()));
+      if (!("error" in ledger)) {
+        penaltyId = [...ledger.pairs.entries()].find(([, lineId]) => lineId === txId)?.[0];
+      }
+    }
     const { data, error } = await supabase.rpc("update_balance_tx", {
       p_tx_id: txId,
       p_amount: Math.round(fields.amount),
@@ -2914,12 +3216,29 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, error: error?.message };
     }
     const res = data as BalanceTxResult;
+    if (res.ok && penaltyId) {
+      await supabase
+        .from("absence_penalties")
+        .update({ amount: Math.max(0, -Math.round(fields.amount)) })
+        .eq("id", penaltyId);
+    }
     if (res.ok) await get().refresh();
     return res;
   },
 
   deleteBalanceTx: async (txId, adjustCash = true) => {
     const supabase = createClient();
+    // Supprimer la ligne d'une absence, c'est la rembourser : l'absence part
+    // avec elle. Restée seule, elle s'affichait encore « facturée » sur la
+    // fiche et le rapport — et la retirer ensuite remboursait une 2e fois.
+    const before = get().balanceTx.find((t) => t.id === txId);
+    let penaltyId: string | undefined;
+    if (before && isAbsenceTx(before)) {
+      const ledger = await readAbsenceLedger(supabase, before.studentId, penaltyGroupResolver(get()));
+      if (!("error" in ledger)) {
+        penaltyId = [...ledger.pairs.entries()].find(([, lineId]) => lineId === txId)?.[0];
+      }
+    }
     const { data, error } = await supabase.rpc("delete_balance_tx", {
       p_tx_id: txId,
       p_adjust_cash: adjustCash,
@@ -2929,8 +3248,111 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, error: error?.message };
     }
     const res = data as BalanceTxResult;
+    if (res.ok && penaltyId) {
+      const { error: penaltyError } = await supabase.from("absence_penalties").delete().eq("id", penaltyId);
+      if (penaltyError) console.error("Absence liée non retirée:", penaltyError.message);
+    }
     if (res.ok) await get().refresh();
     return res;
+  },
+
+  addLedgerLine: async ({ studentId, amount, type, description, date, moduleId, cash }) => {
+    const supabase = createClient();
+    const line = await writeLedgerLine(supabase, { studentId, amount, type, description, date, moduleId });
+    if (!line.ok) {
+      console.error("Écriture au solde impossible:", line.error);
+      return { ok: false, error: line.error };
+    }
+    let cashAdjusted = false;
+    const value = Math.round(amount);
+    if (cash && value !== 0) {
+      // Même libellé que le guichet : la caisse range ce versement avec les autres.
+      const stu = get().students.find((s) => s.id === studentId);
+      const { error } = await supabase.from("cash_transactions").insert({
+        type: "student_payment",
+        amount: value,
+        date,
+        description: `Versement ${stu ? `${stu.firstName} ${stu.lastName}` : ""}`.trim(),
+      });
+      if (error) console.error("Entrée en caisse impossible:", error.message);
+      else cashAdjusted = true;
+    }
+    await get().refresh();
+    return { ok: true, txId: line.txId, newBalance: line.newBalance, cashAdjusted };
+  },
+
+  // La réparation d'un « Solde à vérifier », pour UN élève : le solde stocké
+  // redevient la somme de son historique (l'historique, adossé aux présences
+  // et à la caisse, est la vérité). Le solde ne s'écrivant que par une RPC, il
+  // est déplacé par `update_balance_tx` sur une ligne de régularisation qui
+  // retombe ensuite à 0 DA — elle reste dans l'historique pour dire qui a
+  // réaligné quoi, et quand.
+  alignStudentBalance: async (studentId) => {
+    const supabase = createClient();
+    const { data: row, error: readError } = await supabase
+      .from("students")
+      .select("balance")
+      .eq("id", studentId)
+      .single();
+    if (readError || !row) return { ok: false, error: readError?.message ?? "élève introuvable" };
+    const stored = Number((row as { balance: number }).balance) || 0;
+
+    // L'historique entier de l'élève, page par page (plafond de 1000 lignes).
+    let history = 0;
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from("balance_tx")
+        .select("id, amount")
+        .eq("student_id", studentId)
+        .order("id")
+        .range(from, from + 999);
+      if (error) return { ok: false, error: error.message };
+      for (const t of data ?? []) history += Number((t as { amount: number }).amount) || 0;
+      if (!data || data.length < 1000) break;
+    }
+
+    const gap = history - stored;
+    if (gap === 0) {
+      await get().refresh();
+      return { ok: true, from: stored, to: stored };
+    }
+
+    const line = await writeLedgerLine(supabase, {
+      studentId,
+      amount: gap,
+      type: gap < 0 ? "deduction" : "topup",
+      description: "Régularisation du solde (en cours)",
+      date: new Date().toISOString(),
+    });
+    if (!line.ok || !line.txId) return { ok: false, error: line.error };
+
+    // Le solde a bougé de `gap` ; la ligne retombe à 0 DA pour que
+    // l'historique, lui, reste ce qu'il était.
+    const settle = () =>
+      supabase
+        .from("balance_tx")
+        .update({
+          amount: 0,
+          description: `Régularisation : solde aligné sur son historique (${stored} DA → ${history} DA)`,
+        })
+        .eq("id", line.txId as string);
+    let { error: settleError } = await settle();
+    if (settleError) ({ error: settleError } = await settle());
+    if (settleError) {
+      // Sans trace écrite, mais juste : retirer la ligne ramène l'historique
+      // à sa valeur sans toucher au solde déjà corrigé.
+      ({ error: settleError } = await supabase.from("balance_tx").delete().eq("id", line.txId));
+    }
+    await get().refresh();
+    if (settleError) {
+      return {
+        ok: false,
+        error:
+          `Le solde a été corrigé, mais la ligne « Régularisation du solde (en cours) » doit encore ` +
+          `être ramenée à 0 DA (${settleError.message}). Ne relancez pas l'alignement avant.`,
+      };
+    }
+    return { ok: true, from: stored, to: history };
   },
 
   // The row is added locally first (so the screen answers instantly), then

@@ -27,6 +27,7 @@ import type {
   Student,
 } from "@/lib/types";
 import type { Language } from "@/lib/store/settings";
+import { chargesWithoutPresence } from "@/lib/studentRepair";
 import {
   bannerHtml,
   escapeHtml,
@@ -124,6 +125,9 @@ export interface ReportLine {
   waived?: number;
   free?: boolean;
   substitute?: boolean;
+  /** séance débitée dont la présence a disparu avec son emploi du temps
+   *  (supprimé depuis) : l'argent a été pris, la ligne reste au rapport */
+  deletedSlot?: boolean;
 }
 
 export interface ReportModule {
@@ -205,6 +209,34 @@ export function computeStudentReport(input: {
     });
   }
 
+  // Les séances PAYÉES dont la présence n'existe plus : l'emploi du temps a
+  // été supprimé et ses présences avec lui, mais le débit est resté au solde.
+  // Sans elles, le rapport taisait une séance que l'élève a bel et bien suivie.
+  const orphans = chargesWithoutPresence({
+    studentId: input.studentId,
+    balanceTx: input.balanceTx,
+    attendance: input.attendance,
+    sessions: input.sessions,
+  });
+  for (const tx of orphans) {
+    const mod = tx.moduleId ? byModule.get(tx.moduleId) : undefined;
+    if (!mod || !inPeriod(new Date(tx.date))) continue;
+    // « Séance science (B) (16:00-18:00) » : le groupe et l'horaire d'alors.
+    const m = tx.description.match(/\(([^()]+)\)\s*\((\d{1,2}:\d{2}-\d{1,2}:\d{2})\)/);
+    mod.presences++;
+    mod.totalCost += -tx.amount;
+    mod.lines.push({
+      id: tx.id,
+      kind: "presence",
+      date: tx.date,
+      status: "present",
+      group: m?.[1],
+      time: m?.[2],
+      cost: -tx.amount,
+      deletedSlot: true,
+    });
+  }
+
   for (const pen of input.absencePenalties) {
     if (pen.studentId !== input.studentId || !pen.moduleId) continue;
     const mod = byModule.get(pen.moduleId);
@@ -270,6 +302,7 @@ const LABELS = {
     week: (s: string, e: string) => `Semaine du ${s} au ${e}`,
     offered: "Offerte",
     substitute: "Autre groupe",
+    deletedSlot: "Emploi du temps supprimé",
     noLines: "Aucune présence ni absence sur cette période.",
     subtotal: "Sous-total",
     summaryTitle: "Récapitulatif",
@@ -314,6 +347,7 @@ const LABELS = {
     week: (s: string, e: string) => `أسبوع ${s} - ${e}`,
     offered: "مجانية",
     substitute: "فوج آخر",
+    deletedSlot: "استعمال زمن محذوف",
     noLines: "لا يوجد حضور أو غياب في هذه الفترة.",
     subtotal: "المجموع الجزئي",
     summaryTitle: "الملخص",
@@ -387,7 +421,9 @@ export function buildStudentActivityReport(data: {
                   .map(
                     (l) => `<tr>
               <td>${l.kind === "penalty" ? L.week(fmtDate(l.weekStart, lang), fmtDate(l.weekEnd, lang)) : fmtDateTime(l.date, lang)}</td>
-              <td>${e(l.group ?? "-")}${l.substitute ? ` <span class="badge badge-primary">${L.substitute}</span>` : ""}</td>
+              <td>${e(l.group ?? "-")}${l.substitute ? ` <span class="badge badge-primary">${L.substitute}</span>` : ""}${
+                l.deletedSlot ? ` <span class="badge badge-warning">${L.deletedSlot}</span>` : ""
+              }</td>
               <td>${l.time ?? "-"}</td>
               <td class="ctr">${statusBadge(l)}</td>
               <td class="num" style="color:${l.cost > 0 ? "#b91c1c" : "#15803d"};">${

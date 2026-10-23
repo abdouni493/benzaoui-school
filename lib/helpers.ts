@@ -933,6 +933,61 @@ export function schoolDateKey(value: string | number | Date): string {
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
+let schoolMinuteFormat: Intl.DateTimeFormat | null | undefined;
+
+/**
+ * « YYYY-MM-DDTHH:mm » d'un horodatage, À L'HEURE DE L'ÉCOLE — la valeur
+ * qu'attend un champ `datetime-local`.
+ *
+ * Les écrans montraient jusqu'ici la chaîne stockée, c'est-à-dire l'heure UTC :
+ * une séance de 15 h 30 s'affichait « 14:30 », et la fiche d'un élève
+ * semblait dire qu'il était venu avant le début du cours.
+ */
+export function schoolDateTimeInput(value: string | number | Date): string {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  if (schoolMinuteFormat === undefined) {
+    try {
+      schoolMinuteFormat = new Intl.DateTimeFormat("en-CA", {
+        timeZone: SCHOOL_TIME_ZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      });
+    } catch {
+      schoolMinuteFormat = null;
+    }
+  }
+  if (!schoolMinuteFormat) {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.toLocaleDateString("fr-CA")}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  const parts = schoolMinuteFormat.formatToParts(d);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
+}
+
+/** « YYYY-MM-DD HH:mm » à l'heure de l'école, pour les listes. */
+export const schoolDateTimeLabel = (value: string | number | Date): string =>
+  schoolDateTimeInput(value).replace("T", " ");
+
+/**
+ * L'inverse de `schoolDateTimeInput` : une heure LUE à l'école
+ * (« YYYY-MM-DDTHH:mm ») rendue en ISO UTC. Le décalage est mesuré sur la date
+ * elle-même plutôt que supposé, et le poste qui saisit peut être réglé sur
+ * n'importe quel fuseau.
+ */
+export function isoFromSchoolInput(value: string): string {
+  const guess = new Date(`${value.slice(0, 16)}:00Z`);
+  if (Number.isNaN(guess.getTime())) return new Date(value).toISOString();
+  const shown = schoolDateTimeInput(guess);
+  const shownAsUtc = new Date(`${shown}:00Z`).getTime();
+  return new Date(guess.getTime() - (shownAsUtc - guess.getTime())).toISOString();
+}
+
 /** Le jour de semaine d'une date ISO, sans piège de fuseau : la date est lue à
  *  midi, l'heure qu'aucun décalage ne fait changer de jour. */
 export const dayOfIsoDate = (iso: string): Day =>

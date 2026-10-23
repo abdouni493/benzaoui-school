@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
 import { printHtmlDocument } from "@/lib/print";
+import { schoolDateTimeLabel } from "@/lib/helpers";
 import {
   buildStudentActivityReport,
   computeStudentReport,
@@ -100,7 +101,8 @@ export function StudentReportPanel({
     );
   };
 
-  const fmtDT = (iso: string) => iso.substring(0, 16).replace("T", " ");
+  // À l'heure de l'école : la chaîne stockée est en UTC (15 h 30 s'y lit 14:30).
+  const fmtDT = (iso: string) => schoolDateTimeLabel(iso);
   const fmtDay = (d?: string) => (d ? d.split("-").reverse().join("/") : "-");
 
   return (
@@ -322,6 +324,14 @@ export function StudentReportPanel({
                           {l.time ? ` · ${l.time}` : ""}
                           {l.substitute ? " · Autre groupe" : ""}
                         </span>
+                        {l.deletedSlot && (
+                          <span
+                            title="Séance débitée dont l'emploi du temps a été supprimé depuis : sa présence a disparu avec lui, le paiement est resté."
+                            className="ms-1.5 rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-bold text-warning"
+                          >
+                            Emploi du temps supprimé
+                          </span>
+                        )}
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
                         <Badge
