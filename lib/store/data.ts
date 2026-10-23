@@ -1709,7 +1709,7 @@ function scheduleSnapshotSave() {
     }).requestIdleCallback;
     if (idle) idle(run, { timeout: 5000 });
     else run();
-  }, 2500);
+  }, 20000);
 }
 
 async function saveSnapshotNow() {
@@ -2244,7 +2244,18 @@ export const useData = create<DataStore>((set, get) => ({
     const res = data as ScanResult;
     // Refresh local state whenever the RPC wrote something (a deduction, a
     // presence, a teacher due).
-    if (res.ok && res.messageKey !== "scan.alreadyPresent") await get().refresh();
+    if (res.ok && res.messageKey !== "scan.alreadyPresent") {
+      // Le badge répond TOUT DE SUITE : le nouveau solde est déjà dans la
+      // réponse du serveur. La synchronisation (présence, historique) suit en
+      // fond au lieu de faire attendre la voix, le toast et l'élève suivant.
+      if (res.studentId && res.newBalance !== undefined) {
+        const bal = res.newBalance;
+        set((state) => ({
+          students: state.students.map((s) => (s.id === res.studentId ? { ...s, balance: bal } : s)),
+        }));
+      }
+      void get().refresh();
+    }
     return res;
   },
 
@@ -2267,7 +2278,7 @@ export const useData = create<DataStore>((set, get) => ({
       await get().refresh();
       // Une présence saisie après coup peut tomber dans une semaine déjà
       // facturée comme absence : elle l'annule sur-le-champ.
-      if (status !== "absent") await get().reconcileAbsencePenalties({ studentId });
+      if (status !== "absent") void get().reconcileAbsencePenalties({ studentId });
     }
     return res;
   },
@@ -2303,7 +2314,7 @@ export const useData = create<DataStore>((set, get) => ({
       await get().refresh();
       // Déplacée dans une semaine facturée comme absence : l'absence tombe.
       const studentId = get().attendance.find((a) => a.id === attendanceId)?.studentId;
-      if (studentId) await get().reconcileAbsencePenalties({ studentId });
+      if (studentId) void get().reconcileAbsencePenalties({ studentId });
     }
     return res;
   },

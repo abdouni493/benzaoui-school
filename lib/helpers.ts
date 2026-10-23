@@ -911,7 +911,24 @@ let schoolDayFormat: Intl.DateTimeFormat | null | undefined;
  * fantômes, et le règlement enregistré ne soldait AUCUNE séance — elles
  * restaient dues, prêtes à être payées une seconde fois.
  */
+// Le même horodatage est converti des milliers de fois par synchronisation
+// (présences, caisse) ; `formatToParts` est lent. Les chaînes déjà vues
+// répondent depuis ce cache, vidé quand il grossit trop.
+const schoolDayCache = new Map<string, string>();
+
 export function schoolDateKey(value: string | number | Date): string {
+  if (typeof value === "string") {
+    const hit = schoolDayCache.get(value);
+    if (hit !== undefined) return hit;
+    const key = schoolDateKeyUncached(value);
+    if (schoolDayCache.size > 50_000) schoolDayCache.clear();
+    schoolDayCache.set(value, key);
+    return key;
+  }
+  return schoolDateKeyUncached(value);
+}
+
+function schoolDateKeyUncached(value: string | number | Date): string {
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return "";
   if (schoolDayFormat === undefined) {
