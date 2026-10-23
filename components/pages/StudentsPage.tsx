@@ -106,7 +106,12 @@ const WA_BATCH_SIZE = 8;
  *  « Inscriptions » n'en reprend que le choix des créneaux. */
 type StudentFormMode = "create" | "edit" | "assign";
 
-export function StudentsPage() {
+/**
+ * `focusStudentId` : l'écran réduit à la carte d'UN élève, avec toutes ses
+ * actions et leurs fenêtres — c'est ainsi que la feuille de présence ouvre la
+ * carte d'un élève sans quitter la présence, et sans recopier l'écran.
+ */
+export function StudentsPage({ focusStudentId }: { focusStudentId?: string } = {}) {
   const {
     school,
     students,
@@ -541,6 +546,7 @@ export function StudentsPage() {
     const query = deferredSearch.trim().toLowerCase();
     const rawQuery = deferredSearch.trim();
     const soon = filterType === "soon" ? new Set(soonStudents.map((s) => s.id)) : null;
+    if (focusStudentId) return students.filter((s) => s.id === focusStudentId);
     return students
       .filter((s) => {
         if (query) {
@@ -570,7 +576,7 @@ export function StudentsPage() {
             ? (a, b) => a.balance - b.balance
             : byNewestFirst,
       );
-  }, [students, deferredSearch, filterType, sortBy, debtOf, soonStudents]);
+  }, [students, deferredSearch, filterType, sortBy, debtOf, soonStudents, focusStudentId]);
 
   const handleCreateStudent = async () => {
     if (!firstName || !lastName || !phone || !rfid) {
@@ -3278,6 +3284,8 @@ export function StudentsPage() {
 
   return (
     <div>
+      {!focusStudentId && (
+      <>
       {/* En-tête : l'écran, son effectif, et les deux gestes du guichet. */}
       <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-3">
@@ -3378,6 +3386,9 @@ export function StudentsPage() {
         </details>
       )}
 
+      </>
+      )}
+
       {/* Students list — cartes mémorisées, affichées par tranches : taper dans
           une fenêtre ne redessine plus des centaines de cartes derrière elle. */}
       <StudentCardGrid
@@ -3388,6 +3399,7 @@ export function StudentsPage() {
         labelOf={getModuleLabel}
         actions={cardActions}
         resetKey={`${deferredSearch}|${filterType}|${sortBy}`}
+        single={!!focusStudentId}
       />
 
       {/* Creation Modal */}

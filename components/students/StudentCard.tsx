@@ -497,6 +497,7 @@ export function StudentCardGrid({
   labelOf,
   actions,
   resetKey,
+  single,
 }: {
   students: Student[];
   debtOf: (stu: Student) => StudentDebt;
@@ -506,6 +507,8 @@ export function StudentCardGrid({
   actions: StudentCardActions;
   /** change quand la recherche ou le filtre change : on repart des 60 premières */
   resetKey: string;
+  /** une seule carte, pleine largeur (fenêtre ouverte depuis un autre écran) */
+  single?: boolean;
 }) {
   const [shown, setShown] = useState({ key: resetKey, count: CARDS_PER_STEP });
   const count = shown.key === resetKey ? shown.count : CARDS_PER_STEP;
@@ -530,7 +533,7 @@ export function StudentCardGrid({
 
   return (
     <>
-      <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
+      <div className={single ? "grid grid-cols-1" : "grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3"}>
         {visible.map((stu) => (
           <StudentCard
             key={stu.id}

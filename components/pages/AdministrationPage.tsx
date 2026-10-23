@@ -9,7 +9,6 @@ import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
-import { PageHeader } from "@/components/layout/PageHeader";
 import {
   Trash2,
   Edit,
@@ -1173,12 +1172,18 @@ export function AdministrationPage() {
   // ---------------------------------------------------------------------------
   return (
     <div>
-      <div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-        <PageHeader
-          emoji="👥"
-          title="Travailleurs"
-          subtitle="Pointage, absences et paie du personnel : réception, sécurité et ménage"
-        />
+      <div className="mb-5 flex flex-col justify-between gap-4 md:flex-row md:items-center">
+        <div className="flex items-center gap-3">
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-primary text-2xl shadow-md">
+            👥
+          </span>
+          <div>
+            <h1 className="text-xl font-bold text-ink md:text-2xl">Travailleurs</h1>
+            <p className="text-sm text-muted">
+              {reception.length} membre(s) du personnel — pointage, absences et paie
+            </p>
+          </div>
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
@@ -1190,7 +1195,7 @@ export function AdministrationPage() {
             {markingAbsences ? "Relevé en cours..." : "Relever les absences"}
           </Button>
           <Button
-            variant="secondary"
+            variant="outline"
             onClick={() => {
               setScanFeedback(null);
               setIsScanOpen(true);
@@ -1211,15 +1216,56 @@ export function AdministrationPage() {
         </div>
       </div>
 
+      {/* ---- Les chiffres du personnel, aujourd'hui ------------------------- */}
+      {(() => {
+        const inService = reception.filter((w) => !!openShiftOf(w.id)).length;
+        const absentToday = reception.filter((w) => shiftToday(w.id)?.status === "absent").length;
+        const expected = reception.filter((w) => worksOn(w, today)).length;
+        const lateTotal = lateAlerts.reduce((sum, a) => sum + a.period.amount, 0);
+        const tiles = [
+          { label: "Personnel", value: String(reception.length), hint: `${expected} attendu(s) aujourd'hui`, tone: "primary" as const },
+          { label: "En service", value: String(inService), hint: "Arrivée pointée, sortie à venir", tone: "success" as const },
+          { label: "Absents aujourd'hui", value: String(absentToday), hint: `${absenceAlerts.length} absence(s) à trancher`, tone: absentToday > 0 ? ("danger" as const) : ("neutral" as const) },
+          { label: "Salaires en retard", value: `${lateTotal.toLocaleString("fr-FR")} DA`, hint: `${lateAlerts.length} retard(s) · ${soonAlerts.length} bientôt`, tone: lateAlerts.length > 0 ? ("danger" as const) : ("success" as const) },
+        ];
+        const toneClass = {
+          primary: "bg-primary/15 text-primary dark:text-rose-200",
+          success: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300",
+          danger: "bg-rose-500/15 text-rose-600 dark:text-rose-300",
+          neutral: "bg-muted/15 text-muted",
+        };
+        return (
+          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {tiles.map((t) => (
+              <div key={t.label} className="rounded-2xl border border-line bg-gradient-card p-4 card-shadow">
+                <span className={`inline-flex rounded-lg px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${toneClass[t.tone]}`}>
+                  {t.label}
+                </span>
+                <strong className="mt-2 block truncate font-mono text-2xl font-black text-ink">{t.value}</strong>
+                <span className="block truncate text-[10px] text-muted">{t.hint}</span>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* ---- À TRAITER : salaires, absences, journées non clôturées ----------
+          Un seul panneau, le plus urgent d'abord. Chaque puce ouvre l'écran
+          qui règle le problème. */}
+      {lateAlerts.length + soonAlerts.length + absenceAlerts.length + workersWithFrozenDays.length > 0 && (
+        <div className="mb-5 space-y-3 rounded-2xl border border-line bg-surface p-4 card-shadow">
+          <h3 className="flex items-center gap-2 text-sm font-bold text-ink">
+            <AlertTriangle className="h-4 w-4 text-primary" /> À traiter
+          </h3>
       {/* ---- ALERTES DE PAIE ---------------------------------------------- */}
       {/* En retard : l'alerte bat, parce qu'un salaire en retard se règle
           aujourd'hui et pas « quand on y repensera ». */}
       {lateAlerts.length > 0 && (
-        <div className="mb-4 animate-pulse rounded-2xl border-2 border-danger/50 bg-danger/10 p-4">
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-3">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-danger" />
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-rose-600 dark:text-rose-300" />
             <div className="min-w-0 flex-1">
-              <strong className="block text-sm text-danger">
+              <strong className="block text-sm text-rose-600 dark:text-rose-300">
                 {lateAlerts.length} salaire(s) EN RETARD —{" "}
                 {lateAlerts.reduce((s, a) => s + a.period.amount, 0)} DA à verser
               </strong>
@@ -1228,7 +1274,7 @@ export function AdministrationPage() {
                   <button
                     key={`${a.worker.id}-${a.period.key}-${a.period.start}`}
                     onClick={() => openPay(a.worker)}
-                    className="rounded-lg border border-danger/30 bg-danger/15 px-2.5 py-1 text-[10px] font-bold text-danger transition-colors hover:bg-danger/25"
+                    className="rounded-lg border border-rose-500/30 bg-rose-500/15 px-2.5 py-1 text-[10px] font-bold text-rose-600 dark:text-rose-300 transition-colors hover:bg-rose-500/25"
                   >
                     {a.worker.firstName} {a.worker.lastName} · {a.period.label} ·{" "}
                     {a.period.amount} DA · {Math.abs(a.daysLeft)} j de retard
@@ -1241,11 +1287,11 @@ export function AdministrationPage() {
       )}
 
       {soonAlerts.length > 0 && (
-        <div className="mb-4 rounded-2xl border border-warning/40 bg-warning/10 p-4">
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
           <div className="flex items-start gap-3">
-            <CalendarDays className="mt-0.5 h-5 w-5 shrink-0 text-warning" />
+            <CalendarDays className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
             <div className="min-w-0 flex-1">
-              <strong className="block text-sm text-warning">
+              <strong className="block text-sm text-amber-600 dark:text-amber-300">
                 {soonAlerts.length} salaire(s) à verser bientôt
               </strong>
               <div className="mt-2 flex flex-wrap gap-2">
@@ -1253,7 +1299,7 @@ export function AdministrationPage() {
                   <button
                     key={`${a.worker.id}-${a.period.key}-${a.period.start}`}
                     onClick={() => openPay(a.worker)}
-                    className="rounded-lg border border-warning/30 bg-warning/15 px-2.5 py-1 text-[10px] font-bold text-warning transition-colors hover:bg-warning/25"
+                    className="rounded-lg border border-amber-500/30 bg-amber-500/15 px-2.5 py-1 text-[10px] font-bold text-amber-600 dark:text-amber-300 transition-colors hover:bg-amber-500/25"
                   >
                     {a.worker.firstName} {a.worker.lastName} · {a.period.label} ·{" "}
                     {a.period.amount} DA ·{" "}
@@ -1272,11 +1318,11 @@ export function AdministrationPage() {
           que quelqu'un tranche, même pour décider de ne rien retenir : sans
           cette étape, un mois se payait plein alors qu'il ne l'était pas. */}
       {absenceAlerts.length > 0 && (
-        <div className="mb-4 rounded-2xl border-2 border-warning/50 bg-warning/10 p-4">
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
           <div className="flex items-start gap-3">
-            <UserX className="mt-0.5 h-5 w-5 shrink-0 animate-pulse text-warning" />
+            <UserX className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
             <div className="min-w-0 flex-1">
-              <strong className="block text-sm text-warning">
+              <strong className="block text-sm text-amber-600 dark:text-amber-300">
                 {absenceAlerts.length} absence(s) à trancher
               </strong>
               <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
@@ -1290,7 +1336,7 @@ export function AdministrationPage() {
                   <button
                     key={a.shift.id}
                     onClick={() => openAbsenceResolver(a.worker, a.shift)}
-                    className="rounded-lg border border-warning/30 bg-warning/15 px-2.5 py-1 text-[10px] font-bold text-warning transition-colors hover:bg-warning/25"
+                    className="rounded-lg border border-amber-500/30 bg-amber-500/15 px-2.5 py-1 text-[10px] font-bold text-amber-600 dark:text-amber-300 transition-colors hover:bg-amber-500/25"
                   >
                     {a.worker.firstName} {a.worker.lastName} · {frDate(a.shift.workDate)}
                     {a.daysAgo > 0 && ` · il y a ${a.daysAgo} j`}
@@ -1309,11 +1355,11 @@ export function AdministrationPage() {
 
       {/* Journées non clôturées */}
       {workersWithFrozenDays.length > 0 && (
-        <div className="mb-4 rounded-2xl border border-danger/30 bg-danger/5 p-4">
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/5 p-3">
           <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-danger" />
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-rose-600 dark:text-rose-300" />
             <div className="min-w-0 flex-1">
-              <strong className="block text-sm text-danger">
+              <strong className="block text-sm text-rose-600 dark:text-rose-300">
                 {workersWithFrozenDays.length} travailleur(s) avec des journées non clôturées
               </strong>
               <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
@@ -1326,7 +1372,7 @@ export function AdministrationPage() {
                   <button
                     key={w.id}
                     onClick={() => openDetails(w, "register")}
-                    className="rounded-lg border border-danger/25 bg-danger/10 px-2.5 py-1 text-[10px] font-bold text-danger transition-colors hover:bg-danger/20"
+                    className="rounded-lg border border-rose-500/25 bg-rose-500/10 px-2.5 py-1 text-[10px] font-bold text-rose-600 dark:text-rose-300 transition-colors hover:bg-rose-500/20"
                   >
                     {w.firstName} {w.lastName} · {frozenShiftsOf(w.id).length} jour(s)
                   </button>
@@ -1337,8 +1383,11 @@ export function AdministrationPage() {
         </div>
       )}
 
+        </div>
+      )}
+
       {/* ---- Recherche + filtre de rôle ---- */}
-      <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-line bg-surface p-3 sm:flex-row">
+      <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-line bg-surface p-2.5 card-shadow sm:flex-row sm:items-center">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
           <Input
@@ -1361,8 +1410,10 @@ export function AdministrationPage() {
             <button
               key={k.key}
               onClick={() => setRoleFilter(k.key)}
-              className={`rounded-lg px-3 py-1.5 text-[10px] font-bold transition-all ${
-                roleFilter === k.key ? "bg-primary text-white shadow-sm" : "bg-canvas text-muted hover:text-ink"
+              className={`rounded-xl px-3.5 py-2 text-[11px] font-bold transition-all ${
+                roleFilter === k.key
+                  ? "bg-gradient-primary text-white shadow-sm"
+                  : "border border-line bg-canvas/50 text-muted hover:border-primary/40 hover:text-ink"
               }`}
             >
               {k.label}
@@ -1372,7 +1423,7 @@ export function AdministrationPage() {
       </div>
 
       {/* ---- Grille des travailleurs ---- */}
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-2 xl:grid-cols-3">
         {visibleWorkers.map((staff) => {
           const periods = periodsOf(staff);
           const duePeriods = periods.filter((p) => !p.running);
@@ -1382,17 +1433,27 @@ export function AdministrationPage() {
           const todayShift = shiftToday(staff.id);
           const alert = payAlerts.find((a) => a.worker.id === staff.id);
           const expectedToday = worksOn(staff, today);
+          // Le ton de la carte, d'un coup d'œil : retard de paie ou journée
+          // gelée (rouge), absence ou paie proche (ambre), en service (vert).
+          const cardTone =
+            alert?.urgency === "late" || frozen.length > 0
+              ? "from-rose-500 via-red-500 to-rose-700"
+              : todayShift?.status === "absent" || alert
+                ? "from-amber-400 via-orange-400 to-amber-600"
+                : open
+                  ? "from-emerald-400 via-teal-400 to-emerald-600"
+                  : "from-violet-400 via-fuchsia-400 to-violet-600";
 
           return (
             <Card
               key={staff.id}
-              className={`relative transition-all duration-300 ${
-                activeMenuId === staff.id
-                  ? "z-30 scale-[1.02] shadow-2xl ring-2 ring-primary/45"
-                  : "z-10 border border-line hover:z-20 hover:-translate-y-0.5 hover:shadow-lg"
+              gradient
+              className={`relative flex flex-col overflow-hidden transition-all duration-300 ${
+                activeMenuId === staff.id ? "z-30 shadow-2xl ring-2 ring-primary/45" : "z-10"
               }`}
             >
-              <CardBody className="relative flex min-h-[260px] flex-col justify-between p-5">
+              <div className={`h-1 w-full shrink-0 bg-gradient-to-r ${cardTone}`} />
+              <CardBody className="relative flex flex-1 flex-col justify-between p-4">
                 {/* Panneau d'actions */}
                 {activeMenuId === staff.id && (
                   <div className="absolute inset-0 z-20 flex animate-in flex-col justify-between rounded-2xl border border-primary/20 bg-surface/98 p-4 backdrop-blur-md duration-200 fade-in zoom-in-95">
@@ -1499,12 +1560,12 @@ export function AdministrationPage() {
                 <div>
                   <div className="mb-3 flex items-start justify-between">
                     <div className="flex min-w-0 items-center gap-3">
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-primary/20 bg-primary/10 text-xs font-bold tracking-wider text-primary">
+                      <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br ${cardTone} text-sm font-black tracking-wider text-white shadow-md`}>
                         {staff.firstName.slice(0, 1).toUpperCase()}
                         {staff.lastName.slice(0, 1).toUpperCase()}
                       </div>
                       <div className="min-w-0">
-                        <h4 className="truncate text-sm font-bold text-ink">
+                        <h4 className="truncate text-sm font-bold capitalize text-ink">
                           {staff.firstName} {staff.lastName}
                         </h4>
                         <span className="block truncate font-mono text-[10px] text-muted">
@@ -1546,12 +1607,12 @@ export function AdministrationPage() {
                       !expectedToday
                         ? "border-line bg-canvas/30 text-muted"
                         : todayShift?.status === "absent"
-                          ? "border-danger/30 bg-danger/10 text-danger"
+                          ? "border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-300"
                           : open
-                            ? "border-success/30 bg-success/10 text-success"
+                            ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300"
                             : todayShift
-                              ? "border-primary/25 bg-primary-50/40 text-primary"
-                              : "border-warning/30 bg-warning/10 text-warning"
+                              ? "border-primary/25 bg-primary-50/40 text-primary dark:text-rose-200"
+                              : "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300"
                     }`}
                   >
                     <span className="font-bold">
@@ -1589,8 +1650,8 @@ export function AdministrationPage() {
                       onClick={() => openPay(staff)}
                       className={`mb-2.5 flex w-full items-center gap-2 rounded-xl border px-2.5 py-2 text-[10px] font-bold transition-colors ${
                         alert.urgency === "late"
-                          ? "animate-pulse border-danger/40 bg-danger/15 text-danger hover:bg-danger/25"
-                          : "border-warning/40 bg-warning/15 text-warning hover:bg-warning/25"
+                          ? "border-rose-500/40 bg-rose-500/10 text-rose-600 hover:bg-rose-500/20 dark:text-rose-300"
+                          : "border-amber-500/40 bg-amber-500/10 text-amber-600 hover:bg-amber-500/20 dark:text-amber-300"
                       }`}
                     >
                       <DollarSign className="h-3.5 w-3.5 shrink-0" />
@@ -1616,7 +1677,7 @@ export function AdministrationPage() {
                         <span className="block text-[10px] font-semibold uppercase text-muted">
                           Rémunération
                         </span>
-                        <span className="font-bold text-primary">
+                        <span className="font-mono font-bold text-primary dark:text-rose-200">
                           {staff.paymentType === "hourly" ? staff.hourlyRate ?? 0 : staff.salary} DA /{" "}
                           {PAYMENT_UNITS[staff.paymentType]}
                         </span>
@@ -1630,7 +1691,7 @@ export function AdministrationPage() {
                       </div>
                       <div className="rounded-xl border border-line/50 bg-canvas/20 p-2">
                         <span className="block text-[9px] uppercase text-muted">Absences (30 j)</span>
-                        <strong className="mt-0.5 block text-danger">
+                        <strong className="mt-0.5 block text-rose-600 dark:text-rose-300">
                           {
                             shiftsOf(staff.id).filter(
                               (s) =>
@@ -1642,7 +1703,7 @@ export function AdministrationPage() {
                       </div>
                       <div className="rounded-xl border border-line/50 bg-canvas/20 p-2">
                         <span className="block text-[9px] uppercase text-muted">Acomptes</span>
-                        <strong className="mt-0.5 block text-warning">
+                        <strong className="mt-0.5 block text-amber-600 dark:text-amber-300">
                           {openAcomptesOf(staff.id).reduce((s, a) => s + a.amount, 0)} DA
                         </strong>
                       </div>
@@ -1650,23 +1711,56 @@ export function AdministrationPage() {
                   </div>
                 </div>
 
-                <div className="mt-4 flex items-center justify-between border-t border-line/60 pt-3">
+                <div className="mt-3 flex items-center justify-between border-t border-line/60 pt-3">
                   <span className="flex items-center gap-1.5 text-[10px] text-muted">
-                    <span
-                      className={`h-1.5 w-1.5 rounded-full ${
-                        totalDue > 0 ? "animate-pulse bg-warning" : "bg-success"
-                      }`}
-                    />
+                    <span className={`h-1.5 w-1.5 rounded-full ${totalDue > 0 ? "bg-amber-500" : "bg-emerald-500"}`} />
                     {duePeriods.length} période(s) due(s)
                   </span>
-                  <Badge
-                    tone={totalDue > 0 ? "warning" : "success"}
-                    className="font-mono text-[10px] font-bold"
+                  <strong
+                    className={`font-mono text-sm font-black ${
+                      totalDue > 0 ? "text-amber-600 dark:text-amber-300" : "text-emerald-600 dark:text-emerald-300"
+                    }`}
                   >
-                    {totalDue} DA
-                  </Badge>
+                    {totalDue.toLocaleString("fr-FR")} DA
+                  </strong>
                 </div>
               </CardBody>
+
+              {/* Les trois gestes du quotidien, sans ouvrir le menu */}
+              <div className="grid shrink-0 grid-cols-3 divide-x divide-line border-t border-line bg-surface/40 rtl:divide-x-reverse">
+                <button
+                  type="button"
+                  onClick={() => openDetails(staff)}
+                  className="flex items-center justify-center gap-1.5 py-2.5 text-[11px] font-semibold text-muted transition-colors hover:bg-primary-50 hover:text-primary"
+                >
+                  <Eye className="h-3.5 w-3.5" /> Détails
+                </button>
+                {open ? (
+                  <button
+                    type="button"
+                    onClick={() => handleManualEnd(staff)}
+                    className="flex items-center justify-center gap-1.5 py-2.5 text-[11px] font-semibold text-amber-600 transition-colors hover:bg-primary-50 dark:text-amber-300"
+                  >
+                    <LogOut className="h-3.5 w-3.5" /> Fin
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleManualStart(staff)}
+                    disabled={!!todayShift && todayShift.status !== "absent"}
+                    className="flex items-center justify-center gap-1.5 py-2.5 text-[11px] font-semibold text-muted transition-colors hover:bg-primary-50 hover:text-primary disabled:opacity-40"
+                  >
+                    <LogIn className="h-3.5 w-3.5" /> Début
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => openPay(staff)}
+                  className="flex items-center justify-center gap-1.5 py-2.5 text-[11px] font-semibold text-emerald-600 transition-colors hover:bg-primary-50 dark:text-emerald-300"
+                >
+                  <DollarSign className="h-3.5 w-3.5" /> Payer
+                </button>
+              </div>
             </Card>
           );
         })}

@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { Input, Select } from "@/components/ui/SearchInput";
-import { PageHeader } from "@/components/layout/PageHeader";
+import { StudentsPage } from "@/components/pages/StudentsPage";
 import {
   Check,
   Clock,
@@ -25,6 +25,10 @@ import {
   Play,
   Lock,
   Timer,
+  IdCard,
+  Settings2,
+  User,
+  MapPin,
 } from "lucide-react";
 import type {
   AttendanceRecord,
@@ -73,6 +77,7 @@ export function AttendancePage() {
     modules,
     teachers,
     salles,
+    groups,
     attendance,
     freePeriods,
     school,
@@ -88,6 +93,7 @@ export function AttendancePage() {
       modules: s.modules,
       teachers: s.teachers,
       salles: s.salles,
+      groups: s.groups,
       attendance: s.attendance,
       freePeriods: s.freePeriods,
       school: s.school,
@@ -112,6 +118,12 @@ export function AttendancePage() {
 
   // Active Tab: "sheet" (Roll-call Sheet) or "history" (Attendance History)
   const [activeTab, setActiveTab] = useState<"sheet" | "history">("sheet");
+  // La carte d'un élève de la feuille, ouverte ici même — toutes ses actions
+  // (recharge, dette, inscriptions, régularisation…) sans quitter la présence.
+  const [cardStudentId, setCardStudentId] = useState<string | null>(null);
+  // Retrouver un créneau du jour par son nom : matière, classe, groupe,
+  // enseignant, salle ou horaire.
+  const [sessionSearch, setSessionSearch] = useState("");
 
   // Current system date and time (drives the "en cours / terminée" chips)
   const [time, setTime] = useState(new Date());
@@ -613,6 +625,25 @@ export function AttendancePage() {
 
   const getClassName = (cid: string) => classes.find((c) => c.id === cid)?.name ?? "-";
   const getModuleName = (mid: string) => modules.find((m) => m.id === mid)?.name ?? "-";
+  const getGroupName = (gid?: string) => (gid ? groups.find((g) => g.id === gid)?.name : undefined);
+
+  /** Un créneau du jour correspond-il à la recherche (tous les mots) ? */
+  const matchesSessionSearch = (s: ScheduleSession) => {
+    const q = sessionSearch.trim();
+    if (!q) return true;
+    const cl = classes.find((c) => c.id === s.classId);
+    const text = [
+      getModuleName(s.moduleId),
+      s.title ?? "",
+      cl?.name ?? "",
+      getGroupName(s.groupId) ?? "",
+      getTeacherName(s.teacherId),
+      salles.find((sl) => sl.id === s.salleId)?.name ?? "",
+      `${s.startTime}-${s.endTime}`,
+    ].join(" ");
+    return matchesAllWords(text, q);
+  };
+
   const getTeacherName = (tid: string) => {
     const t = teachers.find((te) => te.id === tid);
     return t ? `${t.firstName} ${t.lastName}` : "-";
@@ -844,25 +875,37 @@ export function AttendancePage() {
 
   return (
     <div>
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
-        <PageHeader emoji="✅" title="Présences" subtitle="Suivi et historique des feuilles de présence journalières" />
+      <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="flex items-center gap-3">
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-primary text-2xl shadow-md">
+            ✅
+          </span>
+          <div>
+            <h1 className="text-xl font-bold text-ink md:text-2xl">Présences</h1>
+            <p className="text-sm text-muted">Feuille du jour, pointage et historique des présences</p>
+          </div>
+        </div>
 
-        <div className="flex gap-2">
-          {/* Tab Selection buttons */}
-          <Button
-            variant={activeTab === "sheet" ? "primary" : "outline"}
+        {/* Deux vues, un seul interrupteur */}
+        <div className="inline-flex rounded-xl border border-line bg-surface p-1 card-shadow">
+          <button
+            type="button"
             onClick={() => setActiveTab("sheet")}
-            className="text-xs"
+            className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-bold transition-colors ${
+              activeTab === "sheet" ? "bg-gradient-primary text-white shadow-sm" : "text-muted hover:text-ink"
+            }`}
           >
-            <UserCheck className="h-4 w-4" /> Feuille du Jour
-          </Button>
-          <Button
-            variant={activeTab === "history" ? "primary" : "outline"}
+            <UserCheck className="h-4 w-4" /> Feuille du jour
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveTab("history")}
-            className="text-xs"
+            className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-bold transition-colors ${
+              activeTab === "history" ? "bg-gradient-primary text-white shadow-sm" : "text-muted hover:text-ink"
+            }`}
           >
-            <Calendar className="h-4 w-4" /> Historique & Rapports
-          </Button>
+            <Calendar className="h-4 w-4" /> Historique &amp; rapports
+          </button>
         </div>
       </div>
 
@@ -929,11 +972,11 @@ export function AttendancePage() {
                 </div>
                 <div className="rounded-xl border border-line bg-canvas/40 px-3 py-1.5 text-center">
                   <span className="block text-[9px] uppercase font-bold text-muted">Pointés</span>
-                  <strong className="text-sm text-success">{sheetMarks.length}</strong>
+                  <strong className="text-sm text-emerald-600 dark:text-emerald-300">{sheetMarks.length}</strong>
                 </div>
                 <div className="rounded-xl border border-line bg-canvas/40 px-3 py-1.5 text-center">
                   <span className="block text-[9px] uppercase font-bold text-muted">Absents</span>
-                  <strong className="text-sm text-danger">
+                  <strong className="text-sm text-rose-600 dark:text-rose-300">
                     {Math.max(0, sheetExpected - sheetMarks.length)}
                   </strong>
                 </div>
@@ -944,7 +987,7 @@ export function AttendancePage() {
               </div>
             </div>
 
-            <p className="text-[11px] text-muted">
+            <p className="hidden text-[11px] text-muted">
               Seules les séances programmées le <strong>{getDayLabel(sheetDay).toLowerCase()}</strong> sont affichées.
               Tous les élèves sont <strong>absents par défaut</strong> tant qu&apos;ils n&apos;ont pas scanné leur carte
               ou été marqués présents. Vous pouvez <strong>revenir sur un jour passé</strong> et corriger les présences
@@ -966,7 +1009,26 @@ export function AttendancePage() {
             <FreeBillingBanner date={sheetDate} />
 
             {/* Quand la feuille s'ouvre : à l'heure dite, ou sur clic. */}
-            <div className="rounded-xl border border-line bg-canvas/40 p-3 space-y-2">
+            <details className="group rounded-xl border border-line bg-canvas/40">
+              <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[11px] text-muted">
+                <Settings2 className="h-3.5 w-3.5 text-primary" />
+                <span className="font-bold uppercase tracking-wider">Réglages du pointage</span>
+                <span className="truncate">
+                  —{" "}
+                  {attendanceOpenMode === "manual"
+                    ? "ouverture manuelle"
+                    : attendanceOpenMode === "fixed"
+                      ? `ouverture à ${attendanceOpenAt || "00:00"}`
+                      : `ouverture ${attendanceOpenLead} min avant la séance`}
+                </span>
+                <span className="ms-auto transition-transform group-open:rotate-180">▾</span>
+              </summary>
+            <div className="space-y-2 border-t border-line p-3">
+              <p className="text-[11px] text-muted">
+                Tous les élèves sont <strong>absents par défaut</strong> tant qu&apos;ils n&apos;ont pas scanné leur carte
+                ou été marqués présents. Un jour passé se corrige à tout moment : chaque correction débite ou
+                rembourse le solde.
+              </p>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                 <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-muted">
                   <Timer className="h-3.5 w-3.5" /> Ouverture du pointage
@@ -1028,6 +1090,7 @@ export function AttendancePage() {
                 ce poste.
               </p>
             </div>
+            </details>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1113,9 +1176,41 @@ export function AttendancePage() {
                 </Card>
               )}
 
-              <h3 className="text-sm font-bold text-ink mb-2">
-                Séances du {getDayLabel(sheetDay).toLowerCase()} {formatDateFr(sheetDate)}
-              </h3>
+              <div className="space-y-2">
+                <h3 className="flex items-center justify-between text-sm font-bold text-ink">
+                  <span>
+                    Séances du {getDayLabel(sheetDay).toLowerCase()} {formatDateFr(sheetDate)}
+                  </span>
+                  <span className="font-mono text-[11px] font-normal text-muted">
+                    {sheetSessions.filter(matchesSessionSearch).length}/{sheetSessions.length}
+                  </span>
+                </h3>
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                  <Input
+                    value={sessionSearch}
+                    onChange={(e) => setSessionSearch(e.target.value)}
+                    placeholder="Chercher un emploi du temps : matière, classe, enseignant…"
+                    className="pl-9 pr-9"
+                  />
+                  {sessionSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setSessionSearch("")}
+                      title="Effacer"
+                      className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-lg text-muted hover:bg-primary-50 hover:text-ink"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {sheetSessions.length > 0 && sheetSessions.filter(matchesSessionSearch).length === 0 && (
+                <p className="rounded-xl border border-dashed border-line py-5 text-center text-xs italic text-muted">
+                  Aucun emploi du temps du jour ne correspond à « {sessionSearch.trim()} ».
+                </p>
+              )}
 
               {sheetSessions.length === 0 && (
                 <Card className="border border-line bg-canvas/30 p-6 text-center">
@@ -1128,7 +1223,7 @@ export function AttendancePage() {
                 </Card>
               )}
 
-              {sheetSessions.map((s) => {
+              {sheetSessions.filter(matchesSessionSearch).map((s) => {
                 const isActive = activeSessionId === s.id;
                 const cl = classes.find((c) => c.id === s.classId);
                 const isTeacherAbs = absentTeachers[s.id] || false;
@@ -1172,9 +1267,18 @@ export function AttendancePage() {
                       </div>
                     </div>
 
-                    <div className="flex justify-between items-center text-[10px] pt-1.5 border-t border-white/10">
-                      <span className={isActive ? "text-white/80" : "text-muted"}>
-                        Salle: {salles.find((sl) => sl.id === s.salleId)?.name}
+                    <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] ${isActive ? "text-white/90" : "text-ink"}`}>
+                      <span className="inline-flex items-center gap-1 font-semibold">
+                        <User className="h-3 w-3" /> {getTeacherName(s.teacherId)}
+                      </span>
+                      {getGroupName(s.groupId) && (
+                        <span className={isActive ? "text-white/80" : "text-muted"}>Groupe {getGroupName(s.groupId)}</span>
+                      )}
+                    </div>
+
+                    <div className={`flex justify-between items-center text-[10px] pt-1.5 border-t ${isActive ? "border-white/15" : "border-line"}`}>
+                      <span className={`inline-flex items-center gap-1 ${isActive ? "text-white/80" : "text-muted"}`}>
+                        <MapPin className="h-3 w-3" /> Salle {salles.find((sl) => sl.id === s.salleId)?.name ?? "—"}
                       </span>
                       <strong className="font-mono">{s.startTime} - {s.endTime}</strong>
                     </div>
@@ -1185,12 +1289,12 @@ export function AttendancePage() {
                       }`}
                     >
                       <span>
-                        Pointés : <strong className={isActive ? "text-white" : "text-success"}>{marked}</strong> /{" "}
+                        Pointés : <strong className={isActive ? "text-white" : "text-emerald-600 dark:text-emerald-300"}>{marked}</strong> /{" "}
                         {roster}
                       </span>
                       <span>
                         Absents :{" "}
-                        <strong className={isActive ? "text-white" : "text-danger"}>
+                        <strong className={isActive ? "text-white" : "text-rose-600 dark:text-rose-300"}>
                           {Math.max(0, roster - marked)}
                         </strong>
                       </span>
@@ -1331,9 +1435,27 @@ export function AttendancePage() {
                             return (
                               <div
                                 key={stu.id}
-                                className="flex flex-col sm:flex-row sm:items-center justify-between p-3 bg-canvas/30 border border-line rounded-xl gap-3 text-xs"
+                                className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border p-3 text-xs transition-colors ${
+                                  attToday
+                                    ? attToday.status === "late"
+                                      ? "border-amber-500/30 bg-amber-500/5"
+                                      : "border-emerald-500/30 bg-emerald-500/5"
+                                    : "border-line bg-canvas/30"
+                                }`}
                               >
-                                <div>
+                                <div className="flex min-w-0 items-center gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => setCardStudentId(stu.id)}
+                                    title="Ouvrir la carte de l'élève (recharge, dette, inscriptions, régularisation…)"
+                                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br text-xs font-black uppercase text-white shadow-sm transition-transform hover:scale-105 ${
+                                      inDebt ? "from-rose-500 to-red-700" : isFree ? "from-violet-500 to-fuchsia-700" : "from-emerald-500 to-teal-700"
+                                    }`}
+                                  >
+                                    {stu.firstName.substring(0, 1)}
+                                    {stu.lastName.substring(0, 1)}
+                                  </button>
+                                <div className="min-w-0">
                                   <strong className="text-ink block">
                                     {stu.firstName} {stu.lastName}{" "}
                                     {isFree && <Badge tone="success" className="text-[8px] py-0">Gratuit</Badge>}{" "}
@@ -1387,17 +1509,27 @@ export function AttendancePage() {
                                     </span>
                                   )}
                                 </div>
+                                </div>
 
                                 {/* Attendance selectors — absent is the default
                                     state, and a future day can't be marked */}
-                                <div className="flex items-center gap-1.5 self-end sm:self-center">
+                                <div className="flex flex-wrap items-center gap-1.5 self-end sm:self-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => setCardStudentId(stu.id)}
+                                    title="Ouvrir la carte de l'élève"
+                                    className="flex h-8 items-center gap-1 rounded-lg border border-primary/40 bg-primary/10 px-3 font-bold text-primary transition-colors hover:bg-primary/20 dark:text-rose-200"
+                                  >
+                                    <IdCard className="h-3.5 w-3.5" /> Carte
+                                  </button>
+                                  <span className="mx-0.5 hidden h-6 w-px bg-line sm:block" />
                                   <button
                                     onClick={() => requestMark(stu, "present")}
                                     disabled={!!rollCallLock}
                                     title={rollCallLock}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       attToday?.status === "present"
-                                        ? "bg-success text-white shadow-sm"
+                                        ? "bg-emerald-600 text-white shadow-sm"
                                         : "bg-surface border border-line text-muted hover:text-ink"
                                     }`}
                                   >
@@ -1409,7 +1541,7 @@ export function AttendancePage() {
                                     title={rollCallLock}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       attToday?.status === "late"
-                                        ? "bg-warning text-white shadow-sm"
+                                        ? "bg-amber-500 text-white shadow-sm"
                                         : "bg-surface border border-line text-muted hover:text-ink"
                                     }`}
                                   >
@@ -1421,7 +1553,7 @@ export function AttendancePage() {
                                     title={rollCallLock}
                                     className={`h-8 px-3 rounded-lg font-bold flex items-center gap-1 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
                                       !attToday
-                                        ? "bg-danger text-white shadow-sm"
+                                        ? "bg-rose-600 text-white shadow-sm"
                                         : "bg-surface border border-line text-muted hover:text-ink"
                                     }`}
                                   >
@@ -1817,6 +1949,17 @@ export function AttendancePage() {
             </div>
           );
         })()}
+      </Modal>
+
+      {/* La carte de l'élève, exactement celle de l'écran Étudiants — avec
+          toutes ses actions et leurs fenêtres. */}
+      <Modal
+        open={!!cardStudentId}
+        onClose={() => setCardStudentId(null)}
+        title="Carte de l'élève"
+        subtitle="Toutes les actions de l'écran Étudiants, sans quitter la feuille de présence."
+      >
+        {cardStudentId && <StudentsPage key={cardStudentId} focusStudentId={cardStudentId} />}
       </Modal>
     </div>
   );
