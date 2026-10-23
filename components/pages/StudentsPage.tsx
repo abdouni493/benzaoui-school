@@ -4,12 +4,10 @@ import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } f
 import { useData, uid } from "@/lib/store/data";
 import { useShallow } from "zustand/react/shallow";
 import { createRoleUser, resetUserPassword } from "@/lib/supabase/createUser";
-import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
-import { PageHeader } from "@/components/layout/PageHeader";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import {
   Eye,
@@ -21,7 +19,6 @@ import {
   BookOpen,
   CheckCircle,
   Scan,
-  Bell,
   Send,
   AlertTriangle,
   Wallet,
@@ -88,6 +85,11 @@ import {
 } from "@/components/students/StudentDetailsModal";
 import { StudentCardGrid, type StudentCardActions } from "@/components/students/StudentCard";
 import { StudentRepairModal } from "@/components/students/StudentRepairModal";
+import {
+  StudentsToolbar,
+  type StudentFilter,
+  type StudentSort,
+} from "@/components/students/StudentsToolbar";
 
 /** Domaine des identifiants du portail. Les comptes élèves ne servent qu'à se
  *  connecter à l'application : l'adresse est fabriquée, jamais une vraie boîte
@@ -168,7 +170,8 @@ export function StudentsPage() {
 
   // Search & Filtering
   const [searchQuery, setSearchQuery] = useState("");
-  const [filterType, setFilterType] = useState<"all" | "debt" | "paid" | "free" | "soon">("all");
+  const [filterType, setFilterType] = useState<StudentFilter>("all");
+  const [sortBy, setSortBy] = useState<StudentSort>("recent");
 
   // Modals
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -514,6 +517,19 @@ export function StudentsPage() {
     return { debtors: rows, totalOwed: rows.reduce((sum, row) => sum + row.owed, 0) };
   }, [students, debtOf]);
 
+  /** Ce que chaque compteur de l'en-tête annonce — et que son filtre retient. */
+  const filterCounts = useMemo<Record<StudentFilter, number>>(
+    () => ({
+      all: students.length,
+      debt: debtors.length,
+      soon: soonStudents.length,
+      paid: students.length - debtors.length,
+      free: students.filter((s) => s.isFree).length,
+      drift: driftByStudent.size,
+    }),
+    [students, debtors, soonStudents, driftByStudent],
+  );
+
   // La saisie reste fluide : le filtrage suit la frappe avec un temps de retard
   // plutôt que de la bloquer à chaque lettre.
   const deferredSearch = useDeferredValue(searchQuery);
@@ -541,13 +557,20 @@ export function StudentsPage() {
         if (filterType === "paid") return !debtOf(s).alert;
         if (filterType === "free") return s.isFree;
         if (filterType === "soon") return soon?.has(s.id) ?? false;
+        if (filterType === "drift") return debtOf(s).drift !== 0;
 
         return true;
       })
-      // Du plus récemment inscrit au plus ancien : la fiche qu'on vient
-      // d'enregistrer est la première sous les yeux de la réception.
-      .sort(byNewestFirst);
-  }, [students, deferredSearch, filterType, debtOf, soonStudents]);
+      // Par défaut, du plus récemment inscrit au plus ancien : la fiche qu'on
+      // vient d'enregistrer est la première sous les yeux de la réception.
+      .sort(
+        sortBy === "name"
+          ? (a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`, "fr")
+          : sortBy === "balance"
+            ? (a, b) => a.balance - b.balance
+            : byNewestFirst,
+      );
+  }, [students, deferredSearch, filterType, sortBy, debtOf, soonStudents]);
 
   const handleCreateStudent = async () => {
     if (!firstName || !lastName || !phone || !rfid) {
@@ -3255,135 +3278,105 @@ export function StudentsPage() {
 
   return (
     <div>
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
-        <PageHeader emoji="🎓" title="Étudiants" subtitle="Gérer les inscriptions et abonnements des élèves" />
-
-        <div className="flex items-center gap-2">
-          {/* Qui a étudié sans provision ? La question se posait fiche par fiche.
-              Elle a maintenant son bouton, avec le nombre d'élèves concernés
-              lisible sans ouvrir quoi que ce soit. */}
-          <Button
-            onClick={() => setIsDebtorsOpen(true)}
-            variant="outline"
-            title={
-              debtors.length > 0
-                ? `${debtors.length} élève(s) en dette — ${totalOwed} DA à recouvrer`
-                : "Aucun élève en dette"
-            }
-            className="flex items-center gap-2 border-danger/30 hover:border-danger hover:bg-danger/10 text-danger relative"
-          >
-            <AlertTriangle className="h-4 w-4 text-danger" /> Élèves en dette
-            {debtors.length > 0 && (
-              <span className="absolute -top-1 -right-1 bg-danger text-white text-[9px] font-bold h-4.5 w-4.5 rounded-full flex items-center justify-center pulse-glow">
-                {debtors.length}
-              </span>
-            )}
+      {/* En-tête : l'écran, son effectif, et les deux gestes du guichet. */}
+      <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div className="flex items-center gap-3">
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-primary text-2xl shadow-md">
+            🎓
+          </span>
+          <div>
+            <h1 className="text-xl font-bold text-ink md:text-2xl">Étudiants</h1>
+            <p className="text-sm text-muted">
+              {students.length} élève(s) — inscriptions, soldes, présences et paiements
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={() => setIsScanOpen(true)} variant="outline" className="flex items-center gap-2">
+            <Scan className="h-4 w-4" /> Scanner une carte
           </Button>
           <Button
             onClick={() => {
-              const lowStus = soonStudents;
-              setSelectedAlertStudentIds(lowStus.map((s) => s.id));
-              setIsAlertLowBalanceOpen(true);
+              resetForm();
+              setIsCreateOpen(true);
             }}
-            variant="outline"
-            className="flex items-center gap-2 border-danger/30 hover:border-danger hover:bg-danger/10 text-danger relative"
+            className="flex items-center gap-2"
           >
-            <Bell className="h-4 w-4 text-danger" /> Alertes Soldes
-            {soonStudents.length > 0 && (
-              <span className="absolute -top-1 -right-1 bg-danger text-white text-[9px] font-bold h-4.5 w-4.5 rounded-full flex items-center justify-center pulse-glow">
-                {soonStudents.length}
-              </span>
-            )}
-          </Button>
-          <Button onClick={() => setIsScanOpen(true)} variant="secondary" className="flex items-center gap-2">
-            <Scan className="h-4 w-4" /> Scanner RFID
-          </Button>
-          <Button onClick={() => { resetForm(); setIsCreateOpen(true); }} className="flex items-center gap-2">
-            <Plus className="h-4 w-4" /> Nouvel Étudiant
+            <Plus className="h-4 w-4" /> Nouvel étudiant
           </Button>
         </div>
       </div>
 
       {/* Un scan qui ne débite rien n'est presque jamais une panne : c'est une
           gratuité active. Elle se voit donc ici, sur l'écran qui scanne. */}
-      <div className="mb-6">
+      <div className="mb-5 empty:hidden">
         <FreeBillingBanner />
       </div>
 
-      {/* Filter panel */}
-      <div className="flex flex-col sm:flex-row gap-3 mb-6 bg-surface border border-line p-3 rounded-2xl">
-        <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted" />
-          <Input
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Rechercher par nom, carte RFID, téléphone ou email..."
-            className="pl-9"
-          />
-        </div>
-        <div className="flex gap-1">
-          <Button size="sm" variant={filterType === "all" ? "primary" : "outline"} onClick={() => setFilterType("all")}>
-            Tous
-          </Button>
-          <Button size="sm" variant={filterType === "soon" ? "primary" : "outline"} onClick={() => setFilterType("soon")}>
-            Presque Épuisé
-          </Button>
-          <Button size="sm" variant={filterType === "debt" ? "primary" : "outline"} onClick={() => setFilterType("debt")}>
-            En dette
-          </Button>
-          <Button size="sm" variant={filterType === "paid" ? "primary" : "outline"} onClick={() => setFilterType("paid")}>
-            À jour
-          </Button>
-          <Button size="sm" variant={filterType === "free" ? "primary" : "outline"} onClick={() => setFilterType("free")}>
-            Cas Spéciaux
-          </Button>
-        </div>
-      </div>
+      {/* Les compteurs SONT les filtres ; débiteurs et soldes presque épuisés
+          s'ouvrent depuis leur compteur. */}
+      <StudentsToolbar
+        counts={filterCounts}
+        totalOwed={totalOwed}
+        filter={filterType}
+        onFilter={setFilterType}
+        search={searchQuery}
+        onSearch={setSearchQuery}
+        sort={sortBy}
+        onSort={setSortBy}
+        shown={filteredStudents.length}
+        onOpenDebtors={() => setIsDebtorsOpen(true)}
+        onOpenLowBalance={() => {
+          setSelectedAlertStudentIds(soonStudents.map((s) => s.id));
+          setIsAlertLowBalanceOpen(true);
+        }}
+      />
 
-      {/* Formation expiry alerts */}
-      {(() => {
-        const alerts = expiryAlerts;
-        if (alerts.length === 0) return null;
-        return (
-          <Card className="mb-6">
-            <CardBody>
-              <div className="flex items-start gap-3">
-                <div className="rounded-xl bg-warning/15 p-2.5 text-warning">
-                  <AlertTriangle className="h-5 w-5" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="text-sm font-bold text-ink">Alertes d&apos;expiration des formations</h3>
-                  <p className="mt-0.5 text-xs text-muted">
-                    Formations expirées ou qui expirent dans les {EXPIRY_WARNING_DAYS} prochains jours.
-                  </p>
-                  <div className="mt-2 space-y-1.5">
-                    {alerts.map((a) => (
-                      <div
-                        key={`${a.stu.id}-${a.subId}`}
-                        className="flex flex-wrap items-center justify-between gap-2 text-xs bg-canvas/40 border border-line rounded-lg px-3 py-1.5"
-                      >
-                        <span>
-                          <strong className="text-ink">
-                            {a.stu.firstName} {a.stu.lastName}
-                          </strong>
-                          <span className="text-muted"> — {a.label}</span>
-                        </span>
-                        <Badge tone={a.daysLeft < 0 ? "danger" : "warning"} className="text-[10px]">
-                          {a.daysLeft < 0
-                            ? `Expirée le ${formatDateFr(a.expiryDate)}`
-                            : a.daysLeft === 0
-                              ? "Expire aujourd'hui"
-                              : `Expire dans ${a.daysLeft} j (${formatDateFr(a.expiryDate)})`}
-                        </Badge>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+      {/* Formations expirées ou sur le point de l'être : repliées en une ligne,
+          ouvertes d'office dès qu'une formation a DÉJÀ expiré. */}
+      {expiryAlerts.length > 0 && (
+        <details
+          open={expiryAlerts.some((a) => a.daysLeft < 0)}
+          className="group mb-6 overflow-hidden rounded-2xl border border-amber-500/30 bg-amber-500/5"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3">
+            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-300">
+              <AlertTriangle className="h-4 w-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <strong className="block text-sm text-ink">
+                {expiryAlerts.length} formation(s) expirée(s) ou bientôt expirée(s)
+              </strong>
+              <span className="block text-[11px] text-muted">
+                Expirées, ou qui expirent dans les {EXPIRY_WARNING_DAYS} prochains jours — cliquez pour le détail.
+              </span>
+            </span>
+            <span className="text-xs font-semibold text-muted transition-transform group-open:rotate-180">▾</span>
+          </summary>
+          <div className="grid grid-cols-1 gap-1.5 border-t border-amber-500/20 p-3 md:grid-cols-2">
+            {expiryAlerts.map((a) => (
+              <div
+                key={`${a.stu.id}-${a.subId}`}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-xs"
+              >
+                <span className="min-w-0">
+                  <strong className="capitalize text-ink">
+                    {a.stu.firstName} {a.stu.lastName}
+                  </strong>
+                  <span className="text-muted"> — {a.label}</span>
+                </span>
+                <Badge tone={a.daysLeft < 0 ? "danger" : "warning"} className="text-[10px]">
+                  {a.daysLeft < 0
+                    ? `Expirée le ${formatDateFr(a.expiryDate)}`
+                    : a.daysLeft === 0
+                      ? "Expire aujourd'hui"
+                      : `Expire dans ${a.daysLeft} j (${formatDateFr(a.expiryDate)})`}
+                </Badge>
               </div>
-            </CardBody>
-          </Card>
-        );
-      })()}
+            ))}
+          </div>
+        </details>
+      )}
 
       {/* Students list — cartes mémorisées, affichées par tranches : taper dans
           une fenêtre ne redessine plus des centaines de cartes derrière elle. */}
@@ -3394,7 +3387,7 @@ export function StudentsPage() {
         parentById={parentById}
         labelOf={getModuleLabel}
         actions={cardActions}
-        resetKey={`${deferredSearch}|${filterType}`}
+        resetKey={`${deferredSearch}|${filterType}|${sortBy}`}
       />
 
       {/* Creation Modal */}

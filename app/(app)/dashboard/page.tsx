@@ -6,7 +6,6 @@ import { useData } from "@/lib/store/data";
 import { useShallow } from "zustand/react/shallow";
 import { useSession } from "@/lib/store/session";
 import { Card, CardBody } from "@/components/ui/Card";
-import { PageHeader } from "@/components/layout/PageHeader";
 
 // Le portail enseignant n'est téléchargé que par un compte enseignant.
 const TeacherPages = dynamic(
@@ -17,23 +16,31 @@ import { DaySchedulePanel } from "@/components/schedule/DaySchedulePanel";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 import { WhatsAppAlertsCard } from "@/components/whatsapp/WhatsAppAlertsCard";
 import { BirthdayAlertsCard } from "@/components/birthdays/BirthdayAlertsCard";
-import { balanceDriftByStudent, studentDebtOf } from "@/lib/helpers";
+import {
+  balanceDriftByStudent,
+  schoolDateKey,
+  schoolDateTimeLabel,
+  sessionsOnDate,
+  studentDebtOf,
+} from "@/lib/helpers";
 import { payAlertsOf, pendingAbsencesOf } from "@/lib/workerPay";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import {
-  Users,
-  GraduationCap,
-  Calendar,
-  CheckCircle2,
-  DollarSign,
   AlertTriangle,
-  TrendingUp,
-  ArrowUpRight,
-  ArrowDownLeft,
+  ArrowRight,
+  BadgeCheck,
   BookOpen,
+  CalendarCheck,
+  ChevronRight,
+  GraduationCap,
+  Info,
   Receipt,
-  TrendingDown
+  TrendingUp,
+  Users,
+  Wallet,
+  HandCoins,
+  ClipboardList,
 } from "lucide-react";
 
 export default function DashboardPage() {
@@ -48,9 +55,9 @@ const containerVariants = {
   show: {
     opacity: 1,
     transition: {
-      staggerChildren: 0.05
-    }
-  }
+      staggerChildren: 0.05,
+    },
+  },
 };
 
 const itemVariants = {
@@ -61,10 +68,31 @@ const itemVariants = {
     transition: {
       type: "spring" as const,
       stiffness: 100,
-      damping: 15
-    }
-  }
+      damping: 15,
+    },
+  },
 };
+
+type Severity = "danger" | "warning" | "info";
+interface DashboardAlert {
+  type: Severity;
+  text: string;
+  href?: string;
+}
+
+const SEVERITY_ORDER: Record<Severity, number> = { danger: 0, warning: 1, info: 2 };
+
+// Teintes fixes, avec leur variante claire en thème sombre : `--success` et
+// `--warning` y deviennent illisibles sur le fond bordeaux.
+const TONE = {
+  primary: { chip: "bg-primary/15 text-primary dark:text-rose-200", value: "text-ink" },
+  success: { chip: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-300", value: "text-emerald-600 dark:text-emerald-300" },
+  danger: { chip: "bg-rose-500/15 text-rose-600 dark:text-rose-300", value: "text-rose-600 dark:text-rose-300" },
+  warning: { chip: "bg-amber-500/15 text-amber-600 dark:text-amber-300", value: "text-amber-600 dark:text-amber-300" },
+  info: { chip: "bg-sky-500/15 text-sky-600 dark:text-sky-300", value: "text-sky-600 dark:text-sky-300" },
+} as const;
+
+const da = (n: number) => `${n.toLocaleString("fr-FR")} DA`;
 
 function AdminDashboard({ reception = false }: { reception?: boolean }) {
   // L'heure courante ne se lit pas pendant le rendu — deux rendus successifs
@@ -76,6 +104,7 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     return () => clearInterval(id);
   }, []);
 
+  const userName = useSession((s) => s.user?.name);
   const {
     students,
     teachers,
@@ -116,17 +145,17 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     })),
   );
 
-  // 1. General Operational Metrics
-  const totalStudents = students.length;
-  const totalTeachers = teachers.length;
-  const totalClasses = classes.length;
+  // ---- 1. La journée — à l'heure de l'école, quel que soit le poste ----------
+  const today = schoolDateKey(nowMs);
+  const { presentToday, sessionsToday } = useMemo(() => {
+    let present = 0;
+    for (const a of attendance) {
+      if ((a.status === "present" || a.status === "late") && schoolDateKey(a.timestamp) === today) present += 1;
+    }
+    return { presentToday: present, sessionsToday: sessionsOnDate(sessions, today).length };
+  }, [attendance, sessions, today]);
 
-  const todayStr = new Date().toISOString().split("T")[0];
-  const todayAttendance = attendance.filter((a) => a.timestamp.startsWith(todayStr));
-  const presentCount = todayAttendance.filter((a) => a.status === "present" || a.status === "late").length;
-  const attendanceRate = todayAttendance.length > 0 ? Math.round((presentCount / todayAttendance.length) * 100) : 0;
-
-  // 2. Financial Metrics (Admin Only)
+  // ---- 2. L'argent --------------------------------------------------------------
   const cashInHand = cash.reduce((sum, tx) => sum + tx.amount, 0);
 
   // Ce que l'école a à recouvrer, élève par élève : son solde négatif et ses
@@ -136,8 +165,7 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   // total des présences par-dessus comptait deux fois les mêmes séances.
   // Tout ce qui suit est recalculé UNIQUEMENT quand les tables qu'il lit
   // changent — plus à chaque minute d'horloge, plus à chaque scan qui ne les
-  // concerne pas. Les recherches linéaires imbriquées (élève × inscription ×
-  // abonnement × créneau) passent par des index construits une seule fois.
+  // concerne pas.
   const { debtors, totalDebts, studiedWithoutFunds, driftingBalances } = useMemo(() => {
     const driftByStudent = balanceDriftByStudent({
       students,
@@ -156,9 +184,9 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
       // crée tout seul, celle que personne n'a décidée au guichet.
       studiedWithoutFunds: debtors.filter((row) => row.debt.sessions > 0),
       // Les soldes qui ne valent pas la somme de leur propre historique. Ce
-      // n'est PAS de l'argent dû : c'est une écriture qui a manqué sa cible, à
-      // réparer en base. On les compte sur TOUS les élèves, pas seulement les
-      // débiteurs — un solde faux est le plus souvent faux dans le sens positif.
+      // n'est PAS de l'argent dû : c'est une écriture qui a manqué sa cible.
+      // On les compte sur TOUS les élèves, pas seulement les débiteurs — un
+      // solde faux est le plus souvent faux dans le sens positif.
       driftingBalances: students.filter((s) => (driftByStudent.get(s.id) ?? 0) !== 0),
     };
   }, [students, balanceTx, complete.balanceTx]);
@@ -195,41 +223,51 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
       for (const g of groupsOfStudent) perGroup.set(g, (perGroup.get(g) ?? 0) + 1);
     }
     return {
-      // 3. Subscription Count By Module (CSS Bar Chart Data) — top 5
+      // Inscriptions par module — les 6 plus suivis
       moduleEnrollments: modules
         .map((m) => ({ name: m.name, count: counts.get(m.id) ?? 0 }))
+        .filter((m) => m.count > 0)
         .sort((a, b) => b.count - a.count)
-        .slice(0, 5),
+        .slice(0, 6),
       studentsPerGroup: perGroup,
     };
   }, [students, subscriptions, sessions, modules]);
   const maxEnrollment = Math.max(...moduleEnrollments.map((m) => m.count), 1);
 
-  // 4. Weekly Cash Flows (Admin Only - CSS Bar Chart Data)
-  const getWeeklyCashFlows = () => {
-    const days = [];
-    const now = new Date();
-
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(now.getDate() - i);
-      const dateStr = d.toISOString().split("T")[0];
-
-      const dayTxs = cash.filter((tx) => tx.date.startsWith(dateStr));
-      const inflows = dayTxs.filter((tx) => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0);
-      const outflows = dayTxs.filter((tx) => tx.amount < 0).reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
-
-      const label = d.toLocaleDateString("fr-FR", { weekday: "short" });
-      days.push({ label, dateStr, inflows, outflows });
+  // ---- 3. La caisse des 7 derniers jours (jours de l'école) ------------------
+  const { weeklyCashData, recentTransactions } = useMemo(() => {
+    const byDay = new Map<string, { inflows: number; outflows: number }>();
+    for (const tx of cash) {
+      const key = schoolDateKey(tx.date);
+      const cur = byDay.get(key) ?? { inflows: 0, outflows: 0 };
+      if (tx.amount > 0) cur.inflows += tx.amount;
+      else cur.outflows += -tx.amount;
+      byDay.set(key, cur);
     }
-
-    return days;
-  };
-
-  const weeklyCashData = getWeeklyCashFlows();
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(`${today}T12:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      const flows = byDay.get(key) ?? { inflows: 0, outflows: 0 };
+      days.push({
+        key,
+        label: d.toLocaleDateString("fr-FR", { weekday: "short", timeZone: "UTC" }),
+        ...flows,
+      });
+    }
+    return {
+      weeklyCashData: days,
+      // Les derniers mouvements par DATE — l'ordre de la table n'est pas celui
+      // de la caisse.
+      recentTransactions: [...cash].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6),
+    };
+  }, [cash, today]);
   const maxCashValue = Math.max(...weeklyCashData.map((d) => Math.max(d.inflows, d.outflows)), 1000);
+  const weekIn = weeklyCashData.reduce((s, d) => s + d.inflows, 0);
+  const weekOut = weeklyCashData.reduce((s, d) => s + d.outflows, 0);
 
-  // 5. Intelligent Alerts & Analytics
+  // ---- 4. Ce qui demande une action -------------------------------------------
   const severeDebtors = debtors.filter((row) => row.owed >= 2000);
   const lowEnrollmentGroups = groups.filter((g) => {
     const enrolledCount = studentsPerGroup.get(g.id) ?? 0;
@@ -238,40 +276,27 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
 
   const heavyUnpaidTeachers = teachers.filter((t) => (unpaidByTeacher.get(t.id) ?? 0) >= 5000);
 
-  // ---------------------------------------------------------------------------
-  // 5.a  Les salaires du personnel
-  // ---------------------------------------------------------------------------
-  // Calculés par `lib/workerPay.ts`, exactement comme sur l'écran Travailleurs.
-  // Deux calculs séparés finissaient toujours par annoncer deux retards
-  // différents — et c'est le tableau de bord qu'on croit.
+  // Les salaires du personnel, calculés par `lib/workerPay.ts` exactement comme
+  // sur l'écran Travailleurs : deux calculs séparés finissaient toujours par
+  // annoncer deux retards différents — et c'est le tableau de bord qu'on croit.
   const { lateWorkers, soonWorkers, pendingWorkerAbsences } = useMemo(() => {
     const workerAlerts = payAlertsOf(workers, workerShifts, workerPayments);
     return {
       lateWorkers: workerAlerts.filter((a) => a.urgency === "late"),
       soonWorkers: workerAlerts.filter((a) => a.urgency === "soon"),
-      // Les absences dont la retenue n'a jamais été tranchée. Même module que
-      // l'écran Travailleurs : les deux annoncent donc exactement les mêmes.
+      // Les absences dont la retenue n'a jamais été tranchée.
       pendingWorkerAbsences: pendingAbsencesOf(workers, workerShifts),
     };
     // `nowMs` : l'échéance d'un salaire avance avec l'horloge.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workers, workerShifts, workerPayments, nowMs]);
 
-  // ---------------------------------------------------------------------------
-  // 5.b  Les séances particulières
-  // ---------------------------------------------------------------------------
-  // « À programmer » : la demande est prise, mais rien n'est posé. Elle n'a
-  // même pas de date à partir de laquelle on pourrait la dire en retard — c'est
-  // ainsi qu'une famille attend un coup de fil qui ne vient jamais.
+  // Les séances particulières. « À programmer » : la demande est prise, mais
+  // rien n'est posé — c'est ainsi qu'une famille attend un coup de fil qui ne
+  // vient jamais. « En retard » : l'heure est passée sans conclusion.
   const unplannedPrivate = privateSessions.filter((p) => p.status === "requested");
-  const plannedPrivate = privateSessions.filter(
-    (p) => p.status === "planned" && !!p.scheduledAt,
-  );
-  // « En retard » : l'heure est passée et la séance n'a jamais été conclue.
-  // C'est le cas qui se perd, et avec lui l'argent de la séance.
-  const latePrivate = plannedPrivate.filter(
-    (p) => new Date(p.scheduledAt as string).getTime() < nowMs,
-  );
+  const plannedPrivate = privateSessions.filter((p) => p.status === "planned" && !!p.scheduledAt);
+  const latePrivate = plannedPrivate.filter((p) => new Date(p.scheduledAt as string).getTime() < nowMs);
   const soonPrivate = plannedPrivate.filter((p) => {
     const t = new Date(p.scheduledAt as string).getTime();
     return t >= nowMs && t - nowMs <= 24 * 3600 * 1000;
@@ -289,35 +314,45 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
     .filter((p) => p.status !== "cancelled" && p.totalPrice > p.paidAmount)
     .reduce((sum, p) => sum + (p.totalPrice - p.paidAmount), 0);
 
-  const alerts = [];
+  const alerts: DashboardAlert[] = [];
   // La première alerte de la journée : qui a étudié sans avoir de quoi payer.
   // Depuis que le badge n'est plus refusé pour solde épuisé, c'est la seule
   // trace de ce qui est dû — et elle doit se voir sans ouvrir une fiche.
   if (studiedWithoutFunds.length > 0) {
     alerts.push({
-      type: "danger" as const,
-      text: `${studiedWithoutFunds.length} élève(s) ont suivi des séances sans provision — ${studiedWithoutFunds.reduce((sum, row) => sum + row.debt.sessions, 0)} DA à réclamer à la caisse.`,
+      type: "danger",
+      text: `${studiedWithoutFunds.length} élève(s) ont suivi des séances sans provision — ${da(
+        studiedWithoutFunds.reduce((sum, row) => sum + row.debt.sessions, 0),
+      )} à réclamer à la caisse.`,
+      href: "/students",
     });
   }
   if (driftingBalances.length > 0) {
     alerts.push({
-      type: "warning" as const,
-      text: `${driftingBalances.length} élève(s) ont un solde qui ne correspond pas à la somme de leur historique. Ce n'est pas de l'argent dû : à corriger en base avec reconcile_student_balances(true).`,
+      type: "warning",
+      text:
+        `${driftingBalances.length} élève(s) ont un solde qui ne correspond pas à la somme de leur historique ` +
+        "— filtre « Solde à vérifier » de l'écran Étudiants, puis « Régulariser » sur la carte.",
+      href: "/students",
     });
   }
   // Un salaire en retard passe avant tout le reste : c'est la seule dette de
   // l'école envers quelqu'un qui travaille encore pour elle.
   if (lateWorkers.length > 0) {
     alerts.push({
-      type: "danger" as const,
-      text: `${lateWorkers.length} salaire(s) de travailleur EN RETARD — ${lateWorkers.reduce((sum, a) => sum + a.period.amount, 0)} DA à verser (${lateWorkers.map((a) => `${a.worker.firstName} ${a.worker.lastName}`).join(", ")}).`,
+      type: "danger",
+      text: `${lateWorkers.length} salaire(s) de travailleur EN RETARD — ${da(
+        lateWorkers.reduce((sum, a) => sum + a.period.amount, 0),
+      )} à verser (${lateWorkers.map((a) => `${a.worker.firstName} ${a.worker.lastName}`).join(", ")}).`,
       href: "/workers",
     });
   }
   if (soonWorkers.length > 0) {
     alerts.push({
-      type: "warning" as const,
-      text: `${soonWorkers.length} salaire(s) de travailleur à verser dans les prochains jours — ${soonWorkers.reduce((sum, a) => sum + a.period.amount, 0)} DA.`,
+      type: "warning",
+      text: `${soonWorkers.length} salaire(s) de travailleur à verser dans les prochains jours — ${da(
+        soonWorkers.reduce((sum, a) => sum + a.period.amount, 0),
+      )}.`,
       href: "/workers",
     });
   }
@@ -325,7 +360,7 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   // voir d'ici, sinon on découvre le blocage le jour de la paie.
   if (pendingWorkerAbsences.length > 0) {
     alerts.push({
-      type: "warning" as const,
+      type: "warning",
       text:
         `${pendingWorkerAbsences.length} absence(s) de travailleur à trancher ` +
         `(${[...new Set(pendingWorkerAbsences.map((a) => `${a.worker.firstName} ${a.worker.lastName}`))].join(", ")}) — ` +
@@ -335,7 +370,7 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   }
   if (unplannedPrivate.length > 0) {
     alerts.push({
-      type: "warning" as const,
+      type: "warning",
       text:
         `${unplannedPrivate.length} séance(s) particulière(s) à PROGRAMMER : la demande est ` +
         "prise, mais aucune date n'est posée — ni l'élève ni l'enseignant ne savent quand.",
@@ -344,170 +379,210 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
   }
   if (latePrivate.length > 0) {
     alerts.push({
-      type: "danger" as const,
+      type: "danger",
       text: `${latePrivate.length} séance(s) particulière(s) en retard : l'heure est passée sans qu'elles soient marquées tenues ou annulées.`,
       href: "/particulier",
     });
   }
   if (soonPrivate.length > 0) {
     alerts.push({
-      type: "info" as const,
+      type: "info",
       text: `${soonPrivate.length} séance(s) particulière(s) dans les 24 heures.`,
       href: "/particulier",
     });
   }
   if (privateTeacherDue.length > 0) {
     alerts.push({
-      type: "warning" as const,
-      text: `${privateTeacherDue.length} séance(s) particulière(s) avec un enseignant non réglé — ${privateTeacherDue.reduce((sum, r) => sum + r.due, 0)} DA.`,
+      type: "warning",
+      text: `${privateTeacherDue.length} séance(s) particulière(s) avec un enseignant non réglé — ${da(
+        privateTeacherDue.reduce((sum, r) => sum + r.due, 0),
+      )}.`,
       href: "/particulier",
     });
   }
   if (privateStudentDebt > 0) {
     alerts.push({
-      type: "warning" as const,
-      text: `${privateStudentDebt} DA de dettes sur les séances particulières.`,
+      type: "warning",
+      text: `${da(privateStudentDebt)} de dettes sur les séances particulières.`,
       href: "/particulier",
     });
   }
   if (severeDebtors.length > 0) {
     alerts.push({
-      type: "danger" as const,
-      text: `${severeDebtors.length} élève(s) doivent 2000 DA ou plus.`,
+      type: "danger",
+      text: `${severeDebtors.length} élève(s) doivent 2 000 DA ou plus.`,
+      href: "/students",
     });
   }
   if (heavyUnpaidTeachers.length > 0) {
     alerts.push({
-      type: "warning" as const,
-      text: `${heavyUnpaidTeachers.length} enseignant(s) ont plus de 5000 DA d'impayés cumulés.`,
+      type: "warning",
+      text: `${heavyUnpaidTeachers.length} enseignant(s) ont plus de 5 000 DA d'impayés cumulés.`,
+      href: reception ? undefined : "/teachers",
     });
   }
   if (lowEnrollmentGroups.length > 0) {
     alerts.push({
-      type: "info" as const,
+      type: "info",
       text: `${lowEnrollmentGroups.length} groupe(s) ont un effectif faible (moins de 3 élèves).`,
     });
   }
+  // Le plus grave en tête : on lit la liste de haut en bas, et on s'arrête.
+  alerts.sort((a, b) => SEVERITY_ORDER[a.type] - SEVERITY_ORDER[b.type]);
+  const urgent = alerts.filter((a) => a.type === "danger").length;
 
-  // Last 5 cash transactions
-  const recentTransactions = cash.slice(-5).reverse();
+  const longToday = new Date(`${today}T12:00:00Z`).toLocaleDateString("fr-FR", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 
   return (
-    <motion.div
-      variants={containerVariants}
-      initial="hidden"
-      animate="show"
-      className="space-y-6"
-    >
-      {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <PageHeader
-          emoji="🏠"
-          title={reception ? "Accueil Réception" : "Tableau de Bord Administrateur"}
-          subtitle={reception ? "Suivi opérationnel en temps réel" : "Bilan décisionnel et indicateurs clés"}
-        />
-        <div className="text-right text-[11px] text-muted font-mono bg-surface border border-line px-3.5 py-1.5 rounded-xl self-start sm:self-center shadow-sm">
-          Aujourd'hui : {new Date().toLocaleDateString("fr-FR", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-        </div>
-      </div>
-
-      {/* Row 1: KPI Cards */}
-      <motion.div variants={itemVariants} className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="bg-gradient-primary relative overflow-hidden rounded-2xl p-5 text-white card-shadow flex justify-between items-center h-24 hover:scale-[1.01] transition-transform duration-300">
-          <div className="space-y-1">
-            <p className="text-[10px] font-bold text-white/80 uppercase tracking-wider">Élèves Actifs</p>
-            <p className="text-3xl font-black">{totalStudents}</p>
+    <motion.div variants={containerVariants} initial="hidden" animate="show" className="space-y-6">
+      {/* ---- En-tête : où l'on est, quel jour, et les écrans du quotidien ---- */}
+      <motion.div
+        variants={itemVariants}
+        className="relative overflow-hidden rounded-3xl border border-line bg-gradient-card p-5 card-shadow md:p-6"
+      >
+        <div className="pointer-events-none absolute -right-16 -top-16 h-48 w-48 rounded-full bg-primary/10 blur-3xl" />
+        <div className="relative flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-4">
+            <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-primary text-3xl shadow-md">
+              {reception ? "🛎️" : "📊"}
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted first-letter:uppercase">
+                {longToday}
+              </p>
+              <h1 className="truncate text-xl font-black text-ink md:text-2xl">
+                {userName ? `Bonjour, ${userName}` : reception ? "Accueil Réception" : "Tableau de bord"}
+              </h1>
+              <p className="text-sm text-muted">
+                {reception ? "Suivi opérationnel en temps réel" : "Bilan décisionnel et indicateurs clés"}
+              </p>
+            </div>
           </div>
-          <div className="h-12 w-12 rounded-xl bg-white/10 flex items-center justify-center">
-            <GraduationCap className="h-6 w-6 text-white" />
-          </div>
-        </div>
-
-        <div className="bg-gradient-success relative overflow-hidden rounded-2xl p-5 text-white card-shadow flex justify-between items-center h-24 hover:scale-[1.01] transition-transform duration-300">
-          <div className="space-y-1">
-            <p className="text-[10px] font-bold text-white/80 uppercase tracking-wider">Enseignants</p>
-            <p className="text-3xl font-black">{totalTeachers}</p>
-          </div>
-          <div className="h-12 w-12 rounded-xl bg-white/10 flex items-center justify-center">
-            <Users className="h-6 w-6 text-white" />
+          <div className="flex flex-wrap gap-2">
+            <QuickLink href="/students" icon={<GraduationCap className="h-4 w-4" />} label="Étudiants" />
+            <QuickLink href="/attendance" icon={<CalendarCheck className="h-4 w-4" />} label="Présences" />
+            {!reception && <QuickLink href="/cash" icon={<Wallet className="h-4 w-4" />} label="Caisse" />}
           </div>
         </div>
-
-        <div className="bg-gradient-warning relative overflow-hidden rounded-2xl p-5 text-white card-shadow flex justify-between items-center h-24 hover:scale-[1.01] transition-transform duration-300">
-          <div className="space-y-1">
-            <p className="text-[10px] font-bold text-white/80 uppercase tracking-wider">Groupes Actifs</p>
-            <p className="text-3xl font-black">{groups.length}</p>
-          </div>
-          <div className="h-12 w-12 rounded-xl bg-white/10 flex items-center justify-center">
-            <Calendar className="h-6 w-6 text-white" />
-          </div>
-        </div>
-
-        <div className="bg-gradient-danger relative overflow-hidden rounded-2xl p-5 text-white card-shadow flex justify-between items-center h-24 hover:scale-[1.01] transition-transform duration-300">
-          <div className="space-y-1">
-            <p className="text-[10px] font-bold text-white/80 uppercase tracking-wider">Présence aujourd'hui</p>
-            <p className="text-3xl font-black">{attendanceRate}%</p>
-            <span className="text-[9px] text-white/70 block font-mono">{presentCount} / {todayAttendance.length || 0} élèves</span>
-          </div>
-          <div className="h-12 w-12 rounded-xl bg-white/10 flex items-center justify-center">
-            <CheckCircle2 className="h-6 w-6 text-white" />
-          </div>
-        </div>
-      </motion.div>
-
-      {/* Row 2: Operational Alerts (All Users) */}
-      {alerts.length > 0 && (
-        <motion.div variants={itemVariants} className="space-y-2">
-          {alerts.map((alert, idx) => {
-            const className = `p-3.5 rounded-2xl border flex items-center gap-3 text-xs font-semibold ${
-              alert.type === "danger"
-                ? "bg-danger/10 border-danger/20 text-danger animate-pulse"
-                : alert.type === "warning"
-                ? "bg-warning/10 border-warning/20 text-warning"
-                : "bg-primary-50 text-primary border-primary/20"
-            }`;
-            const body = (
-              <>
-                <AlertTriangle className="h-4.5 w-4.5 shrink-0" />
-                <span>{alert.text}</span>
-              </>
-            );
-            // Une alerte qu'on ne peut pas suivre jusqu'à l'écran qui la règle
-            // se relit tous les matins sans que rien ne bouge.
-            const href = "href" in alert ? (alert as { href?: string }).href : undefined;
-            return href ? (
-              <Link key={idx} href={href} className={`${className} transition-transform hover:scale-[1.01]`}>
-                {body}
-              </Link>
-            ) : (
-              <div key={idx} className={className}>
-                {body}
-              </div>
-            );
-          })}
-        </motion.div>
-      )}
-
-      {/* Les anniversaires du jour. L'alerte ne parle QUE de l'emploi du temps
-          d'AUJOURD'HUI : un élève fêté qui n'a pas cours ne se croise nulle
-          part, il attend sur la page Anniversaires. Rien ne s'affiche les jours
-          sans anniversaire. */}
-      <motion.div variants={itemVariants}>
-        <BirthdayAlertsCard />
-      </motion.div>
-
-      {/* Les alertes de solde préparées par les badges. C'est ICI, et nulle part
-          ailleurs, qu'on en parle : elles s'affichaient avant en bandeau fixe au
-          bas de chaque écran de l'application, pour une file que personne ne
-          pouvait ni lire ni vider depuis la page où le bandeau apparaissait. */}
-      <motion.div variants={itemVariants}>
-        <WhatsAppAlertsCard />
       </motion.div>
 
       {/* Une gratuité active met TOUS les scans à 0 DA : ça doit se voir ici,
           pas seulement dans le toast d'un scan déjà passé. */}
-      <motion.div variants={itemVariants}>
+      <motion.div variants={itemVariants} className="empty:hidden">
         <FreeBillingBanner />
+      </motion.div>
+
+      {/* ---- Les chiffres du jour ------------------------------------------- */}
+      <motion.div
+        variants={itemVariants}
+        className={`grid grid-cols-2 gap-3 md:grid-cols-3 ${reception ? "xl:grid-cols-4" : "xl:grid-cols-5"}`}
+      >
+        <KpiTile
+          href="/students"
+          icon={<GraduationCap className="h-5 w-5" />}
+          tone="primary"
+          label="Élèves inscrits"
+          value={students.length.toLocaleString("fr-FR")}
+          hint={`${classes.length} classe(s) · ${groups.length} groupe(s)`}
+        />
+        <KpiTile
+          href="/attendance"
+          icon={<CalendarCheck className="h-5 w-5" />}
+          tone="success"
+          label="Présences aujourd'hui"
+          value={presentToday.toLocaleString("fr-FR")}
+          hint={`${sessionsToday} séance(s) programmée(s)`}
+        />
+        <KpiTile
+          href="/students"
+          icon={<AlertTriangle className="h-5 w-5" />}
+          tone={totalDebts > 0 ? "danger" : "success"}
+          label="À recouvrer"
+          value={da(totalDebts)}
+          hint={debtors.length > 0 ? `${debtors.length} élève(s) en dette` : "Tout le monde est à jour"}
+        />
+        {reception ? (
+          <KpiTile
+            icon={<Users className="h-5 w-5" />}
+            tone="info"
+            label="Enseignants"
+            value={teachers.length.toLocaleString("fr-FR")}
+            hint={`${sessions.length} créneau(x) au planning`}
+          />
+        ) : (
+          <>
+            <KpiTile
+              href="/cash"
+              icon={<Wallet className="h-5 w-5" />}
+              tone="info"
+              label="Caisse"
+              value={da(cashInHand)}
+              hint={`7 j : +${da(weekIn)} / -${da(weekOut)}`}
+            />
+            <KpiTile
+              href="/teachers"
+              icon={<HandCoins className="h-5 w-5" />}
+              tone={unpaidTeacherSessions > 0 ? "warning" : "success"}
+              label="Dû aux enseignants"
+              value={da(unpaidTeacherSessions)}
+              hint={`${teachers.length} enseignant(s)`}
+            />
+          </>
+        )}
+      </motion.div>
+
+      {/* ---- À traiter : tout ce qui attend une décision, le plus grave d'abord */}
+      <motion.div variants={itemVariants}>
+        <Card className="border border-line">
+          <CardBody className="p-4 md:p-5">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h2 className="flex items-center gap-2 text-sm font-bold text-ink">
+                <ClipboardList className="h-4.5 w-4.5 text-primary" /> À traiter
+                {alerts.length > 0 && (
+                  <span className="rounded-full bg-primary/15 px-2 py-0.5 font-mono text-[11px] text-primary dark:text-rose-200">
+                    {alerts.length}
+                  </span>
+                )}
+              </h2>
+              {urgent > 0 && (
+                <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold ${TONE.danger.chip}`}>
+                  {urgent} urgent(s)
+                </span>
+              )}
+            </div>
+            {alerts.length === 0 ? (
+              <div className={`flex items-center gap-2 rounded-xl px-3 py-3 text-xs font-semibold ${TONE.success.chip}`}>
+                <BadgeCheck className="h-4 w-4" /> Rien à signaler : aucune dette, aucun retard, aucun écart.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+                {alerts.map((alert, idx) => (
+                  <AlertRow key={idx} alert={alert} />
+                ))}
+              </div>
+            )}
+          </CardBody>
+        </Card>
+      </motion.div>
+
+      {/* Les anniversaires du jour et les alertes WhatsApp à relire. Chaque
+          carte ne s'affiche que si elle a quelque chose à dire. */}
+      <motion.div
+        variants={itemVariants}
+        className="grid grid-cols-1 gap-6 xl:grid-cols-2 [&:not(:has(>div>*))]:hidden"
+      >
+        <div className="empty:hidden">
+          <BirthdayAlertsCard />
+        </div>
+        <div className="empty:hidden">
+          <WhatsAppAlertsCard />
+        </div>
       </motion.div>
 
       {/* Les séances de la journée, en emploi du temps — et l'historique des
@@ -516,110 +591,98 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
         <DaySchedulePanel />
       </motion.div>
 
-      {/* Row 3: Admin-Only Graphs & Financials */}
+      {/* ---- Direction : la caisse de la semaine et les modules suivis ------- */}
       {!reception && (
-        <motion.div variants={itemVariants} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Chart 1: SVG/CSS Bar Chart of Cash Operations */}
-          <Card className="border border-line card-shadow">
-            <CardBody className="space-y-6 p-5">
-              <div className="flex justify-between items-start">
-                <div>
-                  <h3 className="text-xs font-bold text-ink uppercase tracking-wide flex items-center gap-1.5">
-                    <TrendingUp className="h-4.5 w-4.5 text-success" /> Flux Financier (7 derniers jours)
-                  </h3>
-                  <p className="text-[10px] text-muted">Comparaison journalière des recettes et dépenses de caisse</p>
-                </div>
-                <div className="flex gap-3 text-[10px] font-bold">
-                  <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-success" /> Entrées</span>
-                  <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-full bg-danger" /> Sorties</span>
-                </div>
-              </div>
-
-              {/* Chart Grid */}
-              <div className="h-44 flex items-end justify-between gap-2 px-2 border-b border-line pb-1">
-                {weeklyCashData.map((d, idx) => {
+        <motion.div variants={itemVariants} className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <Card className="border border-line">
+            <CardBody className="space-y-5 p-5">
+              <SectionTitle
+                icon={<TrendingUp className="h-4.5 w-4.5 text-emerald-500" />}
+                title="Caisse — 7 derniers jours"
+                hint="Entrées et sorties de caisse, jour par jour"
+                right={
+                  <div className="flex gap-3 text-[10px] font-bold text-muted">
+                    <span className="flex items-center gap-1">
+                      <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" /> Entrées
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="h-2.5 w-2.5 rounded-full bg-rose-500" /> Sorties
+                    </span>
+                  </div>
+                }
+              />
+              <div className="flex h-44 items-end justify-between gap-2 border-b border-line px-1 pb-1">
+                {weeklyCashData.map((d) => {
                   const inflowPct = (d.inflows / maxCashValue) * 100;
                   const outflowPct = (d.outflows / maxCashValue) * 100;
-
+                  const isToday = d.key === today;
                   return (
-                    <div key={idx} className="flex-1 flex flex-col items-center gap-2 group relative">
-                      {/* Tooltip on Hover */}
-                      <div className="absolute bottom-full mb-2 bg-ink text-white rounded-lg p-2 text-[9px] font-mono pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-200 shadow-lg z-20 whitespace-nowrap">
-                        <span className="text-success block">+{d.inflows} DA</span>
-                        <span className="text-danger block">-{d.outflows} DA</span>
+                    <div key={d.key} className="group relative flex flex-1 flex-col items-center gap-1.5">
+                      <div className="pointer-events-none absolute bottom-full z-20 mb-2 whitespace-nowrap rounded-lg border border-line bg-surface p-2 font-mono text-[10px] opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+                        <span className="block text-emerald-600 dark:text-emerald-300">+{da(d.inflows)}</span>
+                        <span className="block text-rose-600 dark:text-rose-300">-{da(d.outflows)}</span>
                       </div>
-
-                      {/* Side-by-side vertical bars */}
-                      <div className="w-full flex items-end justify-center gap-1 h-36">
+                      <div className="flex h-36 w-full items-end justify-center gap-1">
                         <div
                           style={{ height: `${Math.max(inflowPct, 3)}%` }}
-                          className={`w-3.5 sm:w-4 bg-success rounded-t-md transition-all duration-550 ${
-                            d.inflows > 0 ? "opacity-100" : "opacity-15"
+                          className={`w-3.5 rounded-t-md bg-gradient-to-t from-emerald-600 to-emerald-400 transition-all sm:w-4 ${
+                            d.inflows > 0 ? "opacity-100" : "opacity-20"
                           }`}
                         />
                         <div
                           style={{ height: `${Math.max(outflowPct, 3)}%` }}
-                          className={`w-3.5 sm:w-4 bg-danger rounded-t-md transition-all duration-550 ${
-                            d.outflows > 0 ? "opacity-100" : "opacity-15"
+                          className={`w-3.5 rounded-t-md bg-gradient-to-t from-rose-700 to-rose-400 transition-all sm:w-4 ${
+                            d.outflows > 0 ? "opacity-100" : "opacity-20"
                           }`}
                         />
                       </div>
-                      <span className="text-[9px] font-mono text-muted uppercase mt-1">{d.label}</span>
+                      <span
+                        className={`font-mono text-[10px] uppercase ${isToday ? "font-black text-primary" : "text-muted"}`}
+                      >
+                        {d.label}
+                      </span>
                     </div>
                   );
                 })}
               </div>
-
-              {/* Cash Summary details */}
               <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                <div className="bg-canvas/40 p-2.5 rounded-xl border border-line">
-                  <span className="text-[9px] text-muted block uppercase font-bold">Caisse Réelle</span>
-                  <strong className="text-primary font-black mt-0.5 block">{cashInHand} DA</strong>
-                </div>
-                <div className="bg-canvas/40 p-2.5 rounded-xl border border-line">
-                  <span className="text-[9px] text-muted block uppercase font-bold">Dettes Élèves</span>
-                  <strong className="text-warning font-black mt-0.5 block">{totalDebts} DA</strong>
-                </div>
-                <div className="bg-canvas/40 p-2.5 rounded-xl border border-line">
-                  <span className="text-[9px] text-muted block uppercase font-bold">Impayés Profs</span>
-                  <strong className="text-danger font-black mt-0.5 block">{unpaidTeacherSessions} DA</strong>
-                </div>
+                <MiniStat label="Entrées (7 j)" value={`+${da(weekIn)}`} tone="success" />
+                <MiniStat label="Sorties (7 j)" value={`-${da(weekOut)}`} tone="danger" />
+                <MiniStat label="Net (7 j)" value={da(weekIn - weekOut)} tone={weekIn - weekOut >= 0 ? "success" : "danger"} />
               </div>
             </CardBody>
           </Card>
 
-          {/* Chart 2: Student module subscriptions */}
-          <Card className="border border-line card-shadow">
-            <CardBody className="space-y-6 p-5">
-              <div>
-                <h3 className="text-xs font-bold text-ink uppercase tracking-wide flex items-center gap-1.5">
-                  <BookOpen className="h-4.5 w-4.5 text-primary" /> Popularité des Modules
-                </h3>
-                <p className="text-[10px] text-muted">Nombre d'inscriptions d'élèves par matières principales</p>
-              </div>
-
-              <div className="space-y-3.5 pt-1.5">
+          <Card className="border border-line">
+            <CardBody className="space-y-5 p-5">
+              <SectionTitle
+                icon={<BookOpen className="h-4.5 w-4.5 text-primary" />}
+                title="Modules les plus suivis"
+                hint="Nombre d'inscriptions d'élèves par matière"
+              />
+              <div className="space-y-3">
                 {moduleEnrollments.length === 0 ? (
-                  <p className="text-xs text-muted italic text-center p-8">Aucune inscription active.</p>
+                  <p className="p-8 text-center text-xs italic text-muted">Aucune inscription active.</p>
                 ) : (
-                  moduleEnrollments.map((item, idx) => {
-                    const pct = (item.count / maxEnrollment) * 100;
-                    return (
-                      <div key={idx} className="space-y-1.5 text-xs">
-                        <div className="flex justify-between items-center font-semibold">
-                          <span className="text-ink">{item.name}</span>
-                          <span className="text-muted font-mono">{item.count} élève(s)</span>
-                        </div>
-                        {/* Custom progress bar */}
-                        <div className="h-2 w-full bg-canvas rounded-full overflow-hidden border border-line/30">
-                          <div
-                            style={{ width: `${pct}%` }}
-                            className="h-full bg-primary rounded-full transition-all duration-700"
-                          />
-                        </div>
+                  moduleEnrollments.map((item, idx) => (
+                    <div key={item.name} className="space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between font-semibold">
+                        <span className="flex items-center gap-2 capitalize text-ink">
+                          <span className="flex h-5 w-5 items-center justify-center rounded-md bg-primary/15 font-mono text-[10px] text-primary dark:text-rose-200">
+                            {idx + 1}
+                          </span>
+                          {item.name}
+                        </span>
+                        <span className="font-mono text-muted">{item.count} élève(s)</span>
                       </div>
-                    );
-                  })
+                      <div className="h-2 w-full overflow-hidden rounded-full border border-line/40 bg-canvas">
+                        <div
+                          style={{ width: `${(item.count / maxEnrollment) * 100}%` }}
+                          className="h-full rounded-full bg-gradient-primary transition-all duration-700"
+                        />
+                      </div>
+                    </div>
+                  ))
                 )}
               </div>
             </CardBody>
@@ -627,80 +690,234 @@ function AdminDashboard({ reception = false }: { reception?: boolean }) {
         </motion.div>
       )}
 
-      {/* Row 4: Operational Data Columns */}
-      <motion.div variants={itemVariants} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Colonne 1 : qui doit de l'argent à l'école.
-            Cette liste ne retenait que les découverts au-delà de 2000 DA, et
-            n'était montrée qu'à l'administrateur. Une séance suivie sans
-            provision — 625 DA — n'y figurait donc jamais, et la réception,
-            qui est le guichet, ne la voyait pas du tout. */}
-        <Card className="border border-line card-shadow">
-          <CardBody className="space-y-4 p-5">
-            <h3 className="font-bold text-danger border-b border-line pb-3 flex items-center gap-2">
-              <AlertTriangle className="h-4.5 w-4.5" /> Étudiants Débiteurs ({debtors.length})
-              {debtors.length > 0 && (
-                <span className="ms-auto text-[10px] font-mono font-black">{totalDebts} DA</span>
-              )}
-            </h3>
-
-            <div className="space-y-2.5 max-h-72 overflow-y-auto pt-1 pr-1">
+      {/* ---- Qui doit, et ce qui vient de passer en caisse -------------------- */}
+      <motion.div variants={itemVariants} className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        {/* Qui doit de l'argent à l'école. Cette liste ne retenait autrefois que
+            les découverts au-delà de 2000 DA et n'était montrée qu'à
+            l'administrateur : une séance suivie sans provision — 625 DA — n'y
+            figurait jamais, et la réception, qui est le guichet, ne la voyait pas. */}
+        <Card className="border border-line">
+          <CardBody className="space-y-3 p-5">
+            <SectionTitle
+              icon={<AlertTriangle className="h-4.5 w-4.5 text-rose-500" />}
+              title={`Élèves débiteurs (${debtors.length})`}
+              right={
+                debtors.length > 0 ? (
+                  <span className={`font-mono text-xs font-black ${TONE.danger.value}`}>{da(totalDebts)}</span>
+                ) : undefined
+              }
+            />
+            <div className="max-h-80 space-y-2 overflow-y-auto pe-1">
               {debtors.length === 0 ? (
-                <div className="text-xs text-success italic text-center py-12 font-bold flex flex-col items-center gap-2">
-                  <CheckCircle2 className="h-8 w-8" />
+                <div className={`flex flex-col items-center gap-2 py-10 text-center text-xs font-bold ${TONE.success.value}`}>
+                  <BadgeCheck className="h-8 w-8" />
                   <span>Tous les élèves sont à jour de paiement !</span>
                 </div>
               ) : (
-                debtors.map(({ student: s, debt, owed }) => (
-                  <div key={s.id} className="flex justify-between items-center gap-3 p-3 bg-danger/5 border border-danger/15 rounded-xl hover:border-danger/30 transition-colors">
-                    <div className="min-w-0">
-                      <strong className="text-ink block text-xs truncate">{s.firstName} {s.lastName}</strong>
-                      <span className="text-[9px] text-muted block mt-0.5">
+                debtors.slice(0, 12).map(({ student: s, debt, owed }) => (
+                  <div
+                    key={s.id}
+                    className="flex items-center gap-3 rounded-xl border border-line bg-canvas/40 px-3 py-2.5 transition-colors hover:border-rose-500/40"
+                  >
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-rose-500 to-red-700 text-[11px] font-black uppercase text-white">
+                      {s.firstName.substring(0, 1)}
+                      {s.lastName.substring(0, 1)}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <strong className="block truncate text-xs capitalize text-ink">
+                        {s.firstName} {s.lastName}
+                      </strong>
+                      <span className="block truncate text-[10px] text-muted">
                         {[
-                          debt.sessions > 0 ? `${debt.sessions} DA de séances suivies` : "",
-                          debt.registration > 0 ? `${debt.registration} DA d'inscription` : "",
-                          debt.drift !== 0
-                            ? `solde à vérifier : ${Math.abs(debt.drift)} DA d'écart`
-                            : "",
+                          debt.sessions > 0 ? `${da(debt.sessions)} de séances suivies` : "",
+                          debt.registration > 0 ? `${da(debt.registration)} d'inscription` : "",
+                          debt.drift !== 0 ? `solde à vérifier (${da(Math.abs(debt.drift))} d'écart)` : "",
                         ]
                           .filter(Boolean)
                           .join(" · ")}
                       </span>
                     </div>
-                    <strong className="text-danger font-black text-xs whitespace-nowrap">-{owed} DA</strong>
+                    <strong className={`whitespace-nowrap font-mono text-xs font-black ${TONE.danger.value}`}>
+                      -{da(owed)}
+                    </strong>
                   </div>
                 ))
               )}
             </div>
+            {debtors.length > 12 && (
+              <Link
+                href="/students"
+                className="flex items-center justify-center gap-1 rounded-xl border border-line py-2 text-xs font-semibold text-muted transition-colors hover:border-primary/40 hover:text-ink"
+              >
+                Voir les {debtors.length} débiteurs dans l&apos;écran Étudiants <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+            )}
           </CardBody>
         </Card>
 
-        {/* Column 3: Recent cashier transactions / operational feed */}
-        <Card className="border border-line card-shadow">
-          <CardBody className="space-y-4 p-5">
-            <h3 className="font-bold text-ink border-b border-line pb-3 flex items-center gap-2">
-              <Receipt className="h-4.5 w-4.5 text-primary" /> Flux Récent de Caisse
-            </h3>
-
-            <div className="space-y-2.5 max-h-72 overflow-y-auto pt-1 pr-1">
+        <Card className="border border-line">
+          <CardBody className="space-y-3 p-5">
+            <SectionTitle
+              icon={<Receipt className="h-4.5 w-4.5 text-primary" />}
+              title="Derniers mouvements de caisse"
+            />
+            <div className="max-h-80 space-y-2 overflow-y-auto pe-1">
               {recentTransactions.length === 0 ? (
-                <p className="text-xs text-muted italic text-center py-12">Aucun mouvement de caisse enregistré.</p>
+                <p className="py-10 text-center text-xs italic text-muted">Aucun mouvement de caisse enregistré.</p>
               ) : (
-                recentTransactions.map((tx) => (
-                  <div key={tx.id} className="flex justify-between items-center p-3 bg-canvas/30 border border-line rounded-xl hover:border-primary/10 transition-colors">
-                    <div className="max-w-[70%]">
-                      <strong className="text-ink block text-xs truncate font-semibold">{tx.description}</strong>
-                      <span className="text-[9px] text-muted block mt-0.5 font-mono">{tx.date.substring(0, 10)}</span>
+                recentTransactions.map((tx) => {
+                  const credit = tx.amount > 0;
+                  return (
+                    <div
+                      key={tx.id}
+                      className="flex items-center gap-3 rounded-xl border border-line bg-canvas/40 px-3 py-2.5"
+                    >
+                      <span
+                        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+                          credit ? TONE.success.chip : TONE.danger.chip
+                        }`}
+                      >
+                        {credit ? <TrendingUp className="h-4 w-4" /> : <Receipt className="h-4 w-4" />}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <strong className="block truncate text-xs font-semibold text-ink">{tx.description}</strong>
+                        <span className="block font-mono text-[10px] text-muted">{schoolDateTimeLabel(tx.date)}</span>
+                      </div>
+                      <strong
+                        className={`whitespace-nowrap font-mono text-xs font-black ${
+                          credit ? TONE.success.value : TONE.danger.value
+                        }`}
+                      >
+                        {credit ? `+${da(tx.amount)}` : `-${da(-tx.amount)}`}
+                      </strong>
                     </div>
-                    <strong className={`font-black text-xs whitespace-nowrap ${tx.amount > 0 ? "text-success" : "text-danger"}`}>
-                      {tx.amount > 0 ? `+${tx.amount}` : tx.amount} DA
-                    </strong>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </CardBody>
         </Card>
       </motion.div>
     </motion.div>
+  );
+}
+
+// =============================================================================
+// Briques
+// =============================================================================
+
+function QuickLink({ href, icon, label }: { href: string; icon: React.ReactNode; label: string }) {
+  return (
+    <Link
+      href={href}
+      className="inline-flex items-center gap-2 rounded-xl border border-line bg-surface px-3.5 py-2 text-xs font-semibold text-ink transition-colors hover:border-primary/50 hover:bg-primary-50"
+    >
+      <span className="text-primary">{icon}</span> {label}
+    </Link>
+  );
+}
+
+function KpiTile({
+  href,
+  icon,
+  tone,
+  label,
+  value,
+  hint,
+}: {
+  href?: string;
+  icon: React.ReactNode;
+  tone: keyof typeof TONE;
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  const t = TONE[tone];
+  const body = (
+    <>
+      <div className="flex items-center justify-between">
+        <span className={`flex h-10 w-10 items-center justify-center rounded-xl ${t.chip}`}>{icon}</span>
+        {href && (
+          <ChevronRight className="h-4 w-4 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
+        )}
+      </div>
+      <div className="min-w-0">
+        <span className="block text-[11px] font-semibold uppercase tracking-wide text-muted">{label}</span>
+        <strong className={`mt-0.5 block truncate font-mono text-xl font-black md:text-2xl ${t.value}`}>{value}</strong>
+        {hint && <span className="mt-0.5 block truncate text-[10px] text-muted">{hint}</span>}
+      </div>
+    </>
+  );
+  const className =
+    "group flex flex-col gap-3 rounded-2xl border border-line bg-gradient-card p-4 card-shadow transition-all";
+  return href ? (
+    <Link href={href} className={`${className} hover:-translate-y-0.5 hover:border-primary/40`}>
+      {body}
+    </Link>
+  ) : (
+    <div className={className}>{body}</div>
+  );
+}
+
+function AlertRow({ alert }: { alert: DashboardAlert }) {
+  const t = TONE[alert.type];
+  const icon =
+    alert.type === "info" ? <Info className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />;
+  const body = (
+    <>
+      <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${t.chip}`}>{icon}</span>
+      <span className="min-w-0 flex-1 text-xs leading-relaxed text-ink">{alert.text}</span>
+      {alert.href && <ChevronRight className="mt-1.5 h-4 w-4 shrink-0 text-muted" />}
+    </>
+  );
+  const frame = {
+    danger: "border-rose-500/30 bg-rose-500/5",
+    warning: "border-amber-500/30 bg-amber-500/5",
+    info: "border-sky-500/30 bg-sky-500/5",
+  }[alert.type];
+  // Une alerte qu'on ne peut pas suivre jusqu'à l'écran qui la règle se relit
+  // tous les matins sans que rien ne bouge.
+  return alert.href ? (
+    <Link
+      href={alert.href}
+      className={`flex items-start gap-3 rounded-xl border px-3 py-2.5 transition-colors hover:brightness-110 ${frame}`}
+    >
+      {body}
+    </Link>
+  ) : (
+    <div className={`flex items-start gap-3 rounded-xl border px-3 py-2.5 ${frame}`}>{body}</div>
+  );
+}
+
+function SectionTitle({
+  icon,
+  title,
+  hint,
+  right,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  hint?: string;
+  right?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-line pb-3">
+      <div>
+        <h3 className="flex items-center gap-2 text-sm font-bold text-ink">
+          {icon} {title}
+        </h3>
+        {hint && <p className="mt-0.5 text-[11px] text-muted">{hint}</p>}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+function MiniStat({ label, value, tone }: { label: string; value: string; tone: "success" | "danger" }) {
+  return (
+    <div className="rounded-xl border border-line bg-canvas/40 p-2.5">
+      <span className="block text-[9px] font-bold uppercase text-muted">{label}</span>
+      <strong className={`mt-0.5 block truncate font-mono font-black ${TONE[tone].value}`}>{value}</strong>
+    </div>
   );
 }

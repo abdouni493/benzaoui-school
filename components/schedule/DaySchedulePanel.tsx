@@ -14,6 +14,7 @@ import {
   dayOfIsoDate,
   studentName,
   isoDateOf,
+  schoolDateKey,
   sessionSalleIds,
   sessionsOnDate,
 } from "@/lib/helpers";
@@ -62,7 +63,9 @@ export function DaySchedulePanel() {
     })),
   );
 
-  const todayIso = isoDateOf(new Date());
+  // Le jour de l'école, pas celui du poste : un PC réglé sur un autre fuseau
+  // ouvrait la journée du lendemain.
+  const todayIso = schoolDateKey(new Date());
   const [date, setDate] = useState<string>(todayIso);
   const day = dayOfIsoDate(date);
 
@@ -98,7 +101,7 @@ export function DaySchedulePanel() {
   const markedBySession = useMemo(() => {
     const map: Record<string, number> = {};
     for (const a of attendance) {
-      if (new Date(a.timestamp).toLocaleDateString("fr-CA") !== date) continue;
+      if (schoolDateKey(a.timestamp) !== date) continue;
       map[a.sessionId] = (map[a.sessionId] ?? 0) + 1;
     }
     return map;
