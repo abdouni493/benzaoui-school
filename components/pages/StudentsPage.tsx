@@ -85,6 +85,7 @@ import {
 } from "@/components/students/StudentDetailsModal";
 import { StudentCardGrid, type StudentCardActions } from "@/components/students/StudentCard";
 import { StudentRepairModal } from "@/components/students/StudentRepairModal";
+import { DeleteStudentDialog } from "@/components/students/DeleteStudentDialog";
 import {
   StudentsToolbar,
   type StudentFilter,
@@ -131,7 +132,6 @@ export function StudentsPage({ focusStudentId }: { focusStudentId?: string } = {
     studentCredentials,
     complete,
     push,
-    deleteFrom,
     updateItem,
     addBalance,
     settleRegistrationFee,
@@ -157,7 +157,6 @@ export function StudentsPage({ focusStudentId }: { focusStudentId?: string } = {
       studentCredentials: s.studentCredentials,
       complete: s.complete,
       push: s.push,
-      deleteFrom: s.deleteFrom,
       updateItem: s.updateItem,
       addBalance: s.addBalance,
       settleRegistrationFee: s.settleRegistrationFee,
@@ -299,6 +298,8 @@ export function StudentsPage({ focusStudentId }: { focusStudentId?: string } = {
 
   // Active overlay actions index
   const [overlayStudentId, setOverlayStudentId] = useState<string | null>(null);
+  /** L'élève dont la suppression attend d'être confirmée (mot à taper). */
+  const [deletingStudentId, setDeletingStudentId] = useState<string | null>(null);
 
   // Scanner state — le verdict détaillé affiché sous le champ. Le pipeline
   // partagé (useScanProcessor) s'occupe du reste : voix, toasts, alertes.
@@ -824,12 +825,10 @@ export function StudentsPage({ focusStudentId }: { focusStudentId?: string } = {
     });
   };
 
-  const handleDelete = (id: string) => {
-    if (confirm("Êtes-vous sûr de vouloir supprimer cet étudiant ?")) {
-      deleteFrom("students", id);
-      setOverlayStudentId(null);
-    }
-  };
+  // Plus de `confirm()` : un badge passé pendant que la boîte native est
+  // ouverte la validait (le lecteur tape « Entrée »). La fenêtre de
+  // suppression exige le mot SUPPRIMER — voir DeleteStudentDialog.
+  const handleDelete = (id: string) => setDeletingStudentId(id);
 
   const handleTopup = async () => {
     if (!selectedStudent || topupAmount <= 0) return;
@@ -3520,6 +3519,12 @@ export function StudentsPage({ focusStudentId }: { focusStudentId?: string } = {
         studentId={detailsStudentId}
         open={!!detailsStudentId}
         onClose={() => setDetailsStudentId(null)}
+      />
+
+      <DeleteStudentDialog
+        studentId={deletingStudentId}
+        onClose={() => setDeletingStudentId(null)}
+        onDeleted={() => setOverlayStudentId(null)}
       />
 
       {/* « Régulariser la situation » : paiements, transactions, présences et

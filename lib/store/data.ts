@@ -20,6 +20,7 @@ import {
   uuidPartitions,
 } from "@/lib/store/merge";
 import { clearSnapshots, readSnapshot, writeSnapshot } from "@/lib/store/snapshot";
+import { ROLE_OF_STORE_KEY } from "@/lib/accountDeletion";
 import type {
   AbsencePenalty,
   Announcement,
@@ -1519,7 +1520,16 @@ interface DataActions {
   /** Ramène le solde stocké d'UN élève à la somme de son historique — ce que
    *  `reconcile_student_balances` fait pour toute l'école d'un coup. */
   alignStudentBalance: (studentId: string) => Promise<{ ok: boolean; from?: number; to?: number; error?: string }>;
+  /** Supprime une ligne. Les ÉLÈVES n'y passent jamais : voir `deleteStudent`. */
   deleteFrom: <K extends keyof Database>(key: K, id: string) => void;
+  /**
+   * Supprime un élève — sa connexion, sa fiche et tout son historique.
+   *
+   * La SEULE porte de sortie d'un élève. Rien n'est retiré de l'écran avant que
+   * le serveur ait confirmé : une suppression refusée ou perdue sur le réseau ne
+   * fait plus « disparaître » une fiche qui existe toujours.
+   */
+  deleteStudent: (id: string) => Promise<{ ok: boolean; error?: string }>;
   /** Ajoute la ligne (localement d'abord, puis en base). Résout à `true` quand
    *  la base l'a acceptée, `false` quand elle l'a refusée — ce que doit
    *  attendre tout appelant dont l'écriture SUIVANTE référence cette ligne. */
@@ -3522,7 +3532,29 @@ export const useData = create<DataStore>((set, get) => ({
     }
   },
 
+  deleteStudent: async (id) => {
+    try {
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(id)}?role=student`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        return { ok: false, error: body?.error ?? `refus du serveur (${res.status})` };
+      }
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "réseau indisponible" };
+    }
+    set((state) => ({ students: state.students.filter((s) => s.id !== id) }));
+    scheduleRefresh();
+    return { ok: true };
+  },
+
   deleteFrom: (key, id) => {
+    // Un élève emporte tout son historique avec lui : il ne part que par
+    // `deleteStudent`, derrière la fenêtre de confirmation de sa fiche.
+    if (key === "students") {
+      console.error(`[db] deleteFrom("students", ${id}) refusé : passez par deleteStudent.`);
+      return;
+    }
+
     set((state) => ({
       [key]: (state[key] as Array<{ id: string }>).filter((x) => x.id !== id),
     }) as Partial<DataStore>);
@@ -3539,9 +3571,16 @@ export const useData = create<DataStore>((set, get) => ({
     };
 
     if (AUTH_LINKED_KEYS.has(key as string)) {
-      fetch(`/api/admin/users/${id}`, { method: "DELETE" })
+      // Le rôle annoncé : le serveur refuse si le compte n'est pas de ce type
+      // (un élève ne part jamais par la suppression d'un parent ou d'un
+      // travailleur).
+      const role = ROLE_OF_STORE_KEY[key as string];
+      fetch(`/api/admin/users/${encodeURIComponent(id)}?role=${role}`, { method: "DELETE" })
         .then(async (res) => {
-          if (!res.ok) console.error(`Failed to delete user ${id}:`, await res.text());
+          if (res.ok) return;
+          const message = await res.text();
+          console.error(`Failed to delete user ${id}:`, message);
+          reportWriteFailure(TABLES[tableKey].table, message);
         })
         .catch((err) => console.error(`Failed to delete user ${id}:`, err))
         .finally(release);

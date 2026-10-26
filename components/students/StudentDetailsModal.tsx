@@ -23,7 +23,17 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Input, Select } from "@/components/ui/SearchInput";
-import { StudentReportPanel } from "@/components/students/StudentReportPanel";
+import {
+  StudentReportPanel,
+  TimetableStatusBadge,
+  timetableTitle,
+} from "@/components/students/StudentReportPanel";
+import {
+  computeStudentReport,
+  studentTimetablesOf,
+  type ReportTimetable,
+  type StudentTimetable,
+} from "@/lib/reports/studentActivity";
 import { StudentRepairModal } from "@/components/students/StudentRepairModal";
 import {
   DeleteAttendanceDialog,
@@ -42,6 +52,7 @@ import {
   freeReasonOf,
   FREE_REASON_HINTS,
   FREE_REASON_LABELS,
+  schoolDateKey,
   schoolDateTimeLabel,
   studentDebtOf,
   type StudentDebt,
@@ -84,6 +95,38 @@ function useStudentDebt(student: Student | undefined): StudentDebt | null {
     }
     return studentDebtOf(student, { drift });
   }, [student, balanceTx, complete]);
+}
+
+const NO_TIMETABLES = { timetables: [] as StudentTimetable[], past: [] as ReportTimetable[] };
+
+/** Ses emplois du temps : ceux d'aujourd'hui, puis ceux qu'il a quittés — et,
+ *  pour ces derniers, ce qu'ils ont coûté (mêmes chiffres que le rapport). */
+function useStudentTimetables(student: Student | undefined): typeof NO_TIMETABLES {
+  const slices = useData(
+    useShallow((s) => ({
+      balanceTx: s.balanceTx,
+      attendance: s.attendance,
+      absencePenalties: s.absencePenalties,
+      sessions: s.sessions,
+      subscriptions: s.subscriptions,
+      modules: s.modules,
+      groups: s.groups,
+      classes: s.classes,
+      teachers: s.teachers,
+      salles: s.salles,
+    })),
+  );
+  return useMemo(() => {
+    if (!student) return NO_TIMETABLES;
+    const data = { student, ...slices };
+    const timetables = studentTimetablesOf(data);
+    const past = computeStudentReport({
+      ...data,
+      period: { mode: "all" },
+      timetableKeys: timetables.filter((t) => t.status !== "current").map((t) => t.key),
+    }).timetables;
+    return { timetables, past };
+  }, [student, slices]);
 }
 
 // =============================================================================
@@ -156,6 +199,7 @@ function StudentDetailsBody({
 
   const student = students.find((s) => s.id === studentId);
   const debt = useStudentDebt(student);
+  const { timetables, past: pastTimetables } = useStudentTimetables(student);
 
   // ---- Index : une recherche par ligne au lieu d'un parcours de table ----------
   const lookups = useMemo(
@@ -240,13 +284,12 @@ function StudentDetailsBody({
     return cls?.type === "formation" || sub.periodMonths ? sub : undefined;
   };
 
-  /** Modules assigned to the student (via his subscriptions), for the filters. */
+  /** Modules of the student's timetables — today's AND the ones he left: their
+   *  presences and transactions are still his, the filters must reach them. */
   const moduleOptions = (() => {
     const map = new Map<string, string>();
-    for (const subId of student.subscriptionIds) {
-      const sess = sessionOfSub(subId);
-      if (!sess) continue;
-      const mod = lookups.module.get(sess.moduleId);
+    for (const t of timetables) {
+      const mod = t.moduleId ? lookups.module.get(t.moduleId) : undefined;
       if (mod) map.set(mod.id, mod.name);
     }
     return [...map.entries()].map(([id, name]) => ({ id, name }));
@@ -411,7 +454,7 @@ function StudentDetailsBody({
         )}
 
         {detailsTab === "report" && (
-          <StudentReportPanel student={student} moduleOptions={moduleOptions} debtTotal={debt.total} />
+          <StudentReportPanel student={student} debtTotal={debt.total} />
         )}
 
         {detailsTab === "subs" && (
@@ -478,7 +521,13 @@ function StudentDetailsBody({
                       size="sm"
                       variant="ghost"
                       onClick={() => {
-                        if (confirm("Se désabonner de ce module ?")) {
+                        if (
+                          confirm(
+                            `Désinscrire ${student.firstName} ${student.lastName} de « ${getSubLabel(subId)} » ?\n\n` +
+                              "Il sera retiré de la feuille de présences de cet emploi du temps. Ses présences, " +
+                              "absences et transactions passées sont CONSERVÉES et restent dans son rapport.",
+                          )
+                        ) {
                           updateItem("students", student.id, {
                             subscriptionIds: student.subscriptionIds.filter((id) => id !== subId),
                           });
@@ -491,6 +540,51 @@ function StudentDetailsBody({
                   </div>
                 );
               })
+            )}
+
+            {/* Désinscrire retire l'inscription, pas le passé : ce qu'il a
+                suivi sur un emploi du temps quitté reste ici et au rapport. */}
+            {pastTimetables.length > 0 && (
+              <div className="space-y-2 pt-3">
+                <span className="block text-[10px] font-bold uppercase tracking-wide text-muted">
+                  Emplois du temps quittés — historique conservé ({pastTimetables.length})
+                </span>
+                {pastTimetables.map((t) => {
+                  const dayOf = (iso?: string) =>
+                    iso && /(Z|[+-]\d\d:?\d\d)$/.test(iso) ? schoolDateKey(iso) : (iso ?? "").slice(0, 10);
+                  const days = t.firstDate ? [dayOf(t.firstDate), dayOf(t.lastDate)] : [];
+                  return (
+                    <div
+                      key={t.key}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-dashed border-line bg-canvas/40 p-3 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <strong className="flex flex-wrap items-center gap-1.5 text-ink">
+                          {timetableTitle(t)} <TimetableStatusBadge timetable={t} />
+                        </strong>
+                        <span className="text-[10px] text-muted">
+                          {[t.teacher, t.days, t.time].filter(Boolean).join(" · ") || "Créneau supprimé"}
+                          {days.length > 0 &&
+                            ` · suivi du ${formatDateFr(days[0])} au ${formatDateFr(days[days.length - 1])}`}
+                        </span>
+                      </div>
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        <Badge tone="success">{t.presences} prés.</Badge>
+                        <Badge tone="danger">{t.absences} abs.</Badge>
+                        <span className="font-mono font-bold text-danger">-{t.totalCost} DA</span>
+                        {t.unpaid > 0 && (
+                          <Badge tone="danger" className="text-[9px]">
+                            Reste dû {t.unpaid} DA
+                          </Badge>
+                        )}
+                      </span>
+                    </div>
+                  );
+                })}
+                <p className="text-[10px] italic text-muted">
+                  Le détail (séances, absences, ce qui reste dû) est dans l&apos;onglet « Rapport ».
+                </p>
+              </div>
             )}
           </div>
         )}

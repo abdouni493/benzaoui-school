@@ -51,6 +51,7 @@ import {
   type RollCallPolicy,
 } from "@/lib/helpers";
 import { canAttendSession } from "@/lib/seanceAudience";
+import { sessionRoster } from "@/lib/sessionRoster";
 import { printHtmlDocument } from "@/lib/print";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 
@@ -380,25 +381,26 @@ export function AttendancePage() {
   /** Message de verrouillage de la séance affichée (undefined = pointage ouvert). */
   const rollCallLock = rollCallLockOf(activeSession);
 
-  // Les élèves de la feuille : ceux qui sont INSCRITS sur le créneau, plus ceux
-  // qui y ont déjà une présence ce jour-là sans y être inscrits.
-  //
-  // Sur une SÉANCE LIBRE, ce second lot est normal et le restera : le public de
-  // la séance (promotion, filière) et les passagers y badgent sans inscription.
-  // Sur un COURS ORDINAIRE, plus personne ne peut s'y ajouter désormais — mais
-  // les présences prises avant la règle restent affichées, sinon la réception
-  // ne pourrait plus les corriger depuis cet écran.
-  const getSessionStudents = (sesId: string) => {
-    const subIds = subscriptions.filter((su) => su.sessionId === sesId).map((su) => su.id);
-    const enrolled = students.filter((stu) => stu.subscriptionIds.some((id) => subIds.includes(id)));
-    const enrolledIds = new Set(enrolled.map((s) => s.id));
-    const visitorIds = new Set(
-      sheetAttendance
-        .filter((a) => a.sessionId === sesId && !enrolledIds.has(a.studentId))
-        .map((a) => a.studentId),
-    );
-    return [...enrolled, ...students.filter((s) => visitorIds.has(s.id))];
+  // Les élèves de la feuille : les INSCRITS du créneau — un élève désinscrit
+  // en sort, même s'il y a une présence ce jour-là (elle reste sur sa fiche et
+  // dans son rapport). Une SÉANCE LIBRE garde aussi ceux qui y ont badgé sans
+  // inscription : son public et les passagers. Voir lib/sessionRoster.ts.
+  // Calculée une fois par créneau et par rendu : la feuille la demande pour
+  // chaque carte de séance, chaque compteur et chaque présence du jour.
+  const rosterCache = new Map<string, { list: Student[]; ids: Set<string> }>();
+  const rosterOf = (sesId: string) => {
+    let hit = rosterCache.get(sesId);
+    if (!hit) {
+      const ses = sheetSessions.find((s) => s.id === sesId) ?? sessions.find((s) => s.id === sesId);
+      const list = ses ? sessionRoster(ses, students, subscriptions, sheetAttendance) : [];
+      hit = { list, ids: new Set(list.map((s) => s.id)) };
+      rosterCache.set(sesId, hit);
+    }
+    return hit;
   };
+  const getSessionStudents = (sesId: string) => rosterOf(sesId).list;
+  /** La présence compte-t-elle sur la feuille ? (son élève y figure) */
+  const isOnSheet = (a: AttendanceRecord) => rosterOf(a.sessionId).ids.has(a.studentId);
 
   /**
    * Les élèves de la feuille que la recherche laisse voir.
@@ -431,7 +433,9 @@ export function AttendancePage() {
 
   // ---- Where the selected day stands ----------------------------------------
   const sheetSessionIds = new Set(sheetSessions.map((s) => s.id));
-  const sheetMarks = sheetAttendance.filter((a) => sheetSessionIds.has(a.sessionId));
+  // Seulement celles des élèves affichés : un désinscrit ne compte plus parmi
+  // les pointés d'une feuille où il ne figure plus.
+  const sheetMarks = sheetAttendance.filter((a) => sheetSessionIds.has(a.sessionId) && isOnSheet(a));
   const sheetExpected = sheetSessions.reduce((n, s) => n + getSessionStudents(s.id).length, 0);
   const sheetDeducted = sheetMarks.reduce((n, a) => n + a.amountDeducted, 0);
 
@@ -1230,7 +1234,7 @@ export function AttendancePage() {
                 const live = sessionLiveState(s);
                 // Roll-call state of THAT séance on the selected day
                 const roster = getSessionStudents(s.id).length;
-                const marked = sheetAttendance.filter((a) => a.sessionId === s.id).length;
+                const marked = sheetMarks.filter((a) => a.sessionId === s.id).length;
 
                 return (
                   <button
