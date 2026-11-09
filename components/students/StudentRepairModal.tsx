@@ -1432,10 +1432,7 @@ function AbsenceForm({
     return d.toISOString().slice(0, 10);
   });
   const picked = regular.find((e) => e.sub.id === subId);
-  const defaultPrice = picked && !student.isFree ? studentSeancePrice(student, picked.sub) : 0;
-  const [amount, setAmount] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
-  const value = Math.max(0, Math.round(amount ?? defaultPrice));
 
   const week = date ? absenceWeekOf(date, weekStartDay) : null;
   const session = picked?.session;
@@ -1470,8 +1467,6 @@ function AbsenceForm({
   const submit = async () => {
     if (blocked || !session || !week) return;
     setBusy(true);
-    const mod = lookups.module.get(session.moduleId) ?? "module";
-    const grp = lookups.group.get(session.groupId);
     const res = await addAbsencePenalty({
       studentId: student.id,
       subscriptionId: subId,
@@ -1479,8 +1474,6 @@ function AbsenceForm({
       moduleId: session.moduleId,
       periodStart: week.start,
       periodEnd: week.end,
-      amount: value,
-      label: `${mod}${grp ? ` (${grp})` : ""}`,
     });
     setBusy(false);
     if (!res.ok) {
@@ -1490,12 +1483,9 @@ function AbsenceForm({
     addToast({
       type: "success",
       title: "Absence enregistrée",
-      message: `Semaine du ${frDay(week.start)} au ${frDay(week.end)} — ${value ? `${value} DA débités` : "sans débit"}${
-        res.newBalance !== undefined ? ` — nouveau solde : ${res.newBalance} DA.` : "."
-      }`,
+      message: `Semaine du ${frDay(week.start)} au ${frDay(week.end)} — aucun débit (le solde n'est pas touché).`,
       studentName: `${student.firstName} ${student.lastName}`,
     });
-    setAmount(null);
   };
 
   if (regular.length === 0) {
@@ -1509,10 +1499,7 @@ function AbsenceForm({
           <Field label="Emploi du temps (inscriptions de l'élève) *">
             <Select
               value={subId}
-              onChange={(e) => {
-                setSubId(e.target.value);
-                setAmount(null);
-              }}
+              onChange={(e) => setSubId(e.target.value)}
               className="w-full"
             >
               {regular.map(({ sub, session: s }) => (
@@ -1525,29 +1512,30 @@ function AbsenceForm({
         </div>
         <Field
           label="Un jour de la semaine d'absence *"
-          hint={week ? `Semaine facturée : du ${frDay(week.start)} au ${frDay(week.end)}.` : undefined}
+          hint={week ? `Semaine enregistrée : du ${frDay(week.start)} au ${frDay(week.end)}.` : undefined}
         >
           <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
-        <Field label="Montant facturé (DA)" hint="Le prix de la séance de l'élève ; 0 pour une absence sans débit.">
-          <Input type="number" min={0} value={value} onChange={(e) => setAmount(Number(e.target.value))} />
-        </Field>
       </div>
+
+      <Notice tone="info">
+        L&apos;absence est enregistrée et apparaît dans «&nbsp;Présences&nbsp;». Elle ne retire
+        aucun montant du solde de l&apos;élève.
+      </Notice>
 
       {presences.length > 0 && (
         <Notice tone="danger">
           L&apos;élève a une présence cette semaine ({presences.map((a) => schoolDateTimeLabel(a.timestamp)).join(", ")}) :
-          une absence n&apos;est facturée que s&apos;il a manqué toute la semaine.
+          une absence n&apos;est enregistrée que s&apos;il a manqué toute la semaine.
         </Notice>
       )}
-      {existing && <Notice tone="danger">Une absence est déjà facturée sur cette semaine pour ce créneau.</Notice>}
+      {existing && <Notice tone="danger">Une absence est déjà enregistrée sur cette semaine pour ce créneau.</Notice>}
       {unfinished && (
         <Notice tone="danger">
-          Cette semaine n&apos;est pas terminée : une absence ne se facture qu&apos;une fois la semaine écoulée.
+          Cette semaine n&apos;est pas terminée : une absence ne s&apos;enregistre qu&apos;une fois la semaine écoulée.
         </Notice>
       )}
 
-      <Preview before={student.balance} after={student.balance - value} />
       <div className="flex justify-end">
         <Button variant="danger" onClick={submit} disabled={busy || blocked}>
           <CalendarPlus className="h-4 w-4" /> {busy ? "Enregistrement…" : "Enregistrer l'absence"}

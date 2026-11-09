@@ -9,7 +9,7 @@ import { changeOwnPassword } from "@/lib/supabase/createUser";
 import { createClient } from "@/lib/supabase/client";
 import { Card, CardBody } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
-import { Input, Select } from "@/components/ui/SearchInput";
+import { Input } from "@/components/ui/SearchInput";
 import { PageHeader } from "@/components/layout/PageHeader";
 import {
   Settings,
@@ -40,12 +40,9 @@ type SettingsTab = "school" | "security" | "whatsapp" | "backup";
 const SETTINGS_TABS: readonly SettingsTab[] = ["school", "security", "whatsapp", "backup"];
 
 export function SettingsPage() {
-  const { school, modules, moduleAbsenceRules, setModuleAbsenceRule, updateSchool, restoreState } = useData(
+  const { school, updateSchool, restoreState } = useData(
     useShallow((s) => ({
       school: s.school,
-      modules: s.modules,
-      moduleAbsenceRules: s.moduleAbsenceRules,
-      setModuleAbsenceRule: s.setModuleAbsenceRule,
       updateSchool: s.updateSchool,
       restoreState: s.restoreState,
     })),
@@ -87,9 +84,6 @@ export function SettingsPage() {
   const [nif, setNif] = useState(school?.nif || "");
   const [nis, setNis] = useState(school?.nis || "");
   const [registrationFee, setRegistrationFee] = useState<number>(school?.registrationFee || 0);
-  const [absencePenaltyEnabled, setAbsencePenaltyEnabled] = useState<boolean>(school?.absencePenaltyEnabled ?? true);
-  const [absencePenaltySince, setAbsencePenaltySince] = useState<string>(school?.absencePenaltySince || "");
-  const [absenceWeekStartDay, setAbsenceWeekStartDay] = useState<number>(school?.absenceWeekStartDay ?? 5);
 
   /** Le frais d'inscription a-t-il été retouché SUR CET ÉCRAN ? Sinon il n'est
    *  pas renvoyé : « Enregistrer » sur la fiche de l'école réécrivait le tarif
@@ -114,21 +108,7 @@ export function SettingsPage() {
     setRegistreCommerce(school.registreCommerce || "");
     setNif(school.nif || "");
     setNis(school.nis || "");
-    setAbsencePenaltyEnabled(school.absencePenaltyEnabled ?? true);
-    setAbsencePenaltySince(school.absencePenaltySince || "");
-    setAbsenceWeekStartDay(school.absenceWeekStartDay ?? 5);
   }, [school?.id]);
-
-  // Saved on its own (not folded into handleSaveSchool) so that, on a project
-  // where the weekly-absence migration hasn't been applied yet, an unknown
-  // column error here can't block the rest of the school form from saving.
-  const handleSaveAbsenceBilling = () => {
-    updateSchool({
-      absencePenaltyEnabled,
-      absencePenaltySince: absencePenaltySince || undefined,
-      absenceWeekStartDay,
-    });
-  };
 
   // Admin Account Form State (name + password; email change requires
   // re-confirmation via Supabase Auth so it's shown read-only here)
@@ -367,122 +347,6 @@ export function SettingsPage() {
                         Le <strong className="text-ink">second type</strong> et le nom de chacun se règlent dans
                         «&nbsp;Abonnements&nbsp;» → «&nbsp;Frais d&apos;inscription uniques&nbsp;».
                       </p>
-                    </div>
-
-                    <div className="sm:col-span-2 border border-line/60 bg-canvas/10 p-4 rounded-2xl space-y-3">
-                      <div className="flex items-start gap-2">
-                        <AlertTriangle className="h-4 w-4 text-warning mt-0.5 shrink-0" />
-                        <div>
-                          <label className="block text-xs font-bold text-ink">Facturation automatique des absences</label>
-                          <p className="text-[10px] text-muted mt-0.5 leading-relaxed">
-                            La semaine court d&apos;un <strong className="text-ink">vendredi au vendredi suivant</strong>.
-                            Pour chaque module, si l&apos;élève n&apos;a ni scanné sa carte (sur son groupe ou sur
-                            n&apos;importe quel autre groupe du même cours) ni été marqué présent de toute la semaine,
-                            le prix de la séance de ce module est débité de son solde (la dette est autorisée).
-                          </p>
-                        </div>
-                      </div>
-                      <label className="flex items-center gap-2 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={absencePenaltyEnabled}
-                          onChange={(e) => setAbsencePenaltyEnabled(e.target.checked)}
-                          className="h-4 w-4 accent-primary"
-                        />
-                        <span className="text-xs font-semibold text-ink">
-                          {absencePenaltyEnabled ? "Activée" : "Désactivée"}
-                        </span>
-                      </label>
-                      <div className="flex flex-col sm:flex-row sm:items-end gap-3">
-                        <div className="flex-1">
-                          <label className="block text-[10px] font-semibold text-muted mb-1">
-                            Facturer les semaines à partir du (les absences avant cette date ne sont jamais facturées)
-                          </label>
-                          <Input
-                            type="date"
-                            value={absencePenaltySince}
-                            onChange={(e) => setAbsencePenaltySince(e.target.value)}
-                            className="rounded-xl"
-                          />
-                        </div>
-                        <div className="sm:w-56">
-                          <label className="block text-[10px] font-semibold text-muted mb-1">
-                            La semaine commence le
-                          </label>
-                          <Select
-                            value={String(absenceWeekStartDay)}
-                            onChange={(e) => setAbsenceWeekStartDay(Number(e.target.value))}
-                            className="rounded-xl"
-                          >
-                            <option value="5">Vendredi (par défaut)</option>
-                            <option value="6">Samedi</option>
-                            <option value="0">Dimanche</option>
-                            <option value="1">Lundi</option>
-                            <option value="2">Mardi</option>
-                            <option value="3">Mercredi</option>
-                            <option value="4">Jeudi</option>
-                          </Select>
-                        </div>
-                        <Button variant="outline" onClick={handleSaveAbsenceBilling} className="shrink-0">
-                          <Save className="h-3.5 w-3.5 me-1.5" /> Enregistrer
-                        </Button>
-                      </div>
-
-                      {/* Per-module programming: each module can be excluded, or
-                          use a window other than 7 days. */}
-                      <div className="border-t border-line/50 pt-3 space-y-2">
-                        <label className="block text-[10px] font-bold uppercase tracking-wider text-muted">
-                          Programmation par module ({modules.length})
-                        </label>
-                        <p className="text-[10px] text-muted leading-relaxed">
-                          Chaque module est facturé indépendamment : décochez-en un pour ne jamais facturer
-                          ses absences, ou modifiez sa fenêtre (7 jours par défaut).
-                        </p>
-                        {modules.length === 0 ? (
-                          <p className="text-[10px] italic text-muted py-2">Aucun module enregistré.</p>
-                        ) : (
-                          <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
-                            {modules.map((m) => {
-                              const rule = moduleAbsenceRules.find((r) => r.moduleId === m.id);
-                              const enabled = rule?.enabled ?? true;
-                              const win = rule?.daysWindow ?? 7;
-                              return (
-                                <div
-                                  key={m.id}
-                                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-surface px-3 py-2"
-                                >
-                                  <label className="flex items-center gap-2 cursor-pointer select-none min-w-0">
-                                    <input
-                                      type="checkbox"
-                                      checked={enabled}
-                                      onChange={(e) => setModuleAbsenceRule(m.id, e.target.checked, win)}
-                                      className="h-4 w-4 accent-primary shrink-0"
-                                      disabled={!absencePenaltyEnabled}
-                                    />
-                                    <span className={`text-xs font-semibold truncate ${enabled ? "text-ink" : "text-muted line-through"}`}>
-                                      {m.name}
-                                    </span>
-                                  </label>
-                                  <div className="flex items-center gap-1.5 shrink-0">
-                                    <span className="text-[10px] text-muted">Fenêtre</span>
-                                    <Input
-                                      type="number"
-                                      min={1}
-                                      value={win}
-                                      onChange={(e) =>
-                                        setModuleAbsenceRule(m.id, enabled, Math.max(1, Number(e.target.value) || 7))
-                                      }
-                                      className="w-16 rounded-lg text-xs"
-                                      disabled={!absencePenaltyEnabled || !enabled}
-                                    />
-                                    <span className="text-[10px] text-muted">jours</span>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
                     </div>
 
                     <div className="sm:col-span-2 border-t border-line/50 pt-4 mt-2 flex flex-col sm:flex-row items-center gap-4 bg-canvas/10 p-4 rounded-2xl">

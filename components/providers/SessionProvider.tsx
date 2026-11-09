@@ -15,8 +15,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const fetchSchool = useData((s) => s.fetchSchool);
   const startData = useData((s) => s.start);
   const clearData = useData((s) => s.clear);
-  const processWeeklyAbsences = useData((s) => s.processWeeklyAbsences);
-  const reconcileAbsencePenalties = useData((s) => s.reconcileAbsencePenalties);
 
   useEffect(() => {
     fetchSchool();
@@ -28,18 +26,11 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     if (user) {
       // La copie locale s'affiche aussitôt (si elle existe), puis seules les
       // lignes changées depuis sont téléchargées ; sinon, chargement complet.
-      void startData(user.id).then(() => {
-        // Staff load is the safety-net trigger for the automatic weekly-absence
-        // billing (server-side, idempotent, throttled to once/day). The action
-        // re-syncs on its own if it charged anything, so any freshly-written
-        // debits show up without an extra refresh here. It runs AFTER the
-        // data is in place so it never competes with the first load.
-        if (user.role === "admin" || user.role === "reception") {
-          // Puis le filet : une absence facturée sur une semaine où l'appel,
-          // saisi après coup, a posé une présence est annulée et remboursée.
-          void processWeeklyAbsences().then(() => reconcileAbsencePenalties());
-        }
-      });
+      //
+      // La facturation automatique des absences a été RETIRÉE : plus aucune
+      // séance n'est débitée du solde d'un élève à cause d'une absence. On ne
+      // déclenche donc plus process_weekly_absences() au chargement du staff.
+      void startData(user.id);
     } else {
       clearData();
     }
