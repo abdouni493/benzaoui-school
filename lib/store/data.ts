@@ -1097,7 +1097,9 @@ interface DataActions {
    *  contredit (appel saisi après la facturation du vendredi) et rembourse
    *  chacune. Personnel seulement ; ne fait rien sur une copie incomplète. */
   reconcileAbsencePenalties: (opts?: { studentId?: string }) => Promise<{ cancelled: number; refunded: number }>;
-  /** Facture à la main l'absence d'une semaine sur un créneau de l'élève. */
+  /** Enregistre à la main l'absence d'une semaine sur un créneau de l'élève.
+   *  Elle apparaît dans « Présences » mais ne débite JAMAIS le solde : les
+   *  absences ne retirent plus d'argent du solde de l'élève. */
   addAbsencePenalty: (args: {
     studentId: string;
     subscriptionId?: string;
@@ -1105,9 +1107,6 @@ interface DataActions {
     moduleId: string;
     periodStart: string;
     periodEnd: string;
-    amount: number;
-    /** « science (D) » — repris dans la ligne du solde */
-    label: string;
   }) => Promise<{ ok: boolean; error?: string; newBalance?: number }>;
   /** Writes ONE tariff for every group of a course (same class + module +
    *  teacher), creating the missing ones. Returns how many groups were priced. */
@@ -2411,12 +2410,14 @@ export const useData = create<DataStore>((set, get) => ({
     return next;
   },
 
-  addAbsencePenalty: async ({ studentId, subscriptionId, sessionId, moduleId, periodStart, periodEnd, amount, label }) => {
+  // L'absence est ENREGISTRÉE (elle apparaît dans « Présences »), mais plus
+  // aucun montant n'est retiré du solde de l'élève : la décision métier est que
+  // les absences ne débitent plus le solde. On pose donc toujours amount = 0 et
+  // on n'écrit jamais de ligne « Absence hebdomadaire » au solde.
+  addAbsencePenalty: async ({ studentId, subscriptionId, sessionId, moduleId, periodStart, periodEnd }) => {
     const supabase = createClient();
     const penaltyId = uid();
-    const cost = Math.max(0, Math.round(amount));
-    // L'absence d'abord : l'index unique (élève, inscription, fin de semaine)
-    // refuse un doublon AVANT qu'un dinar ne bouge.
+    // L'index unique (élève, inscription, fin de semaine) refuse un doublon.
     const { error: penaltyError } = await supabase.from("absence_penalties").insert({
       id: penaltyId,
       student_id: studentId,
@@ -2425,39 +2426,19 @@ export const useData = create<DataStore>((set, get) => ({
       module_id: moduleId,
       period_start: periodStart,
       period_end: periodEnd,
-      amount: cost,
-      balance_after: 0,
+      amount: 0,
+      balance_after: get().students.find((s) => s.id === studentId)?.balance ?? 0,
     });
     if (penaltyError) {
       return {
         ok: false,
         error: /duplicate|unique/i.test(penaltyError.message)
-          ? "Une absence est déjà facturée sur cette semaine pour ce créneau."
+          ? "Une absence est déjà enregistrée sur cette semaine pour ce créneau."
           : penaltyError.message,
       };
     }
 
-    let newBalance = get().students.find((s) => s.id === studentId)?.balance;
-    if (cost > 0) {
-      const line = await writeLedgerLine(supabase, {
-        studentId,
-        amount: -cost,
-        type: "deduction",
-        description:
-          `${ABSENCE_TX_PREFIX} — ${label} — semaine du ${frDay(periodStart)} au ${frDay(periodEnd)}` +
-          " — saisie manuelle",
-        date: isoFromSchoolInput(`${periodEnd}T20:00`),
-        moduleId,
-      });
-      if (!line.ok) {
-        await supabase.from("absence_penalties").delete().eq("id", penaltyId);
-        return { ok: false, error: line.error };
-      }
-      newBalance = line.newBalance;
-    }
-    if (newBalance !== undefined) {
-      await supabase.from("absence_penalties").update({ balance_after: newBalance }).eq("id", penaltyId);
-    }
+    const newBalance = get().students.find((s) => s.id === studentId)?.balance;
     await get().refresh();
     return { ok: true, newBalance };
   },
