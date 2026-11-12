@@ -1174,6 +1174,14 @@ interface DataActions {
     cost: number;
     description?: string;
   }) => Promise<{ ok: boolean; absenceId?: string; cost?: number; messageKey?: string }>;
+  /**
+   * Tranche PLUSIEURS absences d'un coup — même RPC que `resolveWorkerAbsence`,
+   * appelé pour chaque journée, puis un seul rafraîchissement à la fin. Chaque
+   * journée garde sa propre décision (retenue ou 0 DA).
+   */
+  resolveWorkerAbsences: (
+    items: Array<{ shiftId: string; cost: number; description?: string }>,
+  ) => Promise<{ ok: boolean; resolved: number; failed: string[] }>;
   /** Règle une PÉRIODE de travail (mois, journée, demi-journée ou heures) et
    *  l'inscrit au registre des règlements — le seul endroit qui dise avec
    *  certitude si un mois a déjà été payé. */
@@ -2655,6 +2663,31 @@ export const useData = create<DataStore>((set, get) => ({
     const res = data as { ok: boolean; absenceId?: string; cost?: number; messageKey?: string };
     if (res.ok) await get().refresh();
     return res;
+  },
+
+  resolveWorkerAbsences: async (items) => {
+    const supabase = createClient();
+    let resolved = 0;
+    const failed: string[] = [];
+    for (const { shiftId, cost, description } of items) {
+      const { data, error } = await supabase.rpc("resolve_worker_absence", {
+        p_shift_id: shiftId,
+        p_cost: Math.max(0, Math.round(cost || 0)),
+        p_description: description ?? "",
+      });
+      const res = data as { ok?: boolean } | null;
+      if (error || !res?.ok) {
+        console.error("resolve_worker_absence failed:", error?.message);
+        failed.push(shiftId);
+      } else {
+        resolved++;
+      }
+    }
+    if (failed.length > 0) {
+      reportWriteFailure("worker_shifts", `${failed.length} absence(s) non tranchée(s)`);
+    }
+    if (resolved > 0) await get().refresh();
+    return { ok: failed.length === 0, resolved, failed };
   },
 
   payWorkerPeriod: async ({
