@@ -128,6 +128,7 @@ export function AdministrationPage() {
     endWorkerShift,
     markWorkerAbsences,
     resolveWorkerAbsence,
+    resolveWorkerAbsences,
     payWorkerPeriod,
     deleteWorkerPayment,
   } = useData(
@@ -147,6 +148,7 @@ export function AdministrationPage() {
       endWorkerShift: s.endWorkerShift,
       markWorkerAbsences: s.markWorkerAbsences,
       resolveWorkerAbsence: s.resolveWorkerAbsence,
+      resolveWorkerAbsences: s.resolveWorkerAbsences,
       payWorkerPeriod: s.payWorkerPeriod,
       deleteWorkerPayment: s.deleteWorkerPayment,
     })),
@@ -216,6 +218,17 @@ export function AdministrationPage() {
   const [absenceDeduct, setAbsenceDeduct] = useState(true);
   const [absenceReason, setAbsenceReason] = useState("");
   const [savingAbsence, setSavingAbsence] = useState(false);
+
+  // ---- Régler plusieurs absences d'un coup -----------------------------------
+  // Même décision que « Trancher une absence », mais sur une sélection de
+  // journées et de travailleurs. Chaque journée garde son propre choix.
+  const [isBulkAbsenceOpen, setIsBulkAbsenceOpen] = useState(false);
+  const [bulkRows, setBulkRows] = useState<
+    Record<string, { selected: boolean; deduct: boolean; cost: number }>
+  >({});
+  const [bulkReason, setBulkReason] = useState("");
+  const [bulkSearch, setBulkSearch] = useState("");
+  const [savingBulk, setSavingBulk] = useState(false);
 
   const [scanCode, setScanCode] = useState("");
   const [scanFeedback, setScanFeedback] = useState<{ ok: boolean; text: string } | null>(null);
@@ -380,6 +393,103 @@ export function AdministrationPage() {
       setAbsenceShift(null);
     } finally {
       setSavingAbsence(false);
+    }
+  };
+
+  /** Les absences à trancher, regroupées par travailleur. */
+  const bulkGroups = useMemo(() => {
+    const map = new Map<string, { worker: ReceptionStaff; shifts: WorkerShift[] }>();
+    for (const a of absenceAlerts) {
+      const g = map.get(a.worker.id) ?? { worker: a.worker, shifts: [] };
+      g.shifts.push(a.shift);
+      map.set(a.worker.id, g);
+    }
+    for (const g of map.values()) g.shifts.sort((a, b) => a.workDate.localeCompare(b.workDate));
+    return [...map.values()].sort((a, b) =>
+      `${a.worker.firstName} ${a.worker.lastName}`.localeCompare(`${b.worker.firstName} ${b.worker.lastName}`),
+    );
+  }, [absenceAlerts]);
+
+  const visibleBulkGroups = useMemo(() => {
+    const q = bulkSearch.trim().toLowerCase();
+    if (!q) return bulkGroups;
+    return bulkGroups.filter((g) =>
+      `${g.worker.firstName} ${g.worker.lastName} ${g.worker.jobTitle ?? ""}`.toLowerCase().includes(q),
+    );
+  }, [bulkGroups, bulkSearch]);
+
+  const openBulkAbsences = (preselectWorkerId?: string) => {
+    const rows: Record<string, { selected: boolean; deduct: boolean; cost: number }> = {};
+    for (const a of absenceAlerts) {
+      rows[a.shift.id] = {
+        selected: preselectWorkerId ? a.worker.id === preselectWorkerId : false,
+        deduct: true,
+        cost: defaultAbsenceCost(a.worker, a.shift.workDate),
+      };
+    }
+    setBulkRows(rows);
+    setBulkReason("");
+    setBulkSearch("");
+    setIsBulkAbsenceOpen(true);
+    setActiveMenuId(null);
+  };
+
+  const patchBulkRows = (
+    ids: string[],
+    patch: Partial<{ selected: boolean; deduct: boolean; cost: number }>,
+  ) =>
+    setBulkRows((prev) => {
+      const next = { ...prev };
+      for (const id of ids) if (next[id]) next[id] = { ...next[id], ...patch };
+      return next;
+    });
+
+  const bulkSelectedIds = Object.entries(bulkRows)
+    .filter(([id, r]) => r.selected && absenceAlerts.some((a) => a.shift.id === id))
+    .map(([id]) => id);
+  const bulkSelectedWorkers = new Set(
+    absenceAlerts.filter((a) => bulkRows[a.shift.id]?.selected).map((a) => a.worker.id),
+  ).size;
+  const bulkTotal = bulkSelectedIds.reduce((sum, id) => {
+    const r = bulkRows[id];
+    return sum + (r.deduct ? Math.max(0, r.cost || 0) : 0);
+  }, 0);
+
+  const handleResolveBulk = async () => {
+    if (bulkSelectedIds.length === 0) return;
+    const shiftsById = new Map(absenceAlerts.map((a) => [a.shift.id, a.shift]));
+    setSavingBulk(true);
+    try {
+      const res = await resolveWorkerAbsences(
+        bulkSelectedIds.map((id) => {
+          const r = bulkRows[id];
+          const shift = shiftsById.get(id)!;
+          return {
+            shiftId: id,
+            // « Ne rien retenir » : la journée sort des alertes avec 0 DA.
+            cost: r.deduct ? Math.max(0, r.cost || 0) : 0,
+            description: bulkReason.trim() || `Absence du ${frDate(shift.workDate)}`,
+          };
+        }),
+      );
+      if (!res.ok) {
+        alert(
+          `${res.resolved} absence(s) réglée(s), ${res.failed.length} en échec. Si le message parle ` +
+            "d'une fonction manquante, passez la migration " +
+            "supabase/migrations/20260915_teacher_pay_matrix_particulier_workflow.sql.",
+        );
+        // On garde la fenêtre ouverte avec seulement les échecs cochés.
+        setBulkRows((prev) => {
+          const next = { ...prev };
+          for (const id of Object.keys(next))
+            next[id] = { ...next[id], selected: res.failed.includes(id) };
+          return next;
+        });
+        return;
+      }
+      setIsBulkAbsenceOpen(false);
+    } finally {
+      setSavingBulk(false);
     }
   };
 
@@ -1196,6 +1306,18 @@ export function AdministrationPage() {
           </Button>
           <Button
             variant="outline"
+            onClick={() => openBulkAbsences()}
+            className="flex items-center gap-2"
+          >
+            <CheckSquare className="h-4 w-4" /> Régler les absences
+            {absenceAlerts.length > 0 && (
+              <span className="rounded-full bg-amber-500/20 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-600 dark:text-amber-300">
+                {absenceAlerts.length}
+              </span>
+            )}
+          </Button>
+          <Button
+            variant="outline"
             onClick={() => {
               setScanFeedback(null);
               setIsScanOpen(true);
@@ -1322,9 +1444,18 @@ export function AdministrationPage() {
           <div className="flex items-start gap-3">
             <UserX className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-300" />
             <div className="min-w-0 flex-1">
-              <strong className="block text-sm text-amber-600 dark:text-amber-300">
-                {absenceAlerts.length} absence(s) à trancher
-              </strong>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <strong className="block text-sm text-amber-600 dark:text-amber-300">
+                  {absenceAlerts.length} absence(s) à trancher
+                </strong>
+                <button
+                  type="button"
+                  onClick={() => openBulkAbsences()}
+                  className="flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/20 px-2.5 py-1 text-[10px] font-bold text-amber-700 dark:text-amber-200 transition-colors hover:bg-amber-500/30"
+                >
+                  <CheckSquare className="h-3 w-3" /> Régler plusieurs absences
+                </button>
+              </div>
               <p className="mt-0.5 text-[11px] leading-relaxed text-muted">
                 Ces journées sont enregistrées comme <strong>absences</strong> mais personne
                 n&apos;a encore dit ce qu&apos;elles retiennent sur la paie. Cliquez pour fixer la
@@ -2622,6 +2753,242 @@ export function AdministrationPage() {
               </Button>
               <Button onClick={handleResolveAbsence} disabled={savingAbsence}>
                 {savingAbsence ? "Enregistrement..." : "Enregistrer la décision"}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* RÉGLER PLUSIEURS ABSENCES                                          */}
+      {/* Même décision que « Trancher une absence » — retenir un montant,  */}
+      {/* ou ne rien retenir — appliquée à une sélection de journées et de   */}
+      {/* travailleurs. Chaque journée garde son propre choix.               */}
+      {/* ------------------------------------------------------------------ */}
+      <Modal
+        open={isBulkAbsenceOpen}
+        onClose={() => !savingBulk && setIsBulkAbsenceOpen(false)}
+        title="Régler les absences"
+        subtitle={`${absenceAlerts.length} absence(s) à trancher chez ${bulkGroups.length} travailleur(s)`}
+        size="xl"
+      >
+        {bulkGroups.length === 0 ? (
+          <div className="space-y-4">
+            <p className="rounded-2xl border border-line bg-canvas/40 p-4 text-center text-sm text-muted">
+              Aucune absence à trancher : toutes les absences ont déjà été réglées.
+            </p>
+            <div className="flex justify-end border-t border-line pt-4">
+              <Button variant="outline" onClick={() => setIsBulkAbsenceOpen(false)}>
+                Fermer
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {/* Recherche + sélection globale */}
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+                <Input
+                  value={bulkSearch}
+                  onChange={(e) => setBulkSearch(e.target.value)}
+                  placeholder="Filtrer les travailleurs..."
+                  className="pl-9"
+                />
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    patchBulkRows(
+                      visibleBulkGroups.flatMap((g) => g.shifts.map((s) => s.id)),
+                      { selected: true },
+                    )
+                  }
+                >
+                  Tout cocher
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() =>
+                    patchBulkRows(
+                      visibleBulkGroups.flatMap((g) => g.shifts.map((s) => s.id)),
+                      { selected: false },
+                    )
+                  }
+                >
+                  Tout décocher
+                </Button>
+              </div>
+            </div>
+
+            {/* Décision appliquée d'un coup à la sélection */}
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                disabled={bulkSelectedIds.length === 0}
+                onClick={() => patchBulkRows(bulkSelectedIds, { deduct: true })}
+                className="rounded-2xl border border-line bg-surface p-3 text-left transition-all hover:border-danger/40 disabled:opacity-50"
+              >
+                <strong className="block text-xs text-ink">Retenir sur la paie — sélection</strong>
+                <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                  Les montants de chaque ligne cochée sont déduits du prochain règlement.
+                </span>
+              </button>
+              <button
+                type="button"
+                disabled={bulkSelectedIds.length === 0}
+                onClick={() => patchBulkRows(bulkSelectedIds, { deduct: false })}
+                className="rounded-2xl border border-line bg-surface p-3 text-left transition-all hover:border-success/40 disabled:opacity-50"
+              >
+                <strong className="block text-xs text-ink">Ne rien retenir — sélection</strong>
+                <span className="mt-0.5 block text-[10px] leading-relaxed text-muted">
+                  Absence justifiée, congé accordé… Les journées restent des absences, mais le
+                  salaire n&apos;est pas diminué.
+                </span>
+              </button>
+            </div>
+
+            {/* Absences par travailleur */}
+            <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
+              {visibleBulkGroups.map((g) => {
+                const ids = g.shifts.map((s) => s.id);
+                const checked = ids.filter((id) => bulkRows[id]?.selected).length;
+                const allChecked = checked === ids.length;
+                return (
+                  <div key={g.worker.id} className="rounded-2xl border border-line bg-canvas/40 p-3">
+                    <label className="flex cursor-pointer flex-wrap items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4"
+                        checked={allChecked}
+                        ref={(el) => {
+                          if (el) el.indeterminate = checked > 0 && !allChecked;
+                        }}
+                        onChange={() => patchBulkRows(ids, { selected: !allChecked })}
+                      />
+                      <strong className="text-sm text-ink">
+                        {g.worker.firstName} {g.worker.lastName}
+                      </strong>
+                      <Badge tone="neutral" className="text-[10px]">
+                        {ROLE_LABELS[g.worker.role ?? "reception"]}
+                      </Badge>
+                      <span className="text-[10px] text-muted">
+                        {g.shifts.length} absence(s) · salaire {g.worker.salary} DA
+                      </span>
+                      <span className="ml-auto text-[10px] font-bold text-muted">
+                        {checked}/{ids.length} cochée(s)
+                      </span>
+                    </label>
+
+                    <div className="mt-2 space-y-1.5">
+                      {g.shifts.map((s) => {
+                        const r = bulkRows[s.id] ?? {
+                          selected: false,
+                          deduct: true,
+                          cost: defaultAbsenceCost(g.worker, s.workDate),
+                        };
+                        return (
+                          <div
+                            key={s.id}
+                            className={`flex flex-wrap items-center gap-2 rounded-xl border px-2.5 py-2 text-xs ${
+                              r.selected ? "border-primary/40 bg-primary/5" : "border-line bg-surface"
+                            }`}
+                          >
+                            <label className="flex min-w-[9rem] cursor-pointer items-center gap-2">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4"
+                                checked={r.selected}
+                                onChange={(e) => patchBulkRows([s.id], { selected: e.target.checked })}
+                              />
+                              <span className="font-mono font-bold text-ink">{frDate(s.workDate)}</span>
+                            </label>
+                            <Badge tone="neutral" className="text-[10px]">
+                              {SOURCE_LABELS[s.source ?? "auto"]?.label ?? s.source}
+                            </Badge>
+                            <div className="ml-auto flex flex-wrap items-center gap-2">
+                              <div className="flex overflow-hidden rounded-lg border border-line">
+                                <button
+                                  type="button"
+                                  onClick={() => patchBulkRows([s.id], { deduct: true, selected: true })}
+                                  className={`px-2 py-1 text-[10px] font-bold ${
+                                    r.deduct ? "bg-danger/15 text-danger" : "text-muted hover:bg-danger/5"
+                                  }`}
+                                >
+                                  Retenir
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => patchBulkRows([s.id], { deduct: false, selected: true })}
+                                  className={`px-2 py-1 text-[10px] font-bold ${
+                                    !r.deduct ? "bg-success/15 text-success" : "text-muted hover:bg-success/5"
+                                  }`}
+                                >
+                                  Ne rien retenir
+                                </button>
+                              </div>
+                              {r.deduct ? (
+                                <div className="flex items-center gap-1">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    value={r.cost || ""}
+                                    onChange={(e) =>
+                                      patchBulkRows([s.id], { cost: Number(e.target.value), selected: true })
+                                    }
+                                    className="h-8 w-24 text-right font-mono text-xs"
+                                  />
+                                  <span className="text-[10px] text-muted">DA</span>
+                                </div>
+                              ) : (
+                                <span className="w-[7.5rem] text-right font-mono text-[11px] font-bold text-success">
+                                  0 DA
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+              {visibleBulkGroups.length === 0 && (
+                <p className="py-6 text-center text-xs text-muted">Aucun travailleur ne correspond.</p>
+              )}
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-muted">
+                Motif / observation (commun à la sélection)
+              </label>
+              <Input
+                value={bulkReason}
+                onChange={(e) => setBulkReason(e.target.value)}
+                placeholder="Vide = « Absence du <date> » pour chaque journée"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border-2 border-line bg-canvas p-3">
+              <span className="text-[10px] font-bold uppercase text-muted">
+                {bulkSelectedIds.length} absence(s) · {bulkSelectedWorkers} travailleur(s) — Retenue totale
+              </span>
+              <strong
+                className={`font-mono text-xl font-black ${bulkTotal > 0 ? "text-danger" : "text-success"}`}
+              >
+                {bulkTotal.toLocaleString("fr-FR")} DA
+              </strong>
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-line pt-4">
+              <Button variant="outline" onClick={() => setIsBulkAbsenceOpen(false)} disabled={savingBulk}>
+                Annuler
+              </Button>
+              <Button onClick={handleResolveBulk} disabled={savingBulk || bulkSelectedIds.length === 0}>
+                {savingBulk
+                  ? "Enregistrement..."
+                  : `Régler ${bulkSelectedIds.length} absence(s)`}
               </Button>
             </div>
           </div>
