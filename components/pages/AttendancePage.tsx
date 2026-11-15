@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useEffect, useMemo } from "react";
 import { useData, uid } from "@/lib/store/data";
 import { useShallow } from "zustand/react/shallow";
@@ -654,16 +655,39 @@ export function AttendancePage() {
     return t ? `${t.firstName} ${t.lastName}` : "-";
   };
 
+  const scopedAttendance = useData(s => s.attendanceScope);
+  const scopeStatus = useData(s => s.attendanceStatus);
+  const [historyRows, setHistoryRows] = useState<AttendanceRecord[]>([]);
+  const [historyRetry, setHistoryRetry] = useState(0);
+  const [historyPeriod, setHistoryPeriod] = useState("");
+  const [historyStatus, setHistoryStatus] = useState("idle");
+  useEffect(() => {
+    if (scopedAttendance) void useData.getState().loadAttendanceDay(sheetDate);
+  }, [sheetDate, scopedAttendance]);
+  useEffect(() => {
+    if (!scopedAttendance || activeTab !== "history") return;
+    let live = true;
+    void Promise.resolve().then(() => {
+      if (!live) return [];
+      setHistoryRows([]);
+      setHistoryStatus("loading");
+      return useData.getState().readAttendanceHistory(histStartDate, histEndDate);
+    }).then(rows => {
+      if (live) { setHistoryRows(rows); setHistoryPeriod(`${histStartDate}|${histEndDate}`); setHistoryStatus("complete"); }
+    }).catch(() => { if (live) setHistoryStatus("failed"); });
+    return () => { live = false; };
+  }, [scopedAttendance, activeTab, histStartDate, histEndDate, attendance, historyRetry]);
+
   // Hidden history must not compete with the scanner or its 30-second clock.
   const historyIndex = useMemo(
     () => activeTab === "history" ? historySearchIndex(students, sessions, modules, classes) : null,
     [activeTab, students, sessions, modules, classes],
   );
   const filteredHistory = useMemo(() => historyIndex
-    ? filterAttendanceHistory(attendance, historyIndex, {
+    ? filterAttendanceHistory(scopedAttendance ? (historyPeriod === `${histStartDate}|${histEndDate}` ? historyRows : []) : attendance, historyIndex, {
         start: histStartDate, end: histEndDate, search: histSearch, status: histStatus,
       })
-    : [], [attendance, historyIndex, histStartDate, histEndDate, histSearch, histStatus]);
+    : [], [attendance, scopedAttendance, historyRows, historyPeriod, historyIndex, histStartDate, histEndDate, histSearch, histStatus]);
 
   // Pagination affects DOM work only; summaries and printing retain every match.
   const historyKey = JSON.stringify([histStartDate, histEndDate, histSearch, histStatus]);
@@ -675,6 +699,7 @@ export function AttendancePage() {
 
   // Print history report helper
   const handlePrintHistory = () => {
+    if (scopedAttendance && (historyStatus !== "complete" || historyPeriod !== `${histStartDate}|${histEndDate}`)) return;
     const totalScans = filteredHistory.length;
     const presentsCount = filteredHistory.filter(h => h.status === "present").length;
     const latesCount = filteredHistory.filter(h => h.status === "late").length;
@@ -1659,6 +1684,10 @@ export function AttendancePage() {
             </Card>
           </div>
 
+          {scopedAttendance && historyStatus !== "complete" && <p role="status">
+            {historyStatus === "failed" ? "Historique indisponible." : "Chargement de la période complète…"}
+            <button onClick={() => setHistoryRetry(n => n + 1)}>Réessayer</button>
+          </p>}
           {/* History list card */}
           <Card>
             <CardBody className="p-0">
@@ -1763,6 +1792,10 @@ export function AttendancePage() {
         </div>
       )}
 
+      {scopedAttendance && scopeStatus === "failed" && <p role="alert">
+        Présence validée si confirmée par le serveur ; lecture locale indisponible. Ne répétez pas le paiement.
+        <button onClick={() => void useData.getState().loadAttendanceDay(sheetDate)}>Réessayer la lecture</button>
+      </p>}
       {/* Confirmation modal for manual marking — every money detail up front */}
       <Modal
         open={!!confirmMark}
@@ -1963,7 +1996,9 @@ export function AttendancePage() {
         title="Carte de l'élève"
         subtitle="Toutes les actions de l'écran Étudiants, sans quitter la feuille de présence."
       >
-        {cardStudentId && <StudentsPage key={cardStudentId} focusStudentId={cardStudentId} />}
+        {cardStudentId && (scopedAttendance
+          ? <Link href="/students">Ouvrir Étudiants pour consulter la fiche et le registre complet.</Link>
+          : <StudentsPage key={cardStudentId} focusStudentId={cardStudentId} />)}
       </Modal>
     </div>
   );

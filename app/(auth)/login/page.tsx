@@ -10,7 +10,7 @@ import { LanguageSwitcher } from "@/components/controls/LanguageSwitcher";
 import { useTranslation } from "@/lib/i18n/useTranslation";
 import { useData } from "@/lib/store/data";
 import { useSession } from "@/lib/store/session";
-import { roleHome } from "@/lib/nav";
+import { attendanceLoginDestination } from "@/lib/store/attendanceScope";
 import { createClient } from "@/lib/supabase/client";
 
 export default function LoginPage() {
@@ -22,7 +22,7 @@ export default function LoginPage() {
   const hydrated = useSession((s) => s.hydrated);
 
   useEffect(() => {
-    if (hydrated && sessionUser) router.replace(roleHome(sessionUser.role));
+    if (hydrated && sessionUser) router.replace(attendanceLoginDestination(sessionUser.role, new URLSearchParams(window.location.search).get("next")));
   }, [hydrated, sessionUser, router]);
 
   const [email, setEmail] = useState("");
@@ -74,7 +74,7 @@ export default function LoginPage() {
     // Keep `loading` true: the button stays disabled until the redirect below
     // unmounts this page, instead of re-enabling mid-flight and inviting a
     // second click.
-    router.replace(roleHome(profile.role));
+    router.replace(attendanceLoginDestination(profile.role, new URLSearchParams(window.location.search).get("next")));
   };
 
   return (
