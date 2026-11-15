@@ -1,5 +1,6 @@
 "use client";
 
+import { ATTENDANCE_TABLE_KEYS, attendanceBounds } from "@/lib/store/attendanceScope";
 import { create } from "zustand";
 import { createClient } from "@/lib/supabase/client";
 import { useToast } from "@/lib/store/toast";
@@ -25,6 +26,7 @@ import type {
   AbsencePenalty,
   Announcement,
   AttendanceRecord,
+  Day,
   BalanceTransaction,
   BalanceTxType,
   CashTransaction,
@@ -1072,7 +1074,11 @@ interface DataActions {
   backgroundSync: () => Promise<void>;
   /** Ouvre la session de données d'un compte : copie locale si elle existe,
    *  puis delta ; sinon chargement complet. */
-  start: (userId: string) => Promise<void>;
+  start: (userId: string, scope?: "attendance") => Promise<void>;
+  attendanceScope: boolean;
+  attendanceStatus: "idle" | "loading" | "complete" | "failed";
+  loadAttendanceDay: (day: string) => Promise<void>;
+  readAttendanceHistory: (start: string, end: string) => Promise<AttendanceRecord[]>;
   clear: () => void;
 
   scanCard: (rfidOrStudentId: string, when?: Date) => Promise<ScanResult>;
@@ -1716,6 +1722,7 @@ let snapshotTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Enregistre la copie locale un peu plus tard, quand le navigateur est libre. */
 function scheduleSnapshotSave() {
+  if (attendanceOnly) return;
   if (typeof window === "undefined" || !ownerId || !syncCursor) return;
   if (snapshotTimer) clearTimeout(snapshotTimer);
   snapshotTimer = setTimeout(() => {
@@ -1730,6 +1737,7 @@ function scheduleSnapshotSave() {
 }
 
 async function saveSnapshotNow() {
+  if (attendanceOnly) return;
   const userId = ownerId;
   const cursor = syncCursor;
   if (!userId || !cursor) return;
@@ -1872,6 +1880,7 @@ function applySyncPayload(payload: SyncPayload, requestedAt?: number): boolean {
 /** Relit ENTIÈREMENT quelques tables — celles que la copie locale ne garde
  *  pas sur le disque (`SNAPSHOT_EXCLUDED`). */
 async function loadTablesFully(keys: TableKey[]): Promise<void> {
+  const generation = scopeGeneration;
   if (keys.length === 0) return;
   const supabase = createClient();
   const counts = readRowCounts();
@@ -1882,6 +1891,7 @@ async function loadTablesFully(keys: TableKey[]): Promise<void> {
       return [key, page.ok ? page.rows.map((r) => cfg.fromRow(r)) : null] as const;
     }),
   );
+  if (generation !== scopeGeneration) return;
   const state = useData.getState();
   const patch: Record<string, unknown> = {};
   const complete: Partial<Record<TableKey, boolean>> = { ...state.complete };
@@ -1900,8 +1910,10 @@ async function loadTablesFully(keys: TableKey[]): Promise<void> {
 }
 
 async function runDelta(): Promise<void> {
+  const generation = scopeGeneration;
   // Un chargement complet en cours posera un curseur neuf : on l'attend.
   if (fullLoadInFlight) await fullLoadInFlight;
+  if (generation !== scopeGeneration) return;
 
   const cursor = syncCursor;
   if (!cursor) {
@@ -1926,6 +1938,7 @@ async function runDelta(): Promise<void> {
     return;
   }
 
+  if (generation !== scopeGeneration) return;
   const payload = data as SyncPayload;
   const changed = applySyncPayload(payload, requestedAt);
   if (payload.now) syncCursor = payload.now;
@@ -2049,11 +2062,129 @@ async function writeLedgerLine(
   return { ok: true, txId: id, newBalance: (data as { newBalance?: number }).newBalance };
 }
 
+let attendanceOnly = false;
+let scopeGeneration = 0;
+let attendanceDay = new Date().toLocaleDateString("fr-CA");
+let scopeRead = 0;
+
+/** Stable paginated reads under the caller's RLS, with explicit date/ID filters. */
+async function scopedRows(key: TableKey, start?: string, end?: string, studentId?: string, ids?: string[]) {
+  if (ids && ids.length === 0) return [];
+  const generation = scopeGeneration;
+  const cfg = TABLES[key];
+  const rows: Record<string, unknown>[] = [];
+  let after: string | undefined;
+  for (;;) {
+    if (generation !== scopeGeneration) throw new Error("Session modifiée");
+    let query = createClient().from(cfg.table).select(key === "teachers" ? "id,first_name,last_name" : cfg.select).order("id");
+    if (start) {
+      const bounds = attendanceBounds(start, end);
+      query = query.gte("occurred_at", bounds.from).lt("occurred_at", bounds.to);
+    }
+    if (ids) query = query.in("id", ids);
+    if (studentId) query = query.eq(key === "students" ? "id" : "student_id", studentId);
+    if (after) query = query.gt("id", after);
+    const { data, error } = await query.limit(500);
+    if (error || !data) throw new Error("Lecture Présences indisponible — réessayez.");
+    rows.push(...(data as unknown as Record<string, unknown>[]));
+    if (data.length < 500) return rows.map(r => cfg.fromRow(r));
+    const last = data[data.length - 1] as unknown as { id?: string };
+    if (!last.id || last.id === after) throw new Error("Pagination indisponible");
+    after = last.id;
+  }
+}
+
+async function reloadAttendanceScope() {
+  const generation = scopeGeneration;
+  const request = ++scopeRead;
+  useData.setState({ attendanceStatus: "loading" });
+  try {
+    const patch: Record<string, unknown> = {};
+    // Sequential table work also bounds concurrency across 500-row pages.
+    for (const key of ATTENDANCE_TABLE_KEYS.filter(k => k !== "students")) {
+      patch[key] = await scopedRows(key);
+      if (generation !== scopeGeneration || request !== scopeRead) return;
+    }
+    const todayAttendance = await scopedRows("attendance", attendanceDay) as AttendanceRecord[];
+    patch.attendance = todayAttendance;
+    const weekday = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"][new Date(`${attendanceDay}T12:00:00`).getDay()];
+    const sessions = patch.sessions as ScheduleSession[];
+    const sessionIds = new Set(sessions.filter(s => s.days.includes(weekday as Day)).map(s => s.id));
+    const subscriptions = patch.subscriptions as Subscription[];
+    const subscriptionIds = subscriptions.filter(s => sessionIds.has(s.sessionId)).map(s => s.id);
+    const rosterIds = new Set(todayAttendance.map(a => a.studentId));
+    for (let batch = 0; batch < subscriptionIds.length; batch += 100) {
+      for (let offset = 0; ; offset += 500) {
+        const { data, error } = await createClient().from("student_subscriptions").select("student_id")
+          .in("subscription_id", subscriptionIds.slice(batch, batch + 100)).order("student_id").order("subscription_id").range(offset, offset + 499);
+        if (error || !data) throw new Error("Roster unavailable");
+        data.forEach(row => rosterIds.add(row.student_id));
+        if (data.length < 500) break;
+      }
+    }
+    const ids = [...rosterIds];
+    const students: unknown[] = [];
+    for (let batch = 0; batch < ids.length; batch += 100)
+      students.push(...await scopedRows("students", undefined, undefined, undefined, ids.slice(batch, batch + 100)));
+    patch.students = students;
+    const parentIds = [...new Set((students as Student[]).map(s => s.parentId).filter((id): id is string => !!id))];
+    const parents: unknown[] = [];
+    for (let batch = 0; batch < parentIds.length; batch += 100)
+      parents.push(...await scopedRows("parents", undefined, undefined, undefined, parentIds.slice(batch, batch + 100)));
+    patch.parents = parents;
+    if (generation !== scopeGeneration || request !== scopeRead) return;
+    const complete = Object.fromEntries(TABLE_KEYS.map(k => [k, false]));
+    for (const key of ATTENDANCE_TABLE_KEYS) complete[key] = key !== "students";
+    useData.setState({ ...patch, complete, loaded: false, attendanceStatus: "complete" });
+  } catch {
+    if (generation === scopeGeneration && request === scopeRead)
+      useData.setState({ attendanceStatus: "failed" });
+  }
+}
+
+/** A committed write invalidates older reads; never retry the financial RPC. */
+const studentReads = new Map<string, number>();
+async function confirmAttendanceStudent(studentId: string, day: string) {
+  const generation = scopeGeneration;
+  const request = ++scopeRead;
+  studentReads.set(studentId, request);
+  const [students, attendance] = await Promise.all([
+    scopedRows("students", undefined, undefined, studentId),
+    scopedRows("attendance", day, day, studentId),
+  ]);
+  if (generation !== scopeGeneration || request !== studentReads.get(studentId)) return;
+  const state = useData.getState();
+  const bounds = attendanceBounds(day);
+  useData.setState({
+    attendanceStatus: "complete",
+    students: applyRowDelta(state.students, students, new Set(), rowKeyOf("students")) as Student[],
+    attendance: [
+      ...state.attendance.filter(a => !(a.studentId === studentId && a.timestamp >= bounds.from && a.timestamp < bounds.to)),
+      ...attendance,
+    ],
+  });
+}
+
 let reconcileChain: Promise<unknown> = Promise.resolve();
 
 export const useData = create<DataStore>((set, get) => ({
   ...emptyDatabase(),
   loaded: false,
+  attendanceScope: false,
+  attendanceStatus: "idle",
+  loadAttendanceDay: async (day) => { if (day === attendanceDay && get().attendanceStatus === "complete") return; attendanceDay = day; if (attendanceOnly) await reloadAttendanceScope(); },
+  readAttendanceHistory: async (start, end) => {
+    const generation = scopeGeneration;
+    const rows = await scopedRows("attendance", start, end) as AttendanceRecord[];
+    const known = new Set(get().students.map(s => s.id));
+    const ids = [...new Set(rows.map(a => a.studentId))].filter(id => !known.has(id));
+    const students: Student[] = [];
+    for (let batch = 0; batch < ids.length; batch += 100)
+      students.push(...await scopedRows("students", undefined, undefined, undefined, ids.slice(batch, batch + 100)) as Student[]);
+    if (generation !== scopeGeneration) throw new Error("Session modifiée");
+    if (students.length) set(state => ({ students: applyRowDelta(state.students, students, new Set(), rowKeyOf("students")) }));
+    return rows;
+  },
   complete: {},
   syncing: false,
 
@@ -2078,6 +2209,8 @@ export const useData = create<DataStore>((set, get) => ({
   // Un seul chargement complet à la fois : un second appel attend le premier
   // au lieu d'en lancer un autre en parallèle.
   fetchAll: () => {
+    if (attendanceOnly) return reloadAttendanceScope();
+    const generation = scopeGeneration;
     if (fullLoadInFlight) return fullLoadInFlight;
     fullLoadInFlight = (async () => {
       set({ syncing: true });
@@ -2086,6 +2219,7 @@ export const useData = create<DataStore>((set, get) => ({
         // L'heure du serveur AVANT la lecture : ce qui changera pendant la
         // lecture sera repris par le prochain delta, jamais perdu.
         const cursor = await probeServerCursor();
+        if (generation !== scopeGeneration) return;
         const counts = readRowCounts();
         const before = get();
         // La ligne `school` n'est pas une table du chargement complet : sans
@@ -2111,6 +2245,7 @@ export const useData = create<DataStore>((set, get) => ({
           }),
         );
 
+        if (generation !== scopeGeneration) return;
         // Relu APRÈS la lecture : une écriture a pu passer pendant ce temps.
         const state = get();
         const patch: Record<string, unknown> = { loaded: true };
@@ -2152,6 +2287,7 @@ export const useData = create<DataStore>((set, get) => ({
   // attente démarre APRÈS la précédente, donc après l'écriture qui l'a
   // demandée — c'est ce qui garantit que l'appelant la voit.
   refresh: () => {
+    if (attendanceOnly) return reloadAttendanceScope();
     if (deltaInFlight) {
       if (!deltaQueued) {
         deltaQueued = deltaInFlight.then(() => {
@@ -2172,6 +2308,11 @@ export const useData = create<DataStore>((set, get) => ({
   },
 
   backgroundSync: async () => {
+    if (attendanceOnly) {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      await reloadAttendanceScope();
+      return;
+    }
     if (!ownerId || !get().loaded) return;
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     // Sans delta, pas de relecture de fond : ce serait toute la base toutes
@@ -2187,7 +2328,24 @@ export const useData = create<DataStore>((set, get) => ({
     await get().refresh();
   },
 
-  start: async (userId) => {
+  start: async (userId, scope) => {
+    const scoped = scope === "attendance";
+    if (ownerId !== userId || attendanceOnly !== scoped) {
+      scopeGeneration++;
+      scopeRead++;
+      // A route-scoped store is never a complete financial snapshot.
+      set({ ...emptyDatabase(), school: get().school, loaded: false,
+        complete: Object.fromEntries(TABLE_KEYS.map(k => [k, false])) });
+    }
+    if (scope !== "attendance" && attendanceOnly && fullLoadInFlight) await fullLoadInFlight;
+    attendanceOnly = scoped;
+    set({ attendanceScope: scoped });
+    if (scoped) {
+      ownerId = userId;
+      syncCursor = null;
+      await reloadAttendanceScope();
+      return;
+    }
     // Même compte, données déjà là (retour sur l'onglet, remontage) : un delta.
     if (ownerId === userId && get().loaded) {
       await get().refresh();
@@ -2196,9 +2354,10 @@ export const useData = create<DataStore>((set, get) => ({
     ownerId = userId;
     syncCursor = null;
 
+    const startGeneration = scopeGeneration;
     const snapshot = await readSnapshot<StoreSnapshot>(userId);
     // L'utilisateur a pu changer pendant la lecture de la copie.
-    if (ownerId !== userId) return;
+    if (ownerId !== userId || startGeneration !== scopeGeneration) return;
 
     const usable =
       snapshot &&
@@ -2230,6 +2389,10 @@ export const useData = create<DataStore>((set, get) => ({
   },
 
   clear: () => {
+    attendanceOnly = false;
+    scopeGeneration++;
+    scopeRead++;
+    set({ attendanceScope: false, attendanceStatus: "idle" });
     ownerId = null;
     syncCursor = null;
     pendingWrites.clear();
@@ -2250,6 +2413,7 @@ export const useData = create<DataStore>((set, get) => ({
   // balance_tx, teacher due) runs atomically in the scan_card RPC — the
   // schedule/money rules live in one place, server-side.
   scanCard: async (rfidOrStudentId, when) => {
+    const generation = scopeGeneration;
     const supabase = createClient();
     const args: { p_code: string; p_when?: string } = { p_code: rfidOrStudentId.trim() };
     if (when) args.p_when = when.toISOString();
@@ -2259,6 +2423,7 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
+    if (generation !== scopeGeneration) return { ok: false, messageKey: "scan.error" };
     // Refresh local state whenever the RPC wrote something (a deduction, a
     // presence, a teacher due).
     if (res.ok && res.messageKey !== "scan.alreadyPresent") {
@@ -2271,12 +2436,15 @@ export const useData = create<DataStore>((set, get) => ({
           students: state.students.map((s) => (s.id === res.studentId ? { ...s, balance: bal } : s)),
         }));
       }
-      void get().refresh();
+      if (attendanceOnly && res.studentId) {
+        void confirmAttendanceStudent(res.studentId, attendanceDay).catch(() => set({ attendanceStatus: "failed" }));
+      } else void get().refresh();
     }
     return res;
   },
 
   markAttendance: async (studentId, sessionId, status, opts) => {
+    const generation = scopeGeneration;
     const supabase = createClient();
     const { data, error } = await supabase.rpc("mark_attendance", {
       p_student_id: studentId,
@@ -2291,11 +2459,18 @@ export const useData = create<DataStore>((set, get) => ({
       return { ok: false, messageKey: "scan.error" };
     }
     const res = data as ScanResult;
+    if (generation !== scopeGeneration) return { ok: false, messageKey: "scan.error" };
     if (res.ok) {
-      await get().refresh();
+      if (attendanceOnly) {
+        scopeRead++;
+        if (res.newBalance !== undefined) set(state => ({ students: state.students.map(student =>
+          student.id === studentId ? { ...student, balance: res.newBalance! } : student) }));
+        try { await confirmAttendanceStudent(studentId, opts?.date ?? attendanceDay); }
+        catch { set({ attendanceStatus: "failed" }); }
+      } else await get().refresh();
       // Une présence saisie après coup peut tomber dans une semaine déjà
       // facturée comme absence : elle l'annule sur-le-champ.
-      if (status !== "absent") void get().reconcileAbsencePenalties({ studentId });
+      if (!attendanceOnly && status !== "absent") void get().reconcileAbsencePenalties({ studentId });
     }
     return res;
   },

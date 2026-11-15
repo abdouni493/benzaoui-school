@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { PageTransition } from "./PageTransition";
@@ -15,13 +15,14 @@ import { DataSyncAgent } from "@/components/providers/DataSyncAgent";
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const router = useRouter();
+  const pathname = usePathname();
   const user = useSession((s) => s.user);
   const hydrated = useSession((s) => s.hydrated);
   const isRTL = useSettings((s) => s.language) === "ar";
 
   useEffect(() => {
-    if (hydrated && !user) router.replace("/login");
-  }, [hydrated, user, router]);
+    if (hydrated && !user) router.replace(pathname === "/attendance" ? "/login?next=attendance" : "/login");
+  }, [hydrated, user, router, pathname]);
 
   // Don't render the shell (and thus every page below it) until the
   // Supabase session has actually resolved. Rendering early with a
