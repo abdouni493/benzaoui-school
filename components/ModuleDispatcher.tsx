@@ -169,45 +169,29 @@ const PRELOAD_BY_ROLE: Record<string, (keyof typeof loaders)[]> = {
   ],
 };
 
-let preloaded = false;
-
-/** Précharge, un par un et seulement quand le navigateur est libre, les
- *  écrans que ce compte peut ouvrir. */
+/** Warm only the intended destination. No idle downloads of unrelated screens. */
 function usePreloadScreens(role: string) {
   useEffect(() => {
-    if (preloaded) return;
-    preloaded = true;
-    const queue = [...(PRELOAD_BY_ROLE[role] ?? [])];
-    const w = window as Window & {
-      requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number;
-      cancelIdleCallback?: (id: number) => void;
+    const preload = (event: Event) => {
+      if (!(event.target instanceof Element)) return;
+      const link = event.target.closest("a[href]");
+      if (!(link instanceof HTMLAnchorElement) || link.origin !== location.origin) return;
+      const connection = (navigator as Navigator & {
+        connection?: { saveData?: boolean; effectiveType?: string };
+      }).connection;
+      if (connection?.saveData || /(^|-)2g$/.test(connection?.effectiveType ?? "")) return;
+      const slug = link.pathname.split("/").filter(Boolean)[0];
+      const key = slug === "workers" ? "administration" : slug;
+      const allowed = PRELOAD_BY_ROLE[role] ?? [];
+      if (!allowed.includes(key as keyof typeof loaders)) return;
+      // Imports are cached by the runtime; failed imports remain retryable.
+      void loaders[key as keyof typeof loaders]().catch(() => undefined);
     };
-    let cancelled = false;
-    let handle: number | undefined;
-    const next = () => {
-      if (cancelled) return;
-      const key = queue.shift();
-      if (!key) return;
-      void loaders[key]()
-        .catch(() => undefined)
-        .finally(schedule);
-    };
-    const schedule = () => {
-      if (cancelled || queue.length === 0) return;
-      handle = w.requestIdleCallback
-        ? w.requestIdleCallback(next, { timeout: 4000 })
-        : window.setTimeout(next, 300);
-    };
-    // Laisse d'abord l'écran courant s'afficher et les données arriver.
-    const start = window.setTimeout(schedule, 2500);
+    document.addEventListener("pointerover", preload);
+    document.addEventListener("focusin", preload);
     return () => {
-      cancelled = true;
-      window.clearTimeout(start);
-      if (handle !== undefined) {
-        if (w.cancelIdleCallback) w.cancelIdleCallback(handle);
-        else window.clearTimeout(handle);
-      }
-      preloaded = false;
+      document.removeEventListener("pointerover", preload);
+      document.removeEventListener("focusin", preload);
     };
   }, [role]);
 }
@@ -219,7 +203,7 @@ export function ModuleDispatcher({ slug }: { slug: string[] }) {
   const user = useSession((s) => s.user);
   const pageSlug = slug[0];
 
-  const role = user?.role || "admin";
+  const role = user?.role || "";
   usePreloadScreens(role);
 
   // 1. Student Portal Routing

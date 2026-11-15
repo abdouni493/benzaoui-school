@@ -52,6 +52,7 @@ import {
 } from "@/lib/helpers";
 import { canAttendSession } from "@/lib/seanceAudience";
 import { sessionRoster } from "@/lib/sessionRoster";
+import { filterAttendanceHistory, historySearchIndex } from "@/lib/attendanceHistory";
 import { printHtmlDocument } from "@/lib/print";
 import { FreeBillingBanner } from "@/components/schedule/FreeBillingBanner";
 
@@ -653,36 +654,24 @@ export function AttendancePage() {
     return t ? `${t.firstName} ${t.lastName}` : "-";
   };
 
-  // Get filtered attendance records for History Tab
-  const getFilteredHistory = () => {
-    return attendance
-      .filter((a) => {
-        const dateStr = a.timestamp.substring(0, 10);
-        const matchesPeriod = dateStr >= histStartDate && dateStr <= histEndDate;
-        if (!matchesPeriod) return false;
-
-        const student = students.find((st) => st.id === a.studentId);
-        const name = student ? `${student.firstName} ${student.lastName}`.toLowerCase() : "";
-        
-        const ses = sessions.find((s) => s.id === a.sessionId);
-        const modName = ses ? (modules.find((m) => m.id === ses.moduleId)?.name ?? "").toLowerCase() : "";
-        const clName = ses ? (classes.find((c) => c.id === ses.classId)?.name ?? "").toLowerCase() : "";
-
-        const matchesSearch =
-          name.includes(histSearch.toLowerCase()) ||
-          modName.includes(histSearch.toLowerCase()) ||
-          clName.includes(histSearch.toLowerCase());
-        
-        if (!matchesSearch) return false;
-
-        if (histStatus !== "all" && a.status !== histStatus) return false;
-
-        return true;
+  // Hidden history must not compete with the scanner or its 30-second clock.
+  const historyIndex = useMemo(
+    () => activeTab === "history" ? historySearchIndex(students, sessions, modules, classes) : null,
+    [activeTab, students, sessions, modules, classes],
+  );
+  const filteredHistory = useMemo(() => historyIndex
+    ? filterAttendanceHistory(attendance, historyIndex, {
+        start: histStartDate, end: histEndDate, search: histSearch, status: histStatus,
       })
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  };
+    : [], [attendance, historyIndex, histStartDate, histEndDate, histSearch, histStatus]);
 
-  const filteredHistory = getFilteredHistory();
+  // Pagination affects DOM work only; summaries and printing retain every match.
+  const historyKey = JSON.stringify([histStartDate, histEndDate, histSearch, histStatus]);
+  const [historyPosition, setHistoryPosition] = useState({ key: "", page: 0 });
+  const historyPageCount = Math.max(1, Math.ceil(filteredHistory.length / 100));
+  const historyPage = historyPosition.key === historyKey
+    ? Math.min(historyPosition.page, historyPageCount - 1) : 0;
+  const visibleHistory = filteredHistory.slice(historyPage * 100, (historyPage + 1) * 100);
 
   // Print history report helper
   const handlePrintHistory = () => {
@@ -1693,7 +1682,7 @@ export function AttendancePage() {
                         </td>
                       </tr>
                     ) : (
-                      filteredHistory.map((h) => {
+                      visibleHistory.map((h) => {
                         const stu = students.find((s) => s.id === h.studentId);
                         const ses = sessions.find((s) => s.id === h.sessionId);
                         const cl = ses ? classes.find((c) => c.id === ses.classId) : undefined;
@@ -1757,6 +1746,17 @@ export function AttendancePage() {
                     )}
                   </tbody>
                 </table>
+              </div>
+              <div className="flex items-center justify-between gap-3 p-4">
+                <Button variant="secondary" aria-label="Page précédente" disabled={historyPage === 0}
+                  onClick={() => setHistoryPosition({ key: historyKey, page: historyPage - 1 })}>
+                  <ChevronLeft className="h-4 w-4" />
+                </Button>
+                <span className="text-xs text-muted">{historyPage + 1} / {historyPageCount} · {filteredHistory.length}</span>
+                <Button variant="secondary" aria-label="Page suivante" disabled={historyPage + 1 >= historyPageCount}
+                  onClick={() => setHistoryPosition({ key: historyKey, page: historyPage + 1 })}>
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
               </div>
             </CardBody>
           </Card>
