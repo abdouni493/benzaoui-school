@@ -20,6 +20,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const loaded = useData(s => s.loaded);
   const scoped = useData(s => s.attendanceScope);
   const status = useData(s => s.attendanceStatus);
+  const upgraded = useData(s => s.attendanceUpgraded);
   const clearData = useData((s) => s.clear);
 
   useEffect(() => {
@@ -45,7 +46,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const expectedScope = !!user && attendanceRoute(pathname, user.role);
   if (user && hydrated && pathname !== "/login" &&
-      (expectedScope ? (!scoped || (status !== "complete" && !useData.getState().sessions.length)) : (scoped || !loaded))) {
+      (expectedScope
+        ? (scoped ? (status !== "complete" && !useData.getState().sessions.length) : !(loaded || upgraded)) : (scoped || !loaded))) {
     return <div role="status" className="p-6 text-center">
       {expectedScope && status === "failed" ? <>
         Lecture des présences indisponible. Vérifiez la connexion.

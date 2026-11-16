@@ -1077,6 +1077,12 @@ interface DataActions {
   start: (userId: string, scope?: "attendance") => Promise<void>;
   attendanceScope: boolean;
   attendanceStatus: "idle" | "loading" | "complete" | "failed";
+  /** La feuille de présence est passée au chargement complet (carte d'un élève
+   *  ouverte sur place) : l'écran reste affiché pendant la lecture. */
+  attendanceUpgraded: boolean;
+  /** Quitte le périmètre « présence du jour » pour toute la base, sans quitter
+   *  l'écran : la carte de l'élève a besoin de ses paiements et de son registre. */
+  upgradeAttendanceToFull: () => Promise<void>;
   loadAttendanceDay: (day: string) => Promise<void>;
   readAttendanceHistory: (start: string, end: string) => Promise<AttendanceRecord[]>;
   clear: () => void;
@@ -2172,6 +2178,21 @@ export const useData = create<DataStore>((set, get) => ({
   loaded: false,
   attendanceScope: false,
   attendanceStatus: "idle",
+  attendanceUpgraded: false,
+  upgradeAttendanceToFull: async () => {
+    if (!ownerId) return;
+    if (attendanceOnly) {
+      // Les lectures du périmètre encore en vol sont abandonnées ; les lignes
+      // déjà affichées restent jusqu'à ce que la lecture complète les remplace.
+      scopeGeneration++;
+      scopeRead++;
+      attendanceOnly = false;
+      syncCursor = null;
+      set({ attendanceScope: false, attendanceStatus: "idle", attendanceUpgraded: true, loaded: false,
+        complete: Object.fromEntries(TABLE_KEYS.map(k => [k, false])) });
+    } else if (get().loaded) return;
+    await get().fetchAll();
+  },
   loadAttendanceDay: async (day) => { if (day === attendanceDay && get().attendanceStatus === "complete") return; attendanceDay = day; if (attendanceOnly) await reloadAttendanceScope(); },
   readAttendanceHistory: async (start, end) => {
     const generation = scopeGeneration;
@@ -2339,7 +2360,7 @@ export const useData = create<DataStore>((set, get) => ({
     }
     if (scope !== "attendance" && attendanceOnly && fullLoadInFlight) await fullLoadInFlight;
     attendanceOnly = scoped;
-    set({ attendanceScope: scoped });
+    set({ attendanceScope: scoped, attendanceUpgraded: false });
     if (scoped) {
       ownerId = userId;
       syncCursor = null;
@@ -2392,7 +2413,7 @@ export const useData = create<DataStore>((set, get) => ({
     attendanceOnly = false;
     scopeGeneration++;
     scopeRead++;
-    set({ attendanceScope: false, attendanceStatus: "idle" });
+    set({ attendanceScope: false, attendanceStatus: "idle", attendanceUpgraded: false });
     ownerId = null;
     syncCursor = null;
     pendingWrites.clear();

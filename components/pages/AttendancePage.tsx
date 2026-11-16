@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useState, useEffect, useMemo } from "react";
 import { useData, uid } from "@/lib/store/data";
 import { useShallow } from "zustand/react/shallow";
@@ -30,6 +29,7 @@ import {
   Settings2,
   User,
   MapPin,
+  Loader2,
 } from "lucide-react";
 import type {
   AttendanceRecord,
@@ -657,6 +657,14 @@ export function AttendancePage() {
 
   const scopedAttendance = useData(s => s.attendanceScope);
   const scopeStatus = useData(s => s.attendanceStatus);
+  const fullLoaded = useData(s => s.loaded);
+  const fullSyncing = useData(s => s.syncing);
+  const studentKnown = useData(s => !!cardStudentId && s.students.some(st => st.id === cardStudentId));
+  // La carte de l'élève a besoin de toute la base (paiements, registre,
+  // inscriptions) : on la charge à la demande, sans quitter la feuille.
+  useEffect(() => {
+    if (cardStudentId && (scopedAttendance || !fullLoaded)) useData.getState().upgradeAttendanceToFull().catch(err => console.warn("[présence] fiche non chargée :", err));
+  }, [cardStudentId, scopedAttendance, fullLoaded]);
   const [historyRows, setHistoryRows] = useState<AttendanceRecord[]>([]);
   const [historyRetry, setHistoryRetry] = useState(0);
   const [historyPeriod, setHistoryPeriod] = useState("");
@@ -1996,9 +2004,23 @@ export function AttendancePage() {
         title="Carte de l'élève"
         subtitle="Toutes les actions de l'écran Étudiants, sans quitter la feuille de présence."
       >
-        {cardStudentId && (scopedAttendance
-          ? <Link href="/students">Ouvrir Étudiants pour consulter la fiche et le registre complet.</Link>
-          : <StudentsPage key={cardStudentId} focusStudentId={cardStudentId} />)}
+        {cardStudentId && (!scopedAttendance && fullLoaded && studentKnown
+          ? <StudentsPage key={cardStudentId} focusStudentId={cardStudentId} />
+          : (
+            <div role="status" className="flex flex-col items-center justify-center gap-3 py-12 text-sm text-slate-500">
+              {!scopedAttendance && !fullSyncing ? (
+                <>
+                  <span>{fullLoaded ? "Élève introuvable ou fiche indisponible." : "Lecture de la fiche impossible. Vérifiez la connexion."}</span>
+                  <Button variant="outline" onClick={() => void (fullLoaded ? useData.getState().fetchAll() : useData.getState().upgradeAttendanceToFull()).catch(() => {})}>Réessayer</Button>
+                </>
+              ) : (
+                <>
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                  <span>Chargement de la fiche complète de l&apos;élève…</span>
+                </>
+              )}
+            </div>
+          ))}
       </Modal>
     </div>
   );

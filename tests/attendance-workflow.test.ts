@@ -149,4 +149,21 @@ describe("reception Attendance workflow without global history",()=>{
     expect(attendanceRoute("/reports","admin")).toBe(false);
     expect(attendanceRoute("/attendance","parent")).toBe(false);
   });
+  it("loads the complete store in place when a student card is opened from Attendance",async()=>{
+    const store=await desk();await store.getState().start("desk","attendance");
+    expect(store.getState().attendanceScope).toBe(true);
+    expect(store.getState().balanceTx).toHaveLength(0);
+    await store.getState().upgradeAttendanceToFull();
+    const state=store.getState();
+    expect(state.attendanceScope).toBe(false);
+    expect(state.attendanceUpgraded).toBe(true);
+    expect(state.loaded).toBe(true);
+    expect(state.students.map(s=>s.id)).toContain("student");
+    expect(state.balanceTx).toHaveLength(1500);
+    expect(state.complete.balanceTx).toBe(true);
+    // Returning to Attendance later starts a fresh scoped session again.
+    await store.getState().start("desk","attendance");
+    expect(store.getState().attendanceScope).toBe(true);
+    expect(store.getState().attendanceUpgraded).toBe(false);
+  });
 });
