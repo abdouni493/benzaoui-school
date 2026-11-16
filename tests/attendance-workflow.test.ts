@@ -149,21 +149,32 @@ describe("reception Attendance workflow without global history",()=>{
     expect(attendanceRoute("/reports","admin")).toBe(false);
     expect(attendanceRoute("/attendance","parent")).toBe(false);
   });
-  it("loads the complete store in place when a student card is opened from Attendance",async()=>{
+  it("opens a student card from Attendance with only that student's rows",async()=>{
+    fixture.db.balance_tx.push({id:"txother",student_id:"other",amount:5});
+    fixture.db.cash_transactions.push({id:"cashx"});
     const store=await desk();await store.getState().start("desk","attendance");
-    expect(store.getState().attendanceScope).toBe(true);
     expect(store.getState().balanceTx).toHaveLength(0);
-    await store.getState().upgradeAttendanceToFull();
+    fixture.requests=[];
+    await store.getState().focusAttendanceStudent("student");
     const state=store.getState();
-    expect(state.attendanceScope).toBe(false);
-    expect(state.attendanceUpgraded).toBe(true);
-    expect(state.loaded).toBe(true);
-    expect(state.students.map(s=>s.id)).toContain("student");
+    expect(state.attendanceScope).toBe(true);
+    expect(state.attendanceFocusStatus).toBe("complete");
     expect(state.balanceTx).toHaveLength(1500);
+    expect(state.balanceTx.every(t=>t.studentId==="student")).toBe(true);
+    expect(state.attendance.filter(a=>a.studentId==="student")).toHaveLength(1500);
     expect(state.complete.balanceTx).toBe(true);
-    // Returning to Attendance later starts a fresh scoped session again.
-    await store.getState().start("desk","attendance");
-    expect(store.getState().attendanceScope).toBe(true);
-    expect(store.getState().attendanceUpgraded).toBe(false);
+    const tables=new Set(fixture.requests.map(r=>r.table));
+    expect(tables.has("cash_transactions")).toBe(false);
+    expect(tables.has("sessions")).toBe(false);
+    // A write from the card re-reads only that student, not the whole day.
+    fixture.requests=[];
+    await store.getState().refresh();
+    expect(fixture.requests.some(r=>r.table==="sessions")).toBe(false);
+    expect(store.getState().balanceTx).toHaveLength(1500);
+    // Background polling keeps the open card filled.
+    await store.getState().backgroundSync();
+    expect(store.getState().balanceTx).toHaveLength(1500);
+    await store.getState().focusAttendanceStudent(null);
+    expect(store.getState().attendanceFocusId).toBeNull();
   });
 });

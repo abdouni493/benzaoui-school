@@ -1077,12 +1077,11 @@ interface DataActions {
   start: (userId: string, scope?: "attendance") => Promise<void>;
   attendanceScope: boolean;
   attendanceStatus: "idle" | "loading" | "complete" | "failed";
-  /** La feuille de présence est passée au chargement complet (carte d'un élève
-   *  ouverte sur place) : l'écran reste affiché pendant la lecture. */
-  attendanceUpgraded: boolean;
-  /** Quitte le périmètre « présence du jour » pour toute la base, sans quitter
-   *  l'écran : la carte de l'élève a besoin de ses paiements et de son registre. */
-  upgradeAttendanceToFull: () => Promise<void>;
+  /** Carte d'un élève ouverte depuis la feuille de présence : seules SES
+   *  lignes (registre, présences, pénalités, identifiants) sont lues. */
+  attendanceFocusId: string | null;
+  attendanceFocusStatus: "idle" | "loading" | "complete" | "failed";
+  focusAttendanceStudent: (studentId: string | null, quiet?: boolean) => Promise<void>;
   loadAttendanceDay: (day: string) => Promise<void>;
   readAttendanceHistory: (start: string, end: string) => Promise<AttendanceRecord[]>;
   clear: () => void;
@@ -2100,6 +2099,66 @@ async function scopedRows(key: TableKey, start?: string, end?: string, studentId
   }
 }
 
+let focusStudent: string | null = null;
+
+type StudentFocus = {
+  students: Student[]; balanceTx: BalanceTransaction[]; attendance: AttendanceRecord[];
+  absencePenalties: AbsencePenalty[]; studentCredentials: StudentCredential[];
+  filieres: Filiere[]; coursework: Coursework[]; parents: Parent[];
+};
+
+/** Tout ce que la carte d'UN élève affiche, en lectures filtrées sur lui —
+ *  jamais l'historique financier de toute l'école. */
+async function readStudentFocus(studentId: string): Promise<StudentFocus> {
+  const [students, balanceTx, attendance, absencePenalties, filieres, coursework, credentials] = await Promise.all([
+    scopedRows("students", undefined, undefined, studentId),
+    scopedRows("balanceTx", undefined, undefined, studentId),
+    scopedRows("attendance", undefined, undefined, studentId),
+    scopedRows("absencePenalties", undefined, undefined, studentId),
+    scopedRows("filieres"),
+    scopedRows("coursework"),
+    createClient().from("student_credentials").select("*").eq("student_id", studentId),
+  ]);
+  if (credentials.error) throw new Error("Identifiants indisponibles");
+  const parentId = (students as Student[])[0]?.parentId;
+  const parents = parentId ? await scopedRows("parents", undefined, undefined, undefined, [parentId]) : [];
+  return {
+    students: students as Student[],
+    balanceTx: balanceTx as BalanceTransaction[],
+    attendance: attendance as AttendanceRecord[],
+    absencePenalties: absencePenalties as AbsencePenalty[],
+    studentCredentials: (credentials.data ?? []).map(r => TABLES.studentCredentials.fromRow(r)) as StudentCredential[],
+    filieres: filieres as Filiere[],
+    coursework: coursework as Coursework[],
+    parents: parents as Parent[],
+  };
+}
+
+function withoutStudent<T extends { studentId?: string | null }>(rows: T[], studentId: string) {
+  return rows.filter(r => r.studentId !== studentId);
+}
+
+function byIdUnion<T extends { id: string }>(a: T[], b: T[]) {
+  const ids = new Set(b.map(r => r.id));
+  return [...a.filter(r => !ids.has(r.id)), ...b];
+}
+
+/** Fusionne les lignes de l'élève ouvert dans le périmètre du jour. */
+function mergeStudentFocus(state: Pick<Database, "students" | "balanceTx" | "attendance" | "absencePenalties" | "studentCredentials" | "parents"> & { complete: Partial<Record<TableKey, boolean>> }, studentId: string, focus: StudentFocus) {
+  return {
+    students: applyRowDelta(state.students, focus.students, new Set(), rowKeyOf("students")) as Student[],
+    balanceTx: [...withoutStudent(state.balanceTx, studentId), ...focus.balanceTx],
+    attendance: byIdUnion(withoutStudent(state.attendance, studentId), focus.attendance),
+    absencePenalties: [...withoutStudent(state.absencePenalties, studentId), ...focus.absencePenalties],
+    studentCredentials: [...withoutStudent(state.studentCredentials, studentId), ...focus.studentCredentials],
+    parents: byIdUnion(state.parents, focus.parents),
+    filieres: focus.filieres,
+    coursework: focus.coursework,
+    // Complets POUR CET élève : la carte n'affiche que lui.
+    complete: { ...state.complete, balanceTx: true, absencePenalties: true },
+  };
+}
+
 async function reloadAttendanceScope() {
   const generation = scopeGeneration;
   const request = ++scopeRead;
@@ -2128,7 +2187,8 @@ async function reloadAttendanceScope() {
         if (data.length < 500) break;
       }
     }
-    const ids = [...rosterIds];
+    const focusId = focusStudent;
+    const ids = [...rosterIds].filter(id => id !== focusId);
     const students: unknown[] = [];
     for (let batch = 0; batch < ids.length; batch += 100)
       students.push(...await scopedRows("students", undefined, undefined, undefined, ids.slice(batch, batch + 100)));
@@ -2138,9 +2198,18 @@ async function reloadAttendanceScope() {
     for (let batch = 0; batch < parentIds.length; batch += 100)
       parents.push(...await scopedRows("parents", undefined, undefined, undefined, parentIds.slice(batch, batch + 100)));
     patch.parents = parents;
+    // La carte ouverte reste pleine : ses lignes sont relues avec le jour,
+    // après chaque écriture comme à chaque relecture de fond.
+    const focus = focusId ? await readStudentFocus(focusId) : null;
     if (generation !== scopeGeneration || request !== scopeRead) return;
-    const complete = Object.fromEntries(TABLE_KEYS.map(k => [k, false]));
+    const complete: Partial<Record<TableKey, boolean>> = Object.fromEntries(TABLE_KEYS.map(k => [k, false]));
     for (const key of ATTENDANCE_TABLE_KEYS) complete[key] = key !== "students";
+    if (focus && focusId && focusId === focusStudent) {
+      const base = { students: students as Student[], attendance: todayAttendance, balanceTx: [], absencePenalties: [],
+        studentCredentials: [], parents: parents as Parent[], complete };
+      useData.setState({ ...patch, ...mergeStudentFocus(base, focusId, focus), loaded: false, attendanceStatus: "complete", attendanceFocusStatus: "complete" });
+      return;
+    }
     useData.setState({ ...patch, complete, loaded: false, attendanceStatus: "complete" });
   } catch {
     if (generation === scopeGeneration && request === scopeRead)
@@ -2178,20 +2247,23 @@ export const useData = create<DataStore>((set, get) => ({
   loaded: false,
   attendanceScope: false,
   attendanceStatus: "idle",
-  attendanceUpgraded: false,
-  upgradeAttendanceToFull: async () => {
-    if (!ownerId) return;
-    if (attendanceOnly) {
-      // Les lectures du périmètre encore en vol sont abandonnées ; les lignes
-      // déjà affichées restent jusqu'à ce que la lecture complète les remplace.
-      scopeGeneration++;
-      scopeRead++;
-      attendanceOnly = false;
-      syncCursor = null;
-      set({ attendanceScope: false, attendanceStatus: "idle", attendanceUpgraded: true, loaded: false,
-        complete: Object.fromEntries(TABLE_KEYS.map(k => [k, false])) });
-    } else if (get().loaded) return;
-    await get().fetchAll();
+  attendanceFocusId: null,
+  attendanceFocusStatus: "idle",
+  focusAttendanceStudent: async (studentId, quiet) => {
+    focusStudent = studentId;
+    if (!studentId) { set({ attendanceFocusId: null, attendanceFocusStatus: "idle" }); return; }
+    // Relecture après écriture : la carte reste affichée pendant la lecture.
+    if (!quiet) set({ attendanceFocusId: studentId, attendanceFocusStatus: "loading" });
+    // Hors périmètre (store complet), tout est déjà là.
+    if (!attendanceOnly) { set({ attendanceFocusStatus: "complete" }); return; }
+    const generation = scopeGeneration;
+    try {
+      const focus = await readStudentFocus(studentId);
+      if (generation !== scopeGeneration || focusStudent !== studentId) return;
+      set(state => ({ ...mergeStudentFocus(state, studentId, focus), attendanceFocusStatus: "complete" }));
+    } catch {
+      if (!quiet && generation === scopeGeneration && focusStudent === studentId) set({ attendanceFocusStatus: "failed" });
+    }
   },
   loadAttendanceDay: async (day) => { if (day === attendanceDay && get().attendanceStatus === "complete") return; attendanceDay = day; if (attendanceOnly) await reloadAttendanceScope(); },
   readAttendanceHistory: async (start, end) => {
@@ -2308,6 +2380,9 @@ export const useData = create<DataStore>((set, get) => ({
   // attente démarre APRÈS la précédente, donc après l'écriture qui l'a
   // demandée — c'est ce qui garantit que l'appelant la voit.
   refresh: () => {
+    // Une écriture depuis la carte ouverte ne touche que cet élève : on ne
+    // relit que ses lignes (élève, registre, présences), pas toute la journée.
+    if (attendanceOnly && focusStudent) return get().focusAttendanceStudent(focusStudent, true);
     if (attendanceOnly) return reloadAttendanceScope();
     if (deltaInFlight) {
       if (!deltaQueued) {
@@ -2360,7 +2435,8 @@ export const useData = create<DataStore>((set, get) => ({
     }
     if (scope !== "attendance" && attendanceOnly && fullLoadInFlight) await fullLoadInFlight;
     attendanceOnly = scoped;
-    set({ attendanceScope: scoped, attendanceUpgraded: false });
+    focusStudent = null;
+    set({ attendanceScope: scoped, attendanceFocusId: null, attendanceFocusStatus: "idle" });
     if (scoped) {
       ownerId = userId;
       syncCursor = null;
@@ -2413,7 +2489,8 @@ export const useData = create<DataStore>((set, get) => ({
     attendanceOnly = false;
     scopeGeneration++;
     scopeRead++;
-    set({ attendanceScope: false, attendanceStatus: "idle", attendanceUpgraded: false });
+    focusStudent = null;
+    set({ attendanceScope: false, attendanceStatus: "idle", attendanceFocusId: null, attendanceFocusStatus: "idle" });
     ownerId = null;
     syncCursor = null;
     pendingWrites.clear();

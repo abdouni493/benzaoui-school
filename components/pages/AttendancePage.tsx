@@ -657,14 +657,15 @@ export function AttendancePage() {
 
   const scopedAttendance = useData(s => s.attendanceScope);
   const scopeStatus = useData(s => s.attendanceStatus);
-  const fullLoaded = useData(s => s.loaded);
-  const fullSyncing = useData(s => s.syncing);
+  const focusStatus = useData(s => s.attendanceFocusId === cardStudentId ? s.attendanceFocusStatus : "loading");
   const studentKnown = useData(s => !!cardStudentId && s.students.some(st => st.id === cardStudentId));
-  // La carte de l'élève a besoin de toute la base (paiements, registre,
-  // inscriptions) : on la charge à la demande, sans quitter la feuille.
+  // La carte de l'élève : seules SES lignes (registre, présences, pénalités)
+  // sont lues, en parallèle — jamais toute la base.
   useEffect(() => {
-    if (cardStudentId && (scopedAttendance || !fullLoaded)) useData.getState().upgradeAttendanceToFull().catch(err => console.warn("[présence] fiche non chargée :", err));
-  }, [cardStudentId, scopedAttendance, fullLoaded]);
+    const focus = useData.getState().focusAttendanceStudent;
+    void focus(cardStudentId);
+    return () => { void focus(null); };
+  }, [cardStudentId]);
   const [historyRows, setHistoryRows] = useState<AttendanceRecord[]>([]);
   const [historyRetry, setHistoryRetry] = useState(0);
   const [historyPeriod, setHistoryPeriod] = useState("");
@@ -2004,19 +2005,19 @@ export function AttendancePage() {
         title="Carte de l'élève"
         subtitle="Toutes les actions de l'écran Étudiants, sans quitter la feuille de présence."
       >
-        {cardStudentId && (!scopedAttendance && fullLoaded && studentKnown
+        {cardStudentId && (focusStatus === "complete" && studentKnown
           ? <StudentsPage key={cardStudentId} focusStudentId={cardStudentId} />
           : (
             <div role="status" className="flex flex-col items-center justify-center gap-3 py-12 text-sm text-slate-500">
-              {!scopedAttendance && !fullSyncing ? (
+              {focusStatus === "failed" || (focusStatus === "complete" && !studentKnown) ? (
                 <>
-                  <span>{fullLoaded ? "Élève introuvable ou fiche indisponible." : "Lecture de la fiche impossible. Vérifiez la connexion."}</span>
-                  <Button variant="outline" onClick={() => void (fullLoaded ? useData.getState().fetchAll() : useData.getState().upgradeAttendanceToFull()).catch(() => {})}>Réessayer</Button>
+                  <span>{focusStatus === "failed" ? "Lecture de la fiche impossible. Vérifiez la connexion." : "Élève introuvable."}</span>
+                  <Button variant="outline" onClick={() => void useData.getState().focusAttendanceStudent(cardStudentId)}>Réessayer</Button>
                 </>
               ) : (
                 <>
                   <Loader2 className="h-6 w-6 animate-spin" />
-                  <span>Chargement de la fiche complète de l&apos;élève…</span>
+                  <span>Chargement de la fiche de l&apos;élève…</span>
                 </>
               )}
             </div>
